@@ -1943,7 +1943,9 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
     
     init_multitasking(); kprintf("[INFO] Multitasking OK\n");
 
-    __asm__ volatile ("sti");
+    /* Request IP from VirtualBox/QEMU DHCP Server */
+    extern void net_dhcp_discover(void);
+    net_dhcp_discover();
 
     kprintf("[INFO] Booting finished without errors!\n");
     kprintf("========================================\n");

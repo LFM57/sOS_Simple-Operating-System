@@ -81,4 +81,34 @@ void net_bind_socket(int sock_idx, uint16_t port);
 void net_send_udp(int sock_idx, uint8_t* dest_ip, uint16_t dest_port, uint8_t* payload, uint16_t len);
 int net_recv_udp(int sock_idx, uint8_t* buf, uint32_t max_len);
 
+/* Endianness macros for 32-bit integers */
+#define htonl(x) (uint32_t)( (((uint32_t)(x) & 0xFF) << 24) | (((uint32_t)(x) & 0xFF00) << 8) | (((uint32_t)(x) & 0xFF0000) >> 8) | (((uint32_t)(x) & 0xFF000000) >> 24) )
+#define ntohl(x) htonl(x)
+
+/* DHCP Packet Structure */
+typedef struct {
+    uint8_t op;         /* Message op code / message type. 1 = BOOTREQUEST, 2 = BOOTREPLY */
+    uint8_t htype;      /* Hardware address type */
+    uint8_t hlen;       /* Hardware address length */
+    uint8_t hops;
+    uint32_t xid;       /* Transaction ID */
+    uint16_t secs;
+    uint16_t flags;
+    uint8_t ciaddr[4];  /* Client IP address */
+    uint8_t yiaddr[4];  /* 'Your' (client) IP address */
+    uint8_t siaddr[4];  /* Server IP address */
+    uint8_t giaddr[4];  /* Gateway IP address */
+    uint8_t chaddr[16]; /* Client hardware address (MAC) */
+    uint8_t sname[64];
+    uint8_t file[128];
+    uint32_t magic;     /* Magic cookie */
+    uint8_t options[64];/* Optional parameters */
+} __attribute__((packed)) dhcp_t;
+
+extern uint8_t sOS_router[4];
+extern uint8_t sOS_subnet[4];
+extern uint8_t sOS_dns[4];
+
+void net_dhcp_discover(void);
+
 #endif
