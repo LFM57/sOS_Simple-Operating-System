@@ -120,6 +120,15 @@ irq1:
     popa
     iret
 
+/* IRQ for the Network Interface Card (E1000) */
+.global irq_nic
+.type irq_nic, @function
+irq_nic:
+    pusha
+    call e1000_handler
+    popa
+    iret
+
 /* IRQ4 - COM1 Serial Port (For Shell via SSH) */
 /* WARNING: SHELL VIA SSH IS DEPRECATED AND WILL BE REMOVED IN FURTHER VERSIONS */
 .global irq4
