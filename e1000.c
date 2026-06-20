@@ -94,9 +94,6 @@ void e1000_handler(void) {
     /* Loop through descriptors to see if any are marked DONE (0x01) */
     while ((rx_descs[rx_curr].status & 0x01)) { 
         uint16_t len = rx_descs[rx_curr].length;
-        
-        /* Hardware diagnostic: Ensure packets are hitting the OS */
-        kprintf("\n[E1000] Frame Rx: %d bytes\n", len);
 
         /* Call our Network Stack */
         uint8_t* packet_data = (uint8_t*)(uint32_t)rx_descs[rx_curr].addr;

@@ -125,25 +125,17 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
     
     /* Read bytes 12 and 13 directly to get the true EtherType */
     uint16_t raw_type = (packet[12] << 8) | packet[13];
-    kprintf("[NET] Raw EtherType: 0x%x\n", raw_type);
 
     eth_hdr_t* eth = (eth_hdr_t*)packet;
 
     /* Handle ARP (Address Resolution Protocol) */
     if (raw_type == 0x0806) {
         arp_hdr_t* arp = (arp_hdr_t*)(packet + sizeof(eth_hdr_t));
-        
-        kprintf("[DEBUG] ARP Seen! Opcode: %d | Who is %d.%d.%d.%d? Tell %d.%d.%d.%d\n", 
-                ntohs(arp->opcode),
-                arp->target_ip[0], arp->target_ip[1], arp->target_ip[2], arp->target_ip[3],
-                arp->sender_ip[0], arp->sender_ip[1], arp->sender_ip[2], arp->sender_ip[3]);
 
         /* If it's an ARP Request (1) asking for our IP */
         if (ntohs(arp->opcode) == 1 && 
             arp->target_ip[0] == sOS_ip[0] && arp->target_ip[1] == sOS_ip[1] &&
             arp->target_ip[2] == sOS_ip[2] && arp->target_ip[3] == sOS_ip[3]) {
-            
-            kprintf("[NET] Match! Sending ARP Reply...\n");
 
             arp->opcode = htons(2); /* Change to Reply */
 
@@ -182,9 +174,6 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
 
                 /* If it's an Echo Request (Type 8) */
                 if (icmp->type == 8) {
-                    kprintf("\n[NET] PING Received from %d.%d.%d.%d! Bouncing back...\n", 
-                            ip->src_ip[0], ip->src_ip[1], ip->src_ip[2], ip->src_ip[3]);
-
                     /* 1. Modify ICMP to Echo Reply (Type 0) */
                     icmp->type = 0;
                     icmp->checksum = 0;
@@ -246,8 +235,7 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
                         
                         /* State 1: We received an IP Offer */
                         if (msg_type == 2) { 
-                            kprintf("[DHCP] Server offered IP: %d.%d.%d.%d\n", dhcp->yiaddr[0], dhcp->yiaddr[1], dhcp->yiaddr[2], dhcp->yiaddr[3]);
-                            
+                            /* Removed the "Offered IP" print here to stay silent until confirmed */
                             uint8_t req_payload[sizeof(dhcp_t)];
                             for(int i=0; i<sizeof(dhcp_t); i++) req_payload[i] = 0;
                             dhcp_t* req = (dhcp_t*)req_payload;
@@ -269,9 +257,8 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
                         /* State 2: The server Acknowledged our request */
                         else if (msg_type == 5) { 
                             for(int i=0; i<4; i++) sOS_ip[i] = dhcp->yiaddr[i];
-                            kprintf("\n[DHCP] Successfully bound to IP: %d.%d.%d.%d\n", sOS_ip[0], sOS_ip[1], sOS_ip[2], sOS_ip[3]);
-                            kprintf("[DHCP] Subnet: %d.%d.%d.%d | Gateway: %d.%d.%d.%d\n", 
-                                    sOS_subnet[0], sOS_subnet[1], sOS_subnet[2], sOS_subnet[3],
+                            kprintf("[DHCP] Bound to %d.%d.%d.%d (Gateway: %d.%d.%d.%d)\n", 
+                                    sOS_ip[0], sOS_ip[1], sOS_ip[2], sOS_ip[3],
                                     sOS_router[0], sOS_router[1], sOS_router[2], sOS_router[3]);
                         }
                     }

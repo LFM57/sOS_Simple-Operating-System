@@ -1,6 +1,7 @@
 #include "system.h"
 #include "elf.h"
 #include "pci.h"
+#include "net.h"
 
 extern int fs_load_file(const char*, uint8_t**, uint32_t*);
 
@@ -39,7 +40,7 @@ const char* system_commands[] = {
     "mkdir", "rm", "touch", "write", "cat", "loop", 
     "run", "ps", "kill", "df", "about", "shutdown",
     "whoami", "chown", "chmod", "su", "sudo", "userlist",
-    "nano", "passwd", "cp", "mv", "hex"
+    "nano", "passwd", "cp", "mv", "hex", "ifconfig"
 };
 unsigned int num_system_commands = sizeof(system_commands) / sizeof(system_commands[0]);
 
@@ -1331,8 +1332,32 @@ void execute_command() {
 
     if (strcmp(cmd, "help") == 0) {
         /* This line is ugly and non dynamic: it will be modified later on */
-        kprintf("Available commands:\n  help      clear    uptime\n  ram       ls       cd\n  cat       mkdir    rm\n  touch     write    loop\n  run       df       ps\n  kill      about    shutdown\n  whoami    chown    chmod\n  su        sudo     userlist\n  nano      passwd   cp\n  mv        hex\n");
-    } 
+        kprintf("Available commands:\n  help      clear    uptime\n  ram       ls       cd\n  cat       mkdir    rm\n  touch     write    loop\n  run       df       ps\n  kill      about    shutdown\n  whoami    chown    chmod\n  su        sudo     userlist\n  nano      passwd   cp\n  mv        hex      ifconfig\n");
+    }
+    else if (strcmp(cmd, "ifconfig") == 0) {
+        kprintf("e1000     Link encap: Ethernet  HWaddr ");
+        
+        /* Print MAC Address in hex format */
+        const char* hex = "0123456789ABCDEF";
+        for (int i = 0; i < 6; i++) {
+            uint8_t m = e1000_mac[i];
+            kputc(hex[m >> 4]); 
+            kputc(hex[m & 0x0F]);
+            if (i < 5) kputc(':');
+        }
+        kprintf("\n");
+        
+        /* Print IPv4 Configuration */
+        kprintf("          inet addr: %d.%d.%d.%d  Mask: %d.%d.%d.%d\n",
+                sOS_ip[0], sOS_ip[1], sOS_ip[2], sOS_ip[3],
+                sOS_subnet[0], sOS_subnet[1], sOS_subnet[2], sOS_subnet[3]);
+                
+        kprintf("          Gateway  : %d.%d.%d.%d  DNS : %d.%d.%d.%d\n",
+                sOS_router[0], sOS_router[1], sOS_router[2], sOS_router[3],
+                sOS_dns[0], sOS_dns[1], sOS_dns[2], sOS_dns[3]);
+                
+        kprintf("          UP BROADCAST RUNNING MULTICAST  MTU: 1500\n");
+    }
     else if (strcmp(cmd, "clear") == 0) {
         clear_terminal();
     } 
@@ -1946,6 +1971,17 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
     /* Request IP from VirtualBox/QEMU DHCP Server */
     extern void net_dhcp_discover(void);
     net_dhcp_discover();
+
+    /* --- Block OS boot until DHCP completes or times out --- */
+    extern uint8_t sOS_ip[4];
+    uint32_t timeout = timer_ticks + 300; /* 3 seconds timeout (100 Hz = 300 ticks) */
+    while (sOS_ip[0] == 0 && timer_ticks < timeout) {
+        __asm__ volatile("hlt"); /* Yield CPU while waiting for network interrupt */
+    }
+
+    if (sOS_ip[0] == 0) {
+        kprintf("[WARNING] DHCP Timeout! Network might be unavailable.\n");
+    }
 
     kprintf("[INFO] Booting finished without errors!\n");
     kprintf("========================================\n");
