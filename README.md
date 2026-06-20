@@ -1,3 +1,5 @@
+*Documentation is no longer up to date since internet traffic is begining its implementation. The instructions underneath are still valid but lack up to date informations regarding internet configuration*
+
 # sOS (Simple Operating System)
 
 sOS is a 32-bit (i686) hobbyist Operating System built from scratch. It features preemptive multitasking, a custom FAT16 filesystem implementation with a rudimentary user/permission system, Ring 3 user-space applications (ELF loading), and a built-in shell with various utilities, including a basic text editor (`nano`-lite).
