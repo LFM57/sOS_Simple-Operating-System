@@ -1,0 +1,294 @@
+#include "system.h"
+
+extern void gdt_flush(uint32_t);
+extern void idt_flush(uint32_t);
+extern uint32_t isr_stub_table[];
+extern void irq0(void);
+extern void irq1(void);
+extern void irq4(void);
+extern void isr128(void);
+
+/* --- GDT & TSS --- */
+struct gdt_entry { uint16_t limit_low; uint16_t base_low; uint8_t base_middle; uint8_t access; uint8_t granularity; uint8_t base_high; } __attribute__((packed));
+struct gdt_ptr { uint16_t limit; uint32_t base; } __attribute__((packed));
+
+/* TSS Structure (Task State Segment) */
+struct tss_entry {
+    uint32_t prev_tss;
+    uint32_t esp0; /* Ring 0 (Kernel) stack used during interrupts */
+    uint32_t ss0;  /* Ring 0 stack segment */
+    uint32_t esp1; uint32_t ss1; uint32_t esp2; uint32_t ss2;
+    uint32_t cr3, eip, eflags, eax, ecx, edx, ebx, esp, ebp, esi, edi;
+    uint32_t es, cs, ss, ds, fs, gs, ldt;
+    uint16_t trap, iomap_base;
+} __attribute__((packed));
+
+struct gdt_entry gdt[6];
+struct gdt_ptr gp;
+struct tss_entry tss;
+
+extern task_t tasks[MAX_TASKS];
+extern int current_task;
+
+/* Function to update the TSS kernel stack on the fly */
+void set_kernel_stack(uint32_t stack) {
+    tss.esp0 = stack;
+}
+
+void gdt_set_gate(int num, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran) {
+    gdt[num].base_low = (base & 0xFFFF); gdt[num].base_middle = (base >> 16) & 0xFF; gdt[num].base_high = (base >> 24) & 0xFF;
+    gdt[num].limit_low = (limit & 0xFFFF); gdt[num].granularity = (limit >> 16) & 0x0F;
+    gdt[num].granularity |= gran & 0xF0; gdt[num].access = access;
+}
+
+void init_gdt() {
+    gp.limit = (sizeof(struct gdt_entry) * 6) - 1;
+    gp.base = (uint32_t)&gdt;
+
+    /* Entry 0: Null (Mandatory) */
+    gdt_set_gate(0, 0, 0, 0, 0);
+    
+    /* Entry 1: Ring 0 Code (Kernel) */
+    gdt_set_gate(1, 0, 0xFFFFFFFF, 0x9A, 0xCF);
+    
+    /* Entry 2: Ring 0 Data (Kernel) */
+    gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF);
+    
+    /* Entry 3: Ring 3 Code (User) */
+    /* 'FA' = '9A' with privilege level set to 3 */
+    gdt_set_gate(3, 0, 0xFFFFFFFF, 0xFA, 0xCF);
+    
+    /* Entry 4: Ring 3 Data (User) */
+    /* 'F2' = '92' with privilege level set to 3 */
+    gdt_set_gate(4, 0, 0xFFFFFFFF, 0xF2, 0xCF);
+
+    /* Entry 5: The TSS (Task State Segment) */
+    /* 1. Initialize the TSS structure with zeros */
+    uint8_t *tss_ptr = (uint8_t*)&tss;
+    for(uint32_t i = 0; i < sizeof(struct tss_entry); i++) tss_ptr[i] = 0;
+    
+    /* 2. Basic TSS parameters */
+    tss.ss0 = 0x10; /* Kernel data segment (Entry 2 * 8 = 0x10) */
+    tss.esp0 = 0;   /* Will be filled just before jumping to Ring 3 */
+    tss.iomap_base = sizeof(struct tss_entry);
+    
+    /* 3. Declare the TSS in the GDT */
+    uint32_t tss_base = (uint32_t)&tss;
+    uint32_t tss_limit = sizeof(struct tss_entry) - 1;
+    /* Access 0x89 = Present, Ring 0, 32-bit TSS Type */
+    /* Granularity 0x40 = 32-bit Flag (no paging) */
+    gdt_set_gate(5, tss_base, tss_limit, 0x89, 0x40);
+
+    /* Load the new GDT (Assembly) */
+    gdt_flush((uint32_t)&gp);
+    
+    /* Inform the processor where the TSS is located */
+    /* The ltr (Load Task Register) instruction takes the offset of the TSS entry. */
+    /* Entry 5 * 8 bytes per entry = 40 (0x28 in hex) */
+    __asm__ volatile("ltr %%ax" : : "a" (0x28));
+}
+
+/* --- IDT --- */
+struct idt_entry { uint16_t base_low; uint16_t sel; uint8_t always0; uint8_t flags; uint16_t base_high; } __attribute__((packed));
+struct idt_ptr { uint16_t limit; uint32_t base; } __attribute__((packed));
+struct idt_entry idt[256]; struct idt_ptr idtp;
+
+void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
+    idt[num].base_low = base & 0xFFFF; idt[num].base_high = (base >> 16) & 0xFFFF;
+    idt[num].sel = sel; idt[num].always0 = 0; idt[num].flags = flags;
+}
+
+void init_idt() {
+    idtp.limit = (sizeof(struct idt_entry) * 256) - 1; idtp.base = (uint32_t)&idt;
+    for (int i = 0; i < 256; i++) idt_set_gate(i, 0, 0, 0);
+
+    for (int i = 0; i < 32; i++) idt_set_gate(i, isr_stub_table[i], 0x08, 0x8E);
+
+    idt_set_gate(32, (uint32_t)irq0, 0x08, 0x8E); 
+    idt_set_gate(33, (uint32_t)irq1, 0x08, 0x8E); 
+    idt_set_gate(36, (uint32_t)irq4, 0x08, 0x8E); 
+    /* 0xEE because the high E allows Ring 3 */
+    idt_set_gate(128, (uint32_t)isr128, 0x08, 0xEE); 
+    idt_flush((uint32_t)&idtp);
+}
+
+/* --- EXCEPTIONS AND SYSCALLS --- */
+typedef struct {
+    uint32_t gs, fs, es, ds;
+    uint32_t edi, esi, ebp, esp, ebx, edx, ecx, eax;
+    uint32_t int_no, err_code;
+    uint32_t eip, cs, eflags, useresp, ss;
+} registers_t;
+
+const char *exception_messages[] = { "Division By Zero", "Debug", "NMI", "Breakpoint", "Overflow", "Out of Bounds", "Invalid Opcode", "No Coprocessor", "Double Fault", "Coprocessor Segment Overrun", "Bad TSS", "Segment Not Present", "Stack Fault", "General Protection Fault", "Page Fault", "Unknown Interrupt", "Coprocessor Fault", "Alignment Check", "Machine Check", "SIMD Floating-Point", "Virtualization", "Control Protection", "Reserved", "Reserved", "Reserved", "Reserved", "Reserved", "Reserved", "Reserved", "Reserved", "Reserved", "Reserved" };
+
+void fault_handler(registers_t *regs) {
+    if (regs->int_no < 32) {
+        // The CS register contains the privilege level in its 2 least significant bits.
+        if ((regs->cs & 0x03) == 3) {
+            kprintf("\n[OS] User app crashed! (Exception %d: %s). Killing task...\n", regs->int_no, exception_messages[regs->int_no]);
+            extern void kill_current_task();
+            kill_current_task(); // Kills app and goes back to shell
+            return;
+        }
+
+        kprintf("\n[KERNEL PANIC] EXCEPTION %d : %s\n", regs->int_no, exception_messages[regs->int_no]);
+        kprintf("SYSTEME STOPPED.\n");
+        while(1) { __asm__ volatile ("hlt"); }
+    }
+}
+
+uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
+    (void)arg2; (void)arg3;
+
+    if (syscall_num == 1) {
+        /* Syscall 1: int write(int fd, const char* buf, uint32_t count) */
+        int fd = (int)arg1;
+        const char* buf = (const char*)arg2;
+        uint32_t count = (uint32_t)arg3;
+
+        /* Security: Complete validation of the user memory area */
+        if (!is_valid_user_range((uint32_t)buf, count)) {
+            kprintf("\n[SEC] Process terminated: Segmentation Fault in sys_write (0x%x)\n", buf);
+            extern void kill_current_task();
+            kill_current_task();
+            return 0;
+        }
+
+        /* Verification: Is the file descriptor valid and open? */
+        if (fd < 0 || fd >= MAX_OPEN_FILES || !tasks[current_task].open_files[fd].is_used) {
+            return (uint32_t)-1; /* Error Code */
+        }
+
+        /* Write to the screen (TTY Terminal) */
+        if (tasks[current_task].open_files[fd].type == TYPE_TTY) {
+            /* Support for legacy background task (log redirection) */
+            if (current_task > 0 && tasks[current_task].is_background) {
+                char log_name[32] = "/task_0.log";
+                log_name[6] = '0' + tasks[current_task].id; 
+                extern void fs_append(const char* filename, const char* text);
+                fs_append(log_name, buf);
+            } else {
+                /* Direct writing of bytes to the VGA screen */
+                for (uint32_t i = 0; i < count; i++) {
+                    kputc(buf[i]);
+                }
+            }
+            return count; /* Number of bytes actually written */
+        }
+        
+        return (uint32_t)-1;
+    }
+    else if (syscall_num == 2) {
+        extern void kill_current_task();
+        kill_current_task();
+        return 0;
+    } 
+    else if (syscall_num == 3) {
+        extern uint32_t sys_sbrk(int);
+        return sys_sbrk((int)arg1);
+    }
+    else if (syscall_num == 4) {
+        /* Syscall 4: int read(int fd, char* buf, uint32_t count) */
+        int fd = (int)arg1;
+        char* buf = (char*)arg2;
+        uint32_t count = (uint32_t)arg3;
+
+        /* Security: Complete validation of the user write space */
+        if (!is_valid_user_range((uint32_t)buf, count)) {
+            kprintf("\n[SEC] Process terminated: Segmentation Fault in sys_read (0x%x)\n", buf);
+            extern void kill_current_task();
+            kill_current_task();
+            return 0;
+        }
+
+        /* Verification of the file descriptor */
+        if (fd < 0 || fd >= MAX_OPEN_FILES || !tasks[current_task].open_files[fd].is_used) {
+            return (uint32_t)-1;
+        }
+
+        /* Read from the keyboard (TTY Terminal) */
+        if (tasks[current_task].open_files[fd].type == TYPE_TTY) {
+            if (count == 0) return 0;
+            
+            __asm__ volatile ("sti");
+            extern char wait_key(void);
+            
+            /* For now, we read a single character (raw terminal mode behavior) */
+            buf[0] = wait_key(); 
+            return 1; /* Returns 1 byte read */
+        }
+        
+        return (uint32_t)-1;
+    }
+    else if (syscall_num == 5) {
+        extern volatile uint32_t timer_ticks;
+        return timer_ticks;
+    }
+    else if (syscall_num == 6) {
+        /* Syscall 6: int read_file(const char* filename, uint8_t* buffer, uint32_t* size_in_out) */
+        const char* filename = (const char*)arg1;
+        uint8_t* out_buffer = (uint8_t*)arg2;
+        uint32_t* out_size = (uint32_t*)arg3;
+
+        /* Validation of size address */
+        if (!is_valid_user_range((uint32_t)out_size, sizeof(uint32_t))) {
+            kprintf("\n[SEC] Process terminated: Segmentation Fault in read_file (out_size)\n");
+            extern void kill_current_task();
+            kill_current_task();
+            return 0;
+        }
+
+        uint32_t max_size = *out_size;
+
+        /* Validation of the filename string */
+        if (!is_valid_user_string(filename)) {
+            kprintf("\n[SEC] Process terminated: Segmentation Fault in read_file (filename)\n");
+            extern void kill_current_task();
+            kill_current_task();
+            return 0;
+        }
+
+        /* Validation of the entire buffer with the specified max size */
+        if (!is_valid_user_range((uint32_t)out_buffer, max_size)) {
+            kprintf("\n[SEC] Process terminated: Segmentation Fault in read_file (out_buffer)\n");
+            extern void kill_current_task();
+            kill_current_task();
+            return 0;
+        }
+
+        uint8_t* file_data = NULL;
+        uint32_t file_size = 0;
+        extern int fs_load_file(const char* filename, uint8_t** buffer_out, uint32_t* size_out);
+        
+        if (fs_load_file(filename, &file_data, &file_size)) {
+            /* Truncated copy to the maximum available user buffer */
+            uint32_t copy_size = (file_size > max_size) ? max_size : file_size;
+            for (uint32_t i = 0; i < copy_size; i++) {
+                out_buffer[i] = file_data[i];
+            }
+            *out_size = copy_size; // Returns the actual size written
+            kfree(file_data); 
+            return 1; 
+        }
+        return 0; 
+    }
+    else if (syscall_num == 7) {
+        /* Syscall 7: int write_file(const char* filename, const char* text) */
+        const char* filename = (const char*)arg1;
+        const char* text = (const char*)arg2;
+
+        /* Rigorous validation of both strings */
+        if (!is_valid_user_string(filename) || !is_valid_user_string(text)) {
+            kprintf("\n[SEC] Process terminated: Segmentation Fault in write_file\n");
+            extern void kill_current_task();
+            kill_current_task();
+            return 0;
+        }
+
+        extern int fs_write(const char* filename, const char* text);
+        return fs_write(filename, text); 
+    }
+    
+    return (uint32_t)-1;
+}
