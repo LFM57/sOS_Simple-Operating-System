@@ -102,9 +102,9 @@ void init_heap() {
 }
 
 void* kmalloc(size_t size) {
+    __asm__ volatile("cli"); /* Disable interrupts for safety */
     heap_block_t *curr = heap_head;
     while (curr != NULL) {
-        /* Verification of the current block signature */
         if (curr->magic != HEAP_MAGIC) {
             kprintf("\n[KERNEL PANIC] Heap corruption detected in kmalloc! Block at %x has bad magic %x\n", curr, curr->magic);
             while(1) { __asm__ volatile("cli; hlt"); }
@@ -121,32 +121,33 @@ void* kmalloc(size_t size) {
                 curr->size = size;
             }
             curr->is_free = 0; 
+            __asm__ volatile("sti"); /* Re-enable interrupts before returning */
             return (void*)((uint8_t*)curr + sizeof(heap_block_t));
         }
         curr = curr->next;
     }
+    __asm__ volatile("sti"); /* Re-enable interrupts if allocation fails */
     return NULL; 
 }
 
 void kfree(void* ptr) {
     if (!ptr) return;
+    __asm__ volatile("cli"); /* Disable interrupts for safety */
     heap_block_t *block = (heap_block_t*)((uint8_t*)ptr - sizeof(heap_block_t));
     
-    /* Structural integrity validation before freeing */
     if (block->magic != HEAP_MAGIC) {
         kprintf("\n[KERNEL PANIC] Heap corruption detected in kfree! Block at %x has bad magic %x\n", block, block->magic);
         while(1) { __asm__ volatile("cli; hlt"); }
     }
 
-    /* Protection against Double Free */
     if (block->is_free) {
         kprintf("\n[WARNING] Double free detected at %x! Ignoring operation.\n", ptr);
+        __asm__ volatile("sti");
         return;
     }
 
     block->is_free = 1;
     if (block->next) {
-        /* Validation of the next block before merging */
         if (block->next->magic != HEAP_MAGIC) {
             kprintf("\n[KERNEL PANIC] Heap corruption detected during merge! Block at %x has bad magic %x\n", block->next, block->next->magic);
             while(1) { __asm__ volatile("cli; hlt"); }
@@ -156,4 +157,5 @@ void kfree(void* ptr) {
             block->next = block->next->next;
         }
     }
+    __asm__ volatile("sti"); /* Re-enable interrupts when done */
 }
