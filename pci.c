@@ -15,6 +15,12 @@ uint32_t pci_read_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset)
     return inl(PCI_CONFIG_DATA);
 }
 
+void pci_write_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint32_t value) {
+    uint32_t address = (uint32_t)((bus << 16) | (slot << 11) | (func << 8) | (offset & 0xFC) | ((uint32_t)0x80000000));
+    outl(PCI_CONFIG_ADDRESS, address);
+    outl(PCI_CONFIG_DATA, value);
+}
+
 /* Scan the PCI bus to find connected devices */
 void init_pci(void) {
     kprintf("[INFO] Scanning PCI Bus...\n");

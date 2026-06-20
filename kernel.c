@@ -1939,7 +1939,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
     init_heap(); kprintf("[INFO] Heap (kmalloc) OK\n");
     init_fs();
     init_pit();  kprintf("[INFO] PIT (100 Hz) OK\n");
-    init_pci();  kprintf("[INFO] PCI OK\n");
+    init_e1000();
     
     init_multitasking(); kprintf("[INFO] Multitasking OK\n");
 

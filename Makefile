@@ -10,7 +10,7 @@ LDFLAGS = -T linker.ld
 USER_CC = i686-linux-gnu-gcc
 USER_LD = i686-linux-gnu-ld
 
-OBJS = boot.o print.o memory.o gdt_idt.o disk.o fs.o kernel.o pci.o
+OBJS = boot.o print.o memory.o gdt_idt.o disk.o fs.o kernel.o pci.o e1000.o
 
 # The 'all' target compiles everything: the OS, the FAT16 disk, the bootable ISO, and the VirtualBox VDI!
 all: myos.bin drive.img sos.iso drive.vdi
