@@ -1,6 +1,7 @@
 #include "system.h"
 #include "pci.h"
 #include "e1000.h"
+#include "net.h"
 
 uint32_t e1000_mmio_base = 0;
 uint8_t  e1000_mac[6];
@@ -59,8 +60,30 @@ void e1000_tx_init(void) {
     e1000_write_reg(0x3810, 0);                  /* TDH */
     e1000_write_reg(0x3818, 0);                  /* TDT */
 
-    /* TCTL: EN (Enable) | PSP (Pad Short Packets) */
-    e1000_write_reg(0x0400, 0x0000000A); 
+    /* Set standard Inter-Packet Gap parameters (Required for transmission) */
+    e1000_write_reg(0x0410, 0x0060200A);
+
+    /* Configure Transmit Control (TCTL) Register:
+       EN (Transmit Enable) = Bit 1
+       PSP (Pad Short Packets) = Bit 3
+       CT (Collision Threshold) = 15 (Bits 4-11)
+       COLD (Collision Distance) = 64 (Bits 12-21) -> Total: 0x000400FA */
+    e1000_write_reg(0x0400, 0x000400FA); 
+}
+
+void e1000_transmit(uint8_t* payload, uint16_t length) {
+    /* Set the memory address of the buffer to send */
+    tx_descs[tx_curr].addr = (uint64_t)(uint32_t)payload;
+    tx_descs[tx_curr].length = length;
+    
+    /* Command: EOP (End of Packet), IFCS (Insert FCS/CRC), RS (Report Status) */
+    tx_descs[tx_curr].cmd = (1 << 0) | (1 << 1) | (1 << 3); 
+    tx_descs[tx_curr].status = 0;
+    
+    tx_curr = (tx_curr + 1) % NUM_TX_DESC;
+    
+    /* Update the Tail register to tell the hardware to send it! */
+    e1000_write_reg(0x3818, tx_curr); 
 }
 
 /* This function is called by the boot.s irq_nic assembly wrapper */
@@ -72,7 +95,12 @@ void e1000_handler(void) {
     while ((rx_descs[rx_curr].status & 0x01)) { 
         uint16_t len = rx_descs[rx_curr].length;
         
-        kprintf("\n[E1000] Packet Received! Size: %d bytes\n", len);
+        /* Hardware diagnostic: Ensure packets are hitting the OS */
+        kprintf("\n[E1000] Frame Rx: %d bytes\n", len);
+
+        /* Call our Network Stack */
+        uint8_t* packet_data = (uint8_t*)(uint32_t)rx_descs[rx_curr].addr;
+        net_handle_packet(packet_data, len);
         
         /* Tell the card we have consumed the packet */
         rx_descs[rx_curr].status = 0;

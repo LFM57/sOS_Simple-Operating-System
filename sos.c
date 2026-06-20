@@ -176,3 +176,40 @@ int write_file(const char* filename, const char* text) {
     __asm__ volatile("int $0x80" : "=a"(ret) : "a"(7), "b"(filename), "c"(text));
     return ret;
 }
+
+typedef struct {
+    unsigned char dest_ip[4];
+    unsigned short dest_port;
+    const void* payload;
+    unsigned int len;
+} sendto_args_t;
+
+int socket() {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(8));
+    return ret;
+}
+
+int bind(int fd, unsigned short port) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(9), "b"(fd), "c"(port));
+    return ret;
+}
+
+int sendto(int fd, const unsigned char* dest_ip, unsigned short port, const void* buf, unsigned int len) {
+    sendto_args_t args;
+    for(int i=0; i<4; i++) args.dest_ip[i] = dest_ip[i];
+    args.dest_port = port;
+    args.payload = buf;
+    args.len = len;
+    
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(10), "b"(fd), "c"(&args));
+    return ret;
+}
+
+int recvfrom(int fd, void* buf, unsigned int len) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(11), "b"(fd), "c"(buf), "d"(len));
+    return ret;
+}

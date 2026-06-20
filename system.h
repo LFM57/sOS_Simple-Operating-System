@@ -114,6 +114,14 @@ extern int fs_error;
 #define TYPE_NONE 0
 #define TYPE_TTY  1
 #define TYPE_FILE 2
+#define TYPE_SOCKET 3
+
+typedef struct {
+    uint8_t dest_ip[4];
+    uint16_t dest_port;
+    uint8_t* payload;
+    uint32_t len;
+} sendto_args_t;
 
 typedef struct {
     int is_used;

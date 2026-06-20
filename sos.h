@@ -30,4 +30,10 @@ void* memcpy(void* dest, const void* src, unsigned int n);
 int read_file(const char* filename, unsigned char* buffer, unsigned int* size_out);
 int write_file(const char* filename, const char* text);
 
+/* Networking */
+int socket();
+int bind(int fd, unsigned short port);
+int sendto(int fd, const unsigned char* dest_ip, unsigned short port, const void* buf, unsigned int len);
+int recvfrom(int fd, void* buf, unsigned int len);
+
 #endif

@@ -289,6 +289,63 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         extern int fs_write(const char* filename, const char* text);
         return fs_write(filename, text); 
     }
+    else if (syscall_num == 8) {
+        /* Syscall 8: int socket() */
+        for (int i = 3; i < MAX_OPEN_FILES; i++) {
+            if (!tasks[current_task].open_files[i].is_used) {
+                extern int net_alloc_socket();
+                int sock_idx = net_alloc_socket();
+                if (sock_idx == -1) return (uint32_t)-1;
+                
+                tasks[current_task].open_files[i].is_used = 1;
+                tasks[current_task].open_files[i].type = TYPE_SOCKET;
+                tasks[current_task].open_files[i].offset = sock_idx; /* Store socket ID in offset */
+                return i;
+            }
+        }
+        return (uint32_t)-1;
+    }
+    else if (syscall_num == 9) {
+        /* Syscall 9: int bind(int fd, uint16_t port) */
+        int fd = (int)arg1;
+        uint16_t port = (uint16_t)arg2;
+        
+        if (fd < 0 || fd >= MAX_OPEN_FILES || tasks[current_task].open_files[fd].type != TYPE_SOCKET) return (uint32_t)-1;
+        
+        int sock_idx = tasks[current_task].open_files[fd].offset;
+        extern void net_bind_socket(int, uint16_t);
+        net_bind_socket(sock_idx, port);
+        return 0;
+    }
+    else if (syscall_num == 10) {
+        /* Syscall 10: int sendto(int fd, sendto_args_t* args) */
+        int fd = (int)arg1;
+        sendto_args_t* args = (sendto_args_t*)arg2;
+        
+        /* Security Checks */
+        if (!is_valid_user_range((uint32_t)args, sizeof(sendto_args_t))) return (uint32_t)-1;
+        if (!is_valid_user_range((uint32_t)args->payload, args->len)) return (uint32_t)-1;
+        if (fd < 0 || fd >= MAX_OPEN_FILES || tasks[current_task].open_files[fd].type != TYPE_SOCKET) return (uint32_t)-1;
+
+        int sock_idx = tasks[current_task].open_files[fd].offset;
+        extern void net_send_udp(int, uint8_t*, uint16_t, uint8_t*, uint16_t);
+        net_send_udp(sock_idx, args->dest_ip, args->dest_port, args->payload, args->len);
+        return args->len;
+    }
+    else if (syscall_num == 11) {
+        /* Syscall 11: int recvfrom(int fd, uint8_t* buf, uint32_t max_len) */
+        int fd = (int)arg1;
+        uint8_t* buf = (uint8_t*)arg2;
+        uint32_t max_len = (uint32_t)arg3;
+        
+        /* Security Checks */
+        if (!is_valid_user_range((uint32_t)buf, max_len)) return (uint32_t)-1;
+        if (fd < 0 || fd >= MAX_OPEN_FILES || tasks[current_task].open_files[fd].type != TYPE_SOCKET) return (uint32_t)-1;
+
+        int sock_idx = tasks[current_task].open_files[fd].offset;
+        extern int net_recv_udp(int, uint8_t*, uint32_t);
+        return net_recv_udp(sock_idx, buf, max_len);
+    }
     
     return (uint32_t)-1;
 }
