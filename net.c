@@ -25,6 +25,102 @@ uint16_t calculate_checksum(void *b, int len) {
 socket_t sockets[MAX_SOCKETS];
 static uint8_t tx_buffer[2048]; /* Static TX buffer for safe DMA transfers */
 
+/* --- ARP CACHE SYSTEM --- */
+typedef struct {
+    uint8_t ip[4];
+    uint8_t mac[6];
+    int in_use;
+} arp_entry_t;
+
+arp_entry_t arp_cache[32];
+
+void arp_update(uint8_t* ip, uint8_t* mac) {
+    /* Ignore 0.0.0.0 */
+    if (ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] == 0) return;
+    
+    /* Update existing entry */
+    for (int i = 0; i < 32; i++) {
+        if (arp_cache[i].in_use && 
+            arp_cache[i].ip[0] == ip[0] && arp_cache[i].ip[1] == ip[1] &&
+            arp_cache[i].ip[2] == ip[2] && arp_cache[i].ip[3] == ip[3]) {
+            for(int j = 0; j < 6; j++) arp_cache[i].mac[j] = mac[j];
+            return;
+        }
+    }
+    /* Create new entry */
+    for (int i = 0; i < 32; i++) {
+        if (!arp_cache[i].in_use) {
+            arp_cache[i].in_use = 1;
+            for(int j = 0; j < 4; j++) arp_cache[i].ip[j] = ip[j];
+            for(int j = 0; j < 6; j++) arp_cache[i].mac[j] = mac[j];
+            return;
+        }
+    }
+}
+
+void arp_request(uint8_t* target_ip) {
+    uint8_t packet[14 + 28];
+    eth_hdr_t* eth = (eth_hdr_t*)packet;
+    for(int i = 0; i < 6; i++) { eth->dst_mac[i] = 0xFF; eth->src_mac[i] = e1000_mac[i]; }
+    eth->type = htons(0x0806);
+    
+    arp_hdr_t* arp = (arp_hdr_t*)(packet + 14);
+    arp->hw_type = htons(1);
+    arp->proto_type = htons(0x0800);
+    arp->hw_len = 6;
+    arp->proto_len = 4;
+    arp->opcode = htons(1); /* Request */
+    for(int i = 0; i < 6; i++) { arp->sender_mac[i] = e1000_mac[i]; arp->target_mac[i] = 0; }
+    for(int i = 0; i < 4; i++) { arp->sender_ip[i] = sOS_ip[i]; arp->target_ip[i] = target_ip[i]; }
+    
+    e1000_transmit(packet, sizeof(packet));
+}
+
+int arp_resolve(uint8_t* dest_ip, uint8_t* out_mac) {
+    /* Hardcode broadcast MAC for DHCP */
+    if (dest_ip[0] == 255 && dest_ip[1] == 255 && dest_ip[2] == 255 && dest_ip[3] == 255) {
+        for(int i=0; i<6; i++) out_mac[i] = 0xFF;
+        return 1;
+    }
+
+    /* Target is either the dest_ip (LAN) or the router (Internet) */
+    uint8_t target_ip[4];
+    int is_local = 1;
+    for(int i=0; i<4; i++) {
+        if ((dest_ip[i] & sOS_subnet[i]) != (sOS_ip[i] & sOS_subnet[i])) is_local = 0;
+    }
+    for(int i=0; i<4; i++) target_ip[i] = is_local ? dest_ip[i] : sOS_router[i];
+
+    /* 1. Check cache instantly */
+    for(int i=0; i<32; i++) {
+        if (arp_cache[i].in_use && 
+            arp_cache[i].ip[0] == target_ip[0] && arp_cache[i].ip[1] == target_ip[1] &&
+            arp_cache[i].ip[2] == target_ip[2] && arp_cache[i].ip[3] == target_ip[3]) {
+            for(int j=0; j<6; j++) out_mac[j] = arp_cache[i].mac[j];
+            return 1;
+        }
+    }
+
+    /* 2. Not in cache: Send ARP Request and wait */
+    arp_request(target_ip);
+    __asm__ volatile ("sti"); /* Important: Enable interrupts so E1000 can receive the reply! */
+    
+    uint32_t start = timer_ticks;
+    while(timer_ticks < start + 100) { /* Wait up to 1 second */
+        for(int i=0; i<32; i++) {
+            if (arp_cache[i].in_use && 
+                arp_cache[i].ip[0] == target_ip[0] && arp_cache[i].ip[1] == target_ip[1] &&
+                arp_cache[i].ip[2] == target_ip[2] && arp_cache[i].ip[3] == target_ip[3]) {
+                for(int j=0; j<6; j++) out_mac[j] = arp_cache[i].mac[j];
+                return 1;
+            }
+        }
+        __asm__ volatile ("hlt");
+    }
+    return 0; /* Timeout */
+}
+/* ------------------------- */
+
 int net_alloc_socket() {
     for (int i = 0; i < MAX_SOCKETS; i++) {
         if (!sockets[i].is_used) {
@@ -43,10 +139,18 @@ void net_bind_socket(int sock_idx, uint16_t port) {
 
 /* Raw internal UDP sender (Kernel use) */
 void net_send_udp_raw(uint16_t src_port, uint8_t* dest_ip, uint16_t dest_port, uint8_t* payload, uint16_t len) {
+    uint8_t dest_mac[6];
+    
+    /* Fetch MAC using ARP Cache / Router Gateway */
+    if (!arp_resolve(dest_ip, dest_mac)) {
+        kprintf("\n[NET] Dropped packet: Target Unreachable (ARP Timeout)\n");
+        return;
+    }
+
     uint16_t packet_len = 14 + 20 + 8 + len;
     
     eth_hdr_t* eth = (eth_hdr_t*)tx_buffer;
-    for(int i=0; i<6; i++) { eth->dst_mac[i] = 0xFF; eth->src_mac[i] = e1000_mac[i]; } /* Broadcast MAC */
+    for(int i=0; i<6; i++) { eth->dst_mac[i] = dest_mac[i]; eth->src_mac[i] = e1000_mac[i]; } 
     eth->type = htons(0x0800);
 
     ipv4_hdr_t* ip = (ipv4_hdr_t*)(tx_buffer + 14);
@@ -132,6 +236,9 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
     if (raw_type == 0x0806) {
         arp_hdr_t* arp = (arp_hdr_t*)(packet + sizeof(eth_hdr_t));
 
+        /* UPDATE CACHE WITH SENDER'S INFO */
+        arp_update(arp->sender_ip, arp->sender_mac);
+        
         /* If it's an ARP Request (1) asking for our IP */
         if (ntohs(arp->opcode) == 1 && 
             arp->target_ip[0] == sOS_ip[0] && arp->target_ip[1] == sOS_ip[1] &&

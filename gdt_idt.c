@@ -346,6 +346,15 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         extern int net_recv_udp(int, uint8_t*, uint32_t);
         return net_recv_udp(sock_idx, buf, max_len);
     }
+    else if (syscall_num == 12) {
+        /* Syscall 12: int get_dns_ip(uint8_t* buf) */
+        uint8_t* buf = (uint8_t*)arg1;
+        if (!is_valid_user_range((uint32_t)buf, 4)) return 0;
+        
+        extern uint8_t sOS_dns[4];
+        for (int i = 0; i < 4; i++) buf[i] = sOS_dns[i];
+        return 1;
+    }
     
     return (uint32_t)-1;
 }

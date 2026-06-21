@@ -213,3 +213,108 @@ int recvfrom(int fd, void* buf, unsigned int len) {
     __asm__ volatile("int $0x80" : "=a"(ret) : "a"(11), "b"(fd), "c"(buf), "d"(len));
     return ret;
 }
+
+int get_dns_ip(unsigned char* ip_buf) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(12), "b"(ip_buf));
+    return ret;
+}
+
+int gethostbyname(const char* hostname, unsigned char* out_ip) {
+    unsigned char dns_ip[4];
+    
+    /* Fetch DNS from Kernel. If 0.0.0.0, fallback to Google's 8.8.8.8 */
+    if (!get_dns_ip(dns_ip) || (dns_ip[0] == 0 && dns_ip[1] == 0)) {
+        print("[DNS] Warning: No DNS from DHCP. Falling back to 8.8.8.8...\n");
+        dns_ip[0] = 8;
+        dns_ip[1] = 8;
+        dns_ip[2] = 8;
+        dns_ip[3] = 8;
+    }
+
+    int sock = socket();
+    bind(sock, 45678); /* Ephemeral port */
+
+    unsigned char buf[512];
+    for (int i = 0; i < 512; i++) buf[i] = 0;
+    
+    /* Transaction ID */
+    buf[0] = 0x12; buf[1] = 0x34; 
+    /* Flags: Standard query, recursion desired */
+    buf[2] = 0x01; buf[3] = 0x00;
+    /* Questions: 1 */
+    buf[4] = 0x00; buf[5] = 0x01;
+    
+    /* Format domain name (e.g. www.google.com -> \3www\6google\3com\0) */
+    int lock = 0;
+    const char* part = hostname;
+    while (*part) {
+        int len = 0;
+        while (part[len] && part[len] != '.') len++;
+        buf[12 + lock] = len;
+        for (int j = 0; j < len; j++) buf[12 + lock + 1 + j] = part[j];
+        lock += len + 1;
+        if (part[len] == '.') part += len + 1;
+        else part += len;
+    }
+    buf[12 + lock] = 0;
+    int qname_len = lock + 1;
+    
+    /* QTYPE (1 = A Record) & QCLASS (1 = IN) */
+    buf[12 + qname_len] = 0x00; buf[12 + qname_len + 1] = 0x01;
+    buf[12 + qname_len + 2] = 0x00; buf[12 + qname_len + 3] = 0x01;
+    
+    sendto(sock, dns_ip, 53, buf, 12 + qname_len + 4);
+    
+    /* Wait for Response */
+    unsigned char rx_buf[512];
+    int attempts = 0;
+    while (attempts < 100) { /* 100 * 50ms = 5 seconds timeout */
+        int rx_len = recvfrom(sock, rx_buf, 512);
+        if (rx_len >= 12 && rx_buf[0] == 0x12 && rx_buf[1] == 0x34) {
+            
+            int qdcount = (rx_buf[4] << 8) | rx_buf[5];
+            int ans_count = (rx_buf[6] << 8) | rx_buf[7];
+            
+            if (ans_count > 0) {
+                int offset = 12;
+                /* Skip the Question Section */
+                for (int q = 0; q < qdcount; q++) {
+                    while (rx_buf[offset] != 0) offset++;
+                    offset += 5; /* Skip Null byte + QTYPE + QCLASS */
+                }
+                
+                /* Parse Answer Records */
+                for (int a = 0; a < ans_count; a++) {
+                    if (offset >= rx_len) break;
+                    
+                    /* Skip Name (could be a pointer 0xC0... or a string) */
+                    if ((rx_buf[offset] & 0xC0) == 0xC0) offset += 2;
+                    else { while (rx_buf[offset] != 0) offset++; offset++; }
+                    
+                    int type = (rx_buf[offset] << 8) | rx_buf[offset+1];
+                    offset += 2; /* Type */
+                    offset += 2; /* Class */
+                    offset += 4; /* TTL */
+                    int data_len = (rx_buf[offset] << 8) | rx_buf[offset+1];
+                    offset += 2;
+                    
+                    /* If it's an A Record, we hit the jackpot */
+                    if (type == 1 && data_len == 4) { 
+                        out_ip[0] = rx_buf[offset];
+                        out_ip[1] = rx_buf[offset+1];
+                        out_ip[2] = rx_buf[offset+2];
+                        out_ip[3] = rx_buf[offset+3];
+                        return 1;
+                    }
+                    /* Not an A record (e.g. CNAME), skip its data chunk */
+                    offset += data_len;
+                }
+            }
+            break; /* Invalid/no Answer */
+        }
+        sleep(50);
+        attempts++;
+    }
+    return 0; /* Failed / Timeout */
+}
