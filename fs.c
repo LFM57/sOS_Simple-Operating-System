@@ -1758,3 +1758,88 @@ void fs_append(const char* filename, const char* text) {
     
     bypass_dir_permission = 0; /* Immediately restore default security */
 }
+
+int fs_write_bin(const char* filename, uint8_t* data, uint32_t size) {
+    uint32_t parent_cluster, parent_sector;
+    char target_fat[11];
+    if (!resolve_path(filename, &parent_cluster, &parent_sector, target_fat)) return 0;
+
+    uint32_t old_cluster = current_dir_cluster;
+    uint32_t old_sector = current_dir_sector;
+    current_dir_cluster = parent_cluster;
+    current_dir_sector = parent_sector;
+
+    fat_dir_entry_t entry;
+    uint32_t dir_sec;
+    int dir_idx;
+
+    /* Find file or create it */
+    if (!find_entry(target_fat, &entry, &dir_sec, &dir_idx)) {
+        fs_touch(filename);
+        if (!find_entry(target_fat, &entry, &dir_sec, &dir_idx)) {
+            current_dir_cluster = old_cluster; current_dir_sector = old_sector;
+            return 0;
+        }
+    }
+
+    if (entry.attributes & 0x10) { 
+        current_dir_cluster = old_cluster; current_dir_sector = old_sector;
+        return 0; 
+    }
+    if (!check_permission_byte(entry.sec_byte, 1)) {
+        current_dir_cluster = old_cluster; current_dir_sector = old_sector;
+        return 0;
+    }
+
+    /* Free previous clusters if overwriting */
+    if (entry.first_cluster_low != 0) {
+        free_fat_chain(entry.first_cluster_low);
+    }
+
+    uint32_t bytes_left = size;
+    uint32_t data_idx = 0;
+    uint32_t last_cluster = 0;
+    uint32_t first_cluster = 0;
+
+    if (size > 0) {
+        while (bytes_left > 0) {
+            uint32_t free_cluster = 0;
+            for (int i = 2; i < 256; i++) {
+                if (read_fat_entry(i) == 0x0000) {
+                    free_cluster = i;
+                    write_fat_entry(i, 0xFFFF);
+                    break;
+                }
+            }
+            if (free_cluster == 0) break; /* Disk Full */
+            
+            if (first_cluster == 0) first_cluster = free_cluster;
+            if (last_cluster != 0) write_fat_entry(last_cluster, free_cluster);
+            last_cluster = free_cluster;
+            
+            uint32_t sec_lba = data_start + ((free_cluster - 2) * sectors_per_cluster);
+            for (int s = 0; s < sectors_per_cluster && bytes_left > 0; s++) {
+                uint8_t sec_buf[512];
+                for(int k=0; k<512; k++) sec_buf[k] = 0;
+                uint32_t chunk = (bytes_left > 512) ? 512 : bytes_left;
+                for(uint32_t j = 0; j < chunk; j++) sec_buf[j] = data[data_idx++];
+                ata_write_sector(sec_lba + s, sec_buf);
+                bytes_left -= chunk;
+            }
+        }
+    }
+
+    /* Update File Size and Cluster in Directory */
+    uint8_t* dir_sector = (uint8_t*)kmalloc(512);
+    ata_read_sector(dir_sec, dir_sector);
+    fat_dir_entry_t* dir = (fat_dir_entry_t*)dir_sector;
+    
+    dir[dir_idx].first_cluster_low = first_cluster;
+    dir[dir_idx].size = size - bytes_left; 
+    
+    ata_write_sector(dir_sec, dir_sector);
+    kfree(dir_sector);
+
+    current_dir_cluster = old_cluster; current_dir_sector = old_sector;
+    return 1;
+}

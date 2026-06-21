@@ -497,3 +497,78 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
         }
     }
 }
+
+int net_gethostbyname(const char* hostname, uint8_t* out_ip) {
+    uint8_t dns_ip[4];
+    for(int i=0; i<4; i++) dns_ip[i] = sOS_dns[i];
+    if (dns_ip[0] == 0 && dns_ip[1] == 0) {
+        /* Fallback to Google DNS */
+        dns_ip[0] = 8; dns_ip[1] = 8; dns_ip[2] = 8; dns_ip[3] = 8;
+    }
+
+    int sock = net_alloc_socket(1);
+    sockets[sock].local_port = 45678;
+
+    uint8_t buf[512];
+    for (int i = 0; i < 512; i++) buf[i] = 0;
+    buf[0] = 0x12; buf[1] = 0x34; buf[2] = 0x01; buf[3] = 0x00;
+    buf[4] = 0x00; buf[5] = 0x01;
+    
+    int lock = 0;
+    const char* part = hostname;
+    while (*part) {
+        int len = 0;
+        while (part[len] && part[len] != '.') len++;
+        buf[12 + lock] = len;
+        for (int j = 0; j < len; j++) buf[12 + lock + 1 + j] = part[j];
+        lock += len + 1;
+        if (part[len] == '.') part += len + 1;
+        else part += len;
+    }
+    buf[12 + lock] = 0;
+    int qname_len = lock + 1;
+    buf[12 + qname_len] = 0x00; buf[12 + qname_len + 1] = 0x01;
+    buf[12 + qname_len + 2] = 0x00; buf[12 + qname_len + 3] = 0x01;
+    
+    net_send_udp_raw(45678, dns_ip, 53, buf, 12 + qname_len + 4);
+    
+    __asm__ volatile ("sti");
+    uint32_t start = timer_ticks;
+    while (timer_ticks < start + 500) {
+        if (sockets[sock].rx_ready) {
+            uint8_t* rx_buf = sockets[sock].rx_buffer;
+            int rx_len = sockets[sock].rx_len;
+            
+            if (rx_len >= 12 && rx_buf[0] == 0x12 && rx_buf[1] == 0x34) {
+                int qdcount = (rx_buf[4] << 8) | rx_buf[5];
+                int ans_count = (rx_buf[6] << 8) | rx_buf[7];
+                if (ans_count > 0) {
+                    int offset = 12;
+                    for (int q = 0; q < qdcount; q++) {
+                        while (rx_buf[offset] != 0) offset++;
+                        offset += 5; 
+                    }
+                    for (int a = 0; a < ans_count; a++) {
+                        if (offset >= rx_len) break;
+                        if ((rx_buf[offset] & 0xC0) == 0xC0) offset += 2;
+                        else { while (rx_buf[offset] != 0) offset++; offset++; }
+                        int type = (rx_buf[offset] << 8) | rx_buf[offset+1];
+                        offset += 8; 
+                        int data_len = (rx_buf[offset] << 8) | rx_buf[offset+1];
+                        offset += 2;
+                        if (type == 1 && data_len == 4) { 
+                            for(int k=0; k<4; k++) out_ip[k] = rx_buf[offset+k];
+                            sockets[sock].is_used = 0;
+                            return 1;
+                        }
+                        offset += data_len;
+                    }
+                }
+            }
+            sockets[sock].rx_ready = 0;
+        }
+        __asm__ volatile("hlt");
+    }
+    sockets[sock].is_used = 0; /* Clean up socket */
+    return 0;
+}
