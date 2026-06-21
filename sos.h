@@ -37,5 +37,9 @@ int sendto(int fd, const unsigned char* dest_ip, unsigned short port, const void
 int recvfrom(int fd, void* buf, unsigned int len);
 int get_dns_ip(unsigned char* ip_buf);
 int gethostbyname(const char* hostname, unsigned char* out_ip);
+int socket_tcp();
+int connect(int fd, const unsigned char* dest_ip, unsigned short port);
+int send(int fd, const void* buf, unsigned int len);
+int recv(int fd, void* buf, unsigned int len);
 
 #endif

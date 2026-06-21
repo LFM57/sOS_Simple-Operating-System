@@ -63,20 +63,54 @@ typedef struct {
 } __attribute__((packed)) udp_hdr_t;
 
 #define MAX_SOCKETS 16
-#define SOCK_BUF_SIZE 1024
+#define SOCK_BUF_SIZE 8192  /* Increased to 8KB for HTTP payloads */
+
+/* TCP States */
+#define TCP_CLOSED      0
+#define TCP_SYN_SENT    1
+#define TCP_ESTABLISHED 2
+
+/* 20-byte TCP Header */
+typedef struct {
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint32_t seq;
+    uint32_t ack;
+    uint16_t flags_offset; /* Data Offset (4 bits), Reserved (6 bits), Flags (6 bits) */
+    uint16_t window_size;
+    uint16_t checksum;
+    uint16_t urgent_p;
+} __attribute__((packed)) tcp_hdr_t;
+
+/* TCP Pseudo Header (Required for TCP Checksum) */
+typedef struct {
+    uint8_t src_ip[4];
+    uint8_t dst_ip[4];
+    uint8_t zeros;
+    uint8_t proto;
+    uint16_t tcp_len;
+} __attribute__((packed)) tcp_pseudo_hdr_t;
 
 /* Internal Socket Structure */
 typedef struct {
     int is_used;
+    int type; /* 1 = UDP, 2 = TCP */
     uint16_t local_port;
     
-    /* Buffer for the latest received payload */
+    /* TCP Specifics */
+    uint8_t remote_ip[4];
+    uint16_t remote_port;
+    uint32_t seq_num;
+    uint32_t ack_num;
+    int tcp_state;
+
+    /* Buffer for received data */
     uint8_t rx_buffer[SOCK_BUF_SIZE];
-    uint16_t rx_len;
+    uint32_t rx_len; /* Changed to 32-bit to handle larger files */
     int rx_ready;
 } socket_t;
 
-int net_alloc_socket(void);
+int net_alloc_socket(int type);
 void net_bind_socket(int sock_idx, uint16_t port);
 void net_send_udp(int sock_idx, uint8_t* dest_ip, uint16_t dest_port, uint8_t* payload, uint16_t len);
 int net_recv_udp(int sock_idx, uint8_t* buf, uint32_t max_len);

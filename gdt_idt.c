@@ -1,4 +1,5 @@
 #include "system.h"
+#include "net.h"
 
 extern void gdt_flush(uint32_t);
 extern void idt_flush(uint32_t);
@@ -293,8 +294,7 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         /* Syscall 8: int socket() */
         for (int i = 3; i < MAX_OPEN_FILES; i++) {
             if (!tasks[current_task].open_files[i].is_used) {
-                extern int net_alloc_socket();
-                int sock_idx = net_alloc_socket();
+                int sock_idx = net_alloc_socket(1);
                 if (sock_idx == -1) return (uint32_t)-1;
                 
                 tasks[current_task].open_files[i].is_used = 1;
@@ -354,6 +354,95 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         extern uint8_t sOS_dns[4];
         for (int i = 0; i < 4; i++) buf[i] = sOS_dns[i];
         return 1;
+    }
+    else if (syscall_num == 13) {
+        /* Syscall 13: int socket_tcp() */
+        for (int i = 3; i < MAX_OPEN_FILES; i++) {
+            if (!tasks[current_task].open_files[i].is_used) {
+                int sock_idx = net_alloc_socket(2); /* Type 2 = TCP */
+                if (sock_idx == -1) return (uint32_t)-1;
+                
+                tasks[current_task].open_files[i].is_used = 1;
+                tasks[current_task].open_files[i].type = TYPE_SOCKET;
+                tasks[current_task].open_files[i].offset = sock_idx;
+                return i;
+            }
+        }
+        return (uint32_t)-1;
+    }
+    else if (syscall_num == 14) {
+        /* Syscall 14: int connect(int fd, uint8_t* dest_ip, uint16_t port) */
+        int fd = (int)arg1;
+        uint8_t* dest_ip = (uint8_t*)arg2;
+        uint16_t port = (uint16_t)arg3;
+        
+        if (!is_valid_user_range((uint32_t)dest_ip, 4)) return (uint32_t)-1;
+        if (fd < 0 || fd >= MAX_OPEN_FILES || tasks[current_task].open_files[fd].type != TYPE_SOCKET) return (uint32_t)-1;
+
+        int sock_idx = tasks[current_task].open_files[fd].offset;
+        extern socket_t sockets[];
+        extern volatile uint32_t timer_ticks;
+        
+        /* Auto-bind a random local port if not done */
+        if (sockets[sock_idx].local_port == 0) {
+            sockets[sock_idx].local_port = 50000 + sock_idx;
+        }
+        
+        for(int i=0; i<4; i++) sockets[sock_idx].remote_ip[i] = dest_ip[i];
+        sockets[sock_idx].remote_port = port;
+        sockets[sock_idx].seq_num = timer_ticks * 100; /* Weak random ISN */
+        sockets[sock_idx].ack_num = 0;
+        sockets[sock_idx].tcp_state = TCP_SYN_SENT;
+        
+        extern void net_send_tcp_raw(int, uint8_t, uint8_t*, uint16_t);
+        net_send_tcp_raw(sock_idx, 0x02, NULL, 0); /* Send SYN */
+
+        /* Re-enable hardware interrupts so the Timer and Network Card can wake up the CPU */
+        __asm__ volatile ("sti");
+        
+        /* Block until Established or Timeout (5 sec) */
+        uint32_t start = timer_ticks;
+        while(sockets[sock_idx].tcp_state != TCP_ESTABLISHED) {
+            if (timer_ticks > start + 500) return (uint32_t)-1; 
+            __asm__ volatile ("hlt");
+        }
+        return 0;
+    }
+    else if (syscall_num == 15) {
+        /* Syscall 15: int send(int fd, void* buf, uint32_t len) */
+        int fd = (int)arg1;
+        uint8_t* buf = (uint8_t*)arg2;
+        uint32_t len = (uint32_t)arg3;
+        if (!is_valid_user_range((uint32_t)buf, len)) return (uint32_t)-1;
+        int sock_idx = tasks[current_task].open_files[fd].offset;
+        
+        extern void net_send_tcp_raw(int, uint8_t, uint8_t*, uint16_t);
+        extern socket_t sockets[];
+        
+        /* Send data with PSH + ACK flag (0x18) */
+        net_send_tcp_raw(sock_idx, 0x18, buf, len);
+        sockets[sock_idx].seq_num += len;
+        return len;
+    }
+    else if (syscall_num == 16) {
+        /* Syscall 16: int recv(int fd, void* buf, uint32_t max_len) */
+        int fd = (int)arg1;
+        uint8_t* buf = (uint8_t*)arg2;
+        uint32_t max_len = (uint32_t)arg3;
+        if (!is_valid_user_range((uint32_t)buf, max_len)) return (uint32_t)-1;
+        
+        int sock_idx = tasks[current_task].open_files[fd].offset;
+        extern socket_t sockets[];
+        
+        if (!sockets[sock_idx].rx_ready) return 0;
+        
+        int copy_len = sockets[sock_idx].rx_len < max_len ? sockets[sock_idx].rx_len : max_len;
+        for(int i=0; i<copy_len; i++) buf[i] = sockets[sock_idx].rx_buffer[i];
+        
+        /* Clear buffer after reading */
+        sockets[sock_idx].rx_len = 0;
+        sockets[sock_idx].rx_ready = 0;
+        return copy_len;
     }
     
     return (uint32_t)-1;

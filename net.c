@@ -121,12 +121,75 @@ int arp_resolve(uint8_t* dest_ip, uint8_t* out_mac) {
 }
 /* ------------------------- */
 
-int net_alloc_socket() {
+/* --- TCP KERNEL STACK --- */
+
+void net_send_tcp_raw(int sock_idx, uint8_t flags, uint8_t* payload, uint16_t len) {
+    uint8_t dest_mac[6];
+    if (!arp_resolve(sockets[sock_idx].remote_ip, dest_mac)) {
+        kprintf("[TCP] Target Unreachable (ARP Timeout)\n");
+        return;
+    }
+
+    uint16_t tcp_total_len = 20 + len;
+    uint16_t packet_len = 14 + 20 + tcp_total_len;
+    static uint8_t tcp_tx_buffer[2048]; /* Isolated buffer for TCP */
+
+    /* 1. Ethernet Header */
+    eth_hdr_t* eth = (eth_hdr_t*)tcp_tx_buffer;
+    for(int i=0; i<6; i++) { eth->dst_mac[i] = dest_mac[i]; eth->src_mac[i] = e1000_mac[i]; }
+    eth->type = htons(0x0800);
+
+    /* 2. IPv4 Header */
+    ipv4_hdr_t* ip = (ipv4_hdr_t*)(tcp_tx_buffer + 14);
+    ip->version_ihl = 0x45;
+    ip->tos = 0;
+    ip->total_len = htons(20 + tcp_total_len);
+    ip->id = htons(2);
+    ip->frag_offset = 0;
+    ip->ttl = 64;
+    ip->protocol = 6; /* TCP Protocol ID */
+    ip->checksum = 0;
+    for(int i=0; i<4; i++) { ip->src_ip[i] = sOS_ip[i]; ip->dst_ip[i] = sockets[sock_idx].remote_ip[i]; }
+    ip->checksum = calculate_checksum(ip, 20);
+
+    /* 3. TCP Header */
+    tcp_hdr_t* tcp = (tcp_hdr_t*)(tcp_tx_buffer + 14 + 20);
+    tcp->src_port = htons(sockets[sock_idx].local_port);
+    tcp->dst_port = htons(sockets[sock_idx].remote_port);
+    tcp->seq = htonl(sockets[sock_idx].seq_num);
+    tcp->ack = htonl(sockets[sock_idx].ack_num);
+    tcp->flags_offset = htons((5 << 12) | flags); /* 5 words (20 bytes) offset + flags */
+    tcp->window_size = htons(8192);
+    tcp->checksum = 0;
+    tcp->urgent_p = 0;
+
+    /* 4. Copy Payload */
+    uint8_t* data = tcp_tx_buffer + 14 + 20 + 20;
+    for(int i=0; i<len; i++) data[i] = payload[i];
+
+    /* 5. Calculate TCP Checksum (requires pseudo header) */
+    uint8_t chksum_buf[2048];
+    tcp_pseudo_hdr_t* p_hdr = (tcp_pseudo_hdr_t*)chksum_buf;
+    for(int i=0; i<4; i++) { p_hdr->src_ip[i] = sOS_ip[i]; p_hdr->dst_ip[i] = sockets[sock_idx].remote_ip[i]; }
+    p_hdr->zeros = 0; p_hdr->proto = 6; p_hdr->tcp_len = htons(tcp_total_len);
+    
+    /* Copy TCP header & payload directly after pseudo header for checksum calc */
+    for(int i=0; i<tcp_total_len; i++) chksum_buf[sizeof(tcp_pseudo_hdr_t) + i] = ((uint8_t*)tcp)[i];
+    tcp->checksum = calculate_checksum(chksum_buf, sizeof(tcp_pseudo_hdr_t) + tcp_total_len);
+
+    e1000_transmit(tcp_tx_buffer, packet_len);
+}
+/* ------------------------- */
+
+int net_alloc_socket(int type) {
     for (int i = 0; i < MAX_SOCKETS; i++) {
         if (!sockets[i].is_used) {
             sockets[i].is_used = 1;
             sockets[i].local_port = 0;
             sockets[i].rx_ready = 0;
+            sockets[i].type = type; /* 1 = UDP, 2 = TCP */
+            sockets[i].tcp_state = TCP_CLOSED;
+            sockets[i].rx_len = 0;
             return i;
         }
     }
@@ -238,7 +301,7 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
 
         /* UPDATE CACHE WITH SENDER'S INFO */
         arp_update(arp->sender_ip, arp->sender_mac);
-        
+
         /* If it's an ARP Request (1) asking for our IP */
         if (ntohs(arp->opcode) == 1 && 
             arp->target_ip[0] == sOS_ip[0] && arp->target_ip[1] == sOS_ip[1] &&
@@ -381,6 +444,53 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
                             sockets[i].rx_ready = 1; 
                             break;
                         }
+                    }
+                }
+            }
+            /* --- MINIMAL TCP STATE MACHINE (Protocol 6) --- */
+            else if (ip->protocol == 6) {
+                int ip_header_len = (ip->version_ihl & 0x0F) * 4;
+                tcp_hdr_t* tcp = (tcp_hdr_t*)((uint8_t*)ip + ip_header_len);
+                
+                uint16_t dst_port = ntohs(tcp->dst_port);
+                uint16_t tcp_hdr_len = ((ntohs(tcp->flags_offset) >> 12) & 0x0F) * 4;
+                uint8_t flags = ntohs(tcp->flags_offset) & 0x3F;
+                
+                uint16_t payload_len = ntohs(ip->total_len) - ip_header_len - tcp_hdr_len;
+                uint8_t* payload = (uint8_t*)tcp + tcp_hdr_len;
+
+                /* Find matching socket */
+                for(int i=0; i<MAX_SOCKETS; i++) {
+                    if(sockets[i].is_used && sockets[i].type == 2 && sockets[i].local_port == dst_port) {
+                        
+                        /* State 1: Awaiting SYN-ACK */
+                        if (sockets[i].tcp_state == TCP_SYN_SENT && (flags & 0x12) == 0x12) {
+                            sockets[i].ack_num = ntohl(tcp->seq) + 1;
+                            sockets[i].seq_num++; /* SYN consumes 1 seq */
+                            sockets[i].tcp_state = TCP_ESTABLISHED;
+                            net_send_tcp_raw(i, 0x10, NULL, 0); /* Send ACK */
+                        }
+                        
+                        /* State 2: Established & Receiving Data (PSH or just data) */
+                        else if (sockets[i].tcp_state == TCP_ESTABLISHED && payload_len > 0) {
+                            /* Append data to socket buffer */
+                            for(int j=0; j<payload_len; j++) {
+                                if (sockets[i].rx_len < SOCK_BUF_SIZE) {
+                                    sockets[i].rx_buffer[sockets[i].rx_len++] = payload[j];
+                                }
+                            }
+                            sockets[i].rx_ready = 1;
+                            sockets[i].ack_num += payload_len;
+                            net_send_tcp_raw(i, 0x10, NULL, 0); /* Send ACK for data */
+                        }
+                        
+                        /* State 3: Disconnect Request (FIN) */
+                        else if (sockets[i].tcp_state == TCP_ESTABLISHED && (flags & 0x01)) {
+                            sockets[i].ack_num++;
+                            sockets[i].tcp_state = TCP_CLOSED;
+                            net_send_tcp_raw(i, 0x11, NULL, 0); /* Send FIN+ACK */
+                        }
+                        break;
                     }
                 }
             }

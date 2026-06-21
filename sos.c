@@ -318,3 +318,27 @@ int gethostbyname(const char* hostname, unsigned char* out_ip) {
     }
     return 0; /* Failed / Timeout */
 }
+
+int socket_tcp() {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(13));
+    return ret;
+}
+
+int connect(int fd, const unsigned char* dest_ip, unsigned short port) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(14), "b"(fd), "c"(dest_ip), "d"(port));
+    return ret;
+}
+
+int send(int fd, const void* buf, unsigned int len) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(15), "b"(fd), "c"(buf), "d"(len));
+    return ret;
+}
+
+int recv(int fd, void* buf, unsigned int len) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(16), "b"(fd), "c"(buf), "d"(len));
+    return ret;
+}

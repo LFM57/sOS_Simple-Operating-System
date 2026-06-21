@@ -11,6 +11,8 @@ static int ansi_state = 0;
 static int ansi_val = 0;
 static uint16_t vga_attribute = 0x0F00; /* White on black by default */
 
+void scroll(); 
+
 /* Function to update the hardware cursor */
 void update_cursor(int x, int y) {
     uint16_t pos = y * 80 + x;
@@ -57,7 +59,7 @@ void write_vga(char c) {
         if (c >= '0' && c <= '9') {
             ansi_val = ansi_val * 10 + (c - '0');
         } else if (c == ';') {
-            ansi_val = 0; /* /* Ignore complex multiple attributes like (1;32) to keep it simple */
+            ansi_val = 0; /* Ignore complex multiple attributes like (1;32) to keep it simple */
         } else if (c == 'm') {
             /* Apply the requested ANSI color */
             if (ansi_val == 0)       vga_attribute = 0x0F00; /* Reset */
