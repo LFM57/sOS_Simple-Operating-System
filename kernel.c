@@ -665,6 +665,15 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
             uint32_t filesz = phdr[i].p_filesz;
             uint32_t offset = phdr[i].p_offset;
 
+            /* [FIX ADDITION] Prevent ELF segments from mapping into kernel space */
+            if (vaddr >= 0x10000000 || vaddr + memsz > 0x10000000 || vaddr + memsz < vaddr) {
+                kprintf("Error: ELF segment out of bounds or overlaps kernel space.\n");
+                pmm_free_page(pd);
+                pmm_free_page(ustack);
+                pmm_free_page(kstack);
+                return -1;
+            }
+
             /* Calculate page alignment to map for this segment */
             uint32_t start_page = vaddr & 0xFFFFF000;
             uint32_t end_page = (vaddr + memsz + 4095) & 0xFFFFF000;
@@ -749,6 +758,12 @@ uint32_t sys_sbrk(int increment) {
     if (increment == 0) return old_break;
 
     uint32_t new_break = old_break + increment;
+
+    /* [FIX ADDITION] Prevent user heap from growing into kernel space */
+    if (new_break >= 0x10000000 || new_break < old_break) {
+        return (uint32_t)-1;
+    }
+    
     uint32_t start_page = ((old_break - 1) / 4096) + 1;
     uint32_t end_page = (new_break - 1) / 4096;
     
