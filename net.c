@@ -374,6 +374,9 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
             else if (ip->protocol == 17) {
                 int ip_header_len = (ip->version_ihl & 0x0F) * 4;
                 udp_hdr_t* udp = (udp_hdr_t*)((uint8_t*)ip + ip_header_len);
+
+                /* [FIX ADDITION] Prevent UDP length underflow */
+                if (ntohs(udp->length) < sizeof(udp_hdr_t)) return;
                 
                 uint16_t dst_port = ntohs(udp->dst_port);
                 uint16_t payload_len = ntohs(udp->length) - sizeof(udp_hdr_t);
@@ -455,6 +458,10 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
                 uint16_t dst_port = ntohs(tcp->dst_port);
                 uint16_t tcp_hdr_len = ((ntohs(tcp->flags_offset) >> 12) & 0x0F) * 4;
                 uint8_t flags = ntohs(tcp->flags_offset) & 0x3F;
+
+                /* [FIX ADDITION] Prevent TCP length underflow */
+                uint16_t total_ip_len = ntohs(ip->total_len);
+                if (total_ip_len < ip_header_len + tcp_hdr_len) return;
                 
                 uint16_t payload_len = ntohs(ip->total_len) - ip_header_len - tcp_hdr_len;
                 uint8_t* payload = (uint8_t*)tcp + tcp_hdr_len;
