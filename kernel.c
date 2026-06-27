@@ -188,7 +188,10 @@ uint32_t schedule(uint32_t current_esp) {
 void cleanup_task_memory(int id) {
     if (tasks[id].page_directory != kernel_page_directory && tasks[id].page_directory != NULL) {
         uint32_t* pd = tasks[id].page_directory;
-        for (int i = 31; i < 1024; i++) {
+        
+        /* [FIX MODIFICATION] Change upper limit from 1024 to 64. 
+           Indices 31 to 63 are User Space. Index 64+ is Kernel Space */
+        for (int i = 31; i < 64; i++) {
             if (pd[i] & 0x01) {
                 uint32_t* pt = (uint32_t*)(pd[i] & 0xFFFFF000);
                 for (int j = 0; j < 1024; j++) {
@@ -763,7 +766,7 @@ uint32_t sys_sbrk(int increment) {
     if (new_break >= 0x10000000 || new_break < old_break) {
         return (uint32_t)-1;
     }
-    
+
     uint32_t start_page = ((old_break - 1) / 4096) + 1;
     uint32_t end_page = (new_break - 1) / 4096;
     
