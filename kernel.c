@@ -879,12 +879,59 @@ void hash_to_str(uint32_t hash, char* out_str) {
     out_str[8] = '\0';
 }
 
-/* Check if the password matches the stored hash */
-int check_password(const char* input_pass, const char* stored_hash) {
-    uint32_t hash = fnv1a_hash(input_pass);
-    char hash_str[9];
-    hash_to_str(hash, hash_str);
-    return (strcmp(hash_str, stored_hash) == 0);
+/* [FIX ADDITION] Salt Generation */
+void generate_salt(char* out_salt) {
+    extern volatile uint32_t timer_ticks;
+    uint32_t seed = timer_ticks ^ 0xDEADBEEF;
+    const char* hex = "0123456789abcdef";
+    for(int i=0; i<8; i++) {
+        seed = (seed * 1103515245) + 12345; /* LCG PRNG */
+        out_salt[i] = hex[(seed >> 16) & 0xF];
+    }
+    out_salt[8] = '\0';
+}
+
+/* [FIX ADDITION] Salted and stretched hashing */
+void hash_password_salted(const char* password, const char* salt, char* out_hash_str) {
+    char buffer[64];
+    custom_strcpy(buffer, salt);
+    int salt_len = 0; while(salt[salt_len]) salt_len++;
+    int pass_len = 0; while(password[pass_len]) pass_len++;
+    
+    for(int i=0; i<pass_len && (salt_len + i < 63); i++) buffer[salt_len + i] = password[i];
+    buffer[salt_len + pass_len] = '\0';
+    
+    /* Key stretching (10,000 iterations) to massively slow down brute-force */
+    uint32_t hash = fnv1a_hash(buffer);
+    for(int i = 0; i < 10000; i++) {
+        hash ^= fnv1a_hash((char*)&hash);
+    }
+    hash_to_str(hash, out_hash_str);
+}
+
+/* [FIX MODIFICATION] Upgraded check_password supporting salts */
+int check_password(const char* input_pass, const char* stored_str) {
+    int has_salt = 0;
+    for(int i=0; stored_str[i]; i++) {
+        if (stored_str[i] == '$') { has_salt = i; break; }
+    }
+    
+    if (has_salt) {
+        char salt[16];
+        for(int i=0; i<has_salt; i++) salt[i] = stored_str[i];
+        salt[has_salt] = '\0';
+        
+        char computed_hash[9];
+        hash_password_salted(input_pass, salt, computed_hash);
+        
+        return (strcmp(computed_hash, &stored_str[has_salt + 1]) == 0);
+    } else {
+        /* Backwards compatibility for old unsalted passwords */
+        uint32_t hash = fnv1a_hash(input_pass);
+        char hash_str[9];
+        hash_to_str(hash, hash_str);
+        return (strcmp(hash_str, stored_str) == 0);
+    }
 }
 
 int get_user_info(const char* username, char* out_password, uint8_t* out_uid) {
@@ -1623,8 +1670,8 @@ void execute_command() {
             }
             current_uid = old_uid;
             
-            kprintf("UID | Username    | Password Hash\n");
-            kprintf("---------------------------------\n");
+            kprintf("UID | Username    | Password Details\n");
+            kprintf("------------------------------------\n");
             uint32_t i = 0;
             while (i < size) {
                 char u[32], p[32], id_str[8]; int ui=0, pi=0, idi=0;
@@ -1642,8 +1689,26 @@ void execute_command() {
                 for(int s = len; s < 11; s++) kprintf(" ");
                 
                 /* [SECURITY] Only Root can see the true hashes */
-                if (current_uid == 0) kprintf(" | %s\n", p);
-                else kprintf(" | [HIDDEN]\n");
+                if (current_uid == 0) {
+                    int dollar_idx = -1;
+                    for (int k = 0; p[k]; k++) {
+                        if (p[k] == '$') { dollar_idx = k; break; }
+                    }
+                    
+                    /* If a '$' separator is found, split and print Salt + Hash */
+                    if (dollar_idx != -1) {
+                        p[dollar_idx] = '\0'; /* Split string in-place */
+                        char* salt = p;
+                        char* hash = &p[dollar_idx + 1];
+                        kprintf(" | Salt: %s | Hash: %s\n", salt, hash);
+                    } else {
+                        /* For backwards compatibility with old unsalted passwords */
+                        kprintf(" | Salt: None     | Hash: %s [UNSALTED/INSECURE]\n", p);
+                    }
+                }
+                else {
+                    kprintf(" | [HIDDEN]\n");
+                }
             }
             kfree(buf);
         }
@@ -1699,7 +1764,7 @@ void execute_command() {
                 kprintf("Error: User '%s' already exists.\n", username); goto end_prompt;
             }
 
-            /* Serches for the next available UID */
+            /* Searches for the next available UID */
             uint8_t* buf; uint32_t size;
             if (!fs_load_file("/passwd", &buf, &size)) { kprintf("Error: Could not read /passwd\n"); goto end_prompt; }
             uint8_t max_uid = 0; uint32_t offset = 0;
@@ -1720,15 +1785,24 @@ void execute_command() {
             uint8_t new_uid = max_uid + 1;
             if (new_uid >= 16) { kprintf("Error: Max 15 users supported (UID 1-15).\n"); kfree(buf); goto end_prompt; }
 
-            /* Password Hashing */
-            uint32_t hash = fnv1a_hash(password);
-            char hash_str[9]; hash_to_str(hash, hash_str);
+            /* [UPDATED] Salt generation and salted, stretched password hashing */
+            char salt[9]; generate_salt(salt);
+            char hash_str[9]; hash_password_salted(password, salt, hash_str);
+            
+            /* Build the final format "salt$hash" (e.g. "a1b2c3d4$e5f6a7b8") */
+            char final_store[32];
+            int fs_idx = 0;
+            for(int k=0; salt[k]; k++) final_store[fs_idx++] = salt[k];
+            final_store[fs_idx++] = '$';
+            for(int k=0; hash_str[k]; k++) final_store[fs_idx++] = hash_str[k];
+            final_store[fs_idx] = '\0';
 
             /* Creating new line in passwd */
             char new_line[128]; int nl_len = 0;
             char* u_ptr = username; while(*u_ptr) new_line[nl_len++] = *u_ptr++;
             new_line[nl_len++] = ':';
-            char* h_ptr = hash_str; while(*h_ptr) new_line[nl_len++] = *h_ptr++;
+            /* [UPDATED] h_ptr now points to final_store ("salt$hash") instead of the raw hash */
+            char* h_ptr = final_store; while(*h_ptr) new_line[nl_len++] = *h_ptr++;
             new_line[nl_len++] = ':';
             if (new_uid >= 10) {
                 new_line[nl_len++] = (new_uid / 10) + '0';
@@ -1863,12 +1937,20 @@ void execute_command() {
             goto end_prompt;
         }
         
-        /* 4. Hash calculate and write */
-        uint32_t hash = fnv1a_hash(new_pass);
-        char hash_str[9];
-        hash_to_str(hash, hash_str);
+        /* 4. [UPDATED] Salted and stretched hash calculation and write */
+        char salt[9]; generate_salt(salt);
+        char hash_str[9]; hash_password_salted(new_pass, salt, hash_str);
         
-        if (update_user_password(target, hash_str)) {
+        /* Build the final format "salt$hash" (e.g. "a1b2c3d4$e5f6a7b8") */
+        char final_store[32];
+        int fs_idx = 0;
+        for(int k=0; salt[k]; k++) final_store[fs_idx++] = salt[k];
+        final_store[fs_idx++] = '$';
+        for(int k=0; hash_str[k]; k++) final_store[fs_idx++] = hash_str[k];
+        final_store[fs_idx] = '\0';
+        
+        /* Save the updated "salt$hash" string to /passwd */
+        if (update_user_password(target, final_store)) {
             kprintf("passwd: password updated successfully.\n");
         } else {
             kprintf("Error: User '%s' not found.\n", target);
