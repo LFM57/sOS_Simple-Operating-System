@@ -186,6 +186,29 @@ uint32_t schedule(uint32_t current_esp) {
 }
 
 void cleanup_task_memory(int id) {
+    /* [FIX ADDITION] Close and release all open file descriptors / sockets */
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        if (tasks[id].open_files[i].is_used) {
+            
+            /* If the descriptor was a socket, release it in the global network stack */
+            if (tasks[id].open_files[i].type == TYPE_SOCKET) {
+                int sock_idx = tasks[id].open_files[i].offset;
+                extern socket_t sockets[];
+                if (sock_idx >= 0 && sock_idx < MAX_SOCKETS) {
+                    sockets[sock_idx].is_used = 0;        /* Release socket slot */
+                    sockets[sock_idx].tcp_state = 0;      /* Force TCP_CLOSED */
+                    sockets[sock_idx].rx_len = 0;         /* Flush buffers */
+                    sockets[sock_idx].rx_ready = 0;
+                }
+            }
+            
+            /* Mark task file descriptor as closed */
+            tasks[id].open_files[i].is_used = 0;
+            tasks[id].open_files[i].type = TYPE_NONE;
+            tasks[id].open_files[i].offset = 0;
+        }
+    }
+
     if (tasks[id].page_directory != kernel_page_directory && tasks[id].page_directory != NULL) {
         uint32_t* pd = tasks[id].page_directory;
         
