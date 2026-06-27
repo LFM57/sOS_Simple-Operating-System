@@ -2,8 +2,14 @@
 #include "elf.h"
 #include "pci.h"
 #include "net.h"
+#include "e1000.h"
 
 extern int fs_load_file(const char*, uint8_t**, uint32_t*);
+
+/* Forward declarations to fix the implicit declaration warnings */
+void custom_strcpy(char* dest, const char* src);
+void logout_and_login(const char* message);
+void execute_command(void);
 
 void user_program() {
     __asm__ volatile ("mov $1, %eax; int $0x80");
@@ -108,8 +114,6 @@ void replace_cmd_buffer(const char* new_str) {
         kputc(cmd_buffer[i]);
     }
 }
-
-void execute_command(void);
 
 /* --- STRING TOOLS --- */
 void custom_strcpy(char* dest, const char* src) { 
@@ -900,76 +904,70 @@ int get_user_info(const char* username, char* out_password, uint8_t* out_uid) {
     kfree(buf); return 0;
 }
 
-/* NANO LIGHT */
+/* NANO LIGHT WITH SCROLLING */
 
-char edit_lines[22][80];
-int edit_lens[22];
+#define NANO_MAX_LINES 1024
+char edit_lines[NANO_MAX_LINES][80];
+int edit_lens[NANO_MAX_LINES];
 int edit_cx = 0;
 int edit_cy = 0;
+int scroll_y = 0; /* Tracks which line is at the top of the screen */
 
 /* Draw the complete editor on the VGA screen */
 void draw_editor(const char* filename) {
     uint16_t* vmem = (uint16_t*)0xB8000;
     
-    /* 1. Header Bar (Line 0) - Inverted colors (Black on Gray: 0x70) */
+    /* 1. Header Bar (Line 0) */
     char header[80];
     for(int i = 0; i < 80; i++) header[i] = ' ';
-    char* title = "  sOS Nano Light v2.5 -- File: ";
+    char* title = "  sOS Nano Light v3.0 -- File: ";
     int idx = 0;
     while(title[idx]) { header[idx] = title[idx]; idx++; }
     int f_idx = 0;
     while(filename[f_idx] && idx < 75) { header[idx++] = filename[f_idx++]; }
+    for(int i = 0; i < 80; i++) vmem[i] = (uint16_t)header[i] | 0x7000;
     
-    for(int i = 0; i < 80; i++) {
-        vmem[i] = (uint16_t)header[i] | 0x7000;
-    }
-    
-    /* 2. Editing Area (Lines 1 to 22) - White on Black (0x0F) */
+    /* 2. Editing Area (Lines 1 to 22) - Maps to scroll_y */
     for (int l = 0; l < 22; l++) {
         for (int c = 0; c < 80; c++) {
             char char_to_draw = ' ';
-            if (c < edit_lens[l]) {
-                char_to_draw = edit_lines[l][c];
+            if (scroll_y + l < NANO_MAX_LINES && c < edit_lens[scroll_y + l]) {
+                char_to_draw = edit_lines[scroll_y + l][c];
             }
             vmem[(l + 1) * 80 + c] = (uint16_t)char_to_draw | 0x0F00;
         }
     }
     
-    /* 3. Status Line (Line 23) - Empty */
-    for (int i = 0; i < 80; i++) {
-        vmem[23 * 80 + i] = ' ' | 0x0F00;
-    }
+    /* 3. Status Line (Line 23) */
+    for (int i = 0; i < 80; i++) vmem[23 * 80 + i] = ' ' | 0x0F00;
     
-    /* 4. Shortcut Bar (Line 24) - Inverted colors (0x70) */
+    /* 4. Shortcut Bar (Line 24) */
     char footer[80];
     for(int i = 0; i < 80; i++) footer[i] = ' ';
-    char* f_text = "  ^S: Save and Write    ^X: Quit Nano";
+    char* f_text = "  ^S: Save    ^X: Quit    (Use Arrows to Scroll)";
     int f_text_idx = 0;
     while(f_text[f_text_idx]) { footer[f_text_idx] = f_text[f_text_idx]; f_text_idx++; }
+    for(int i = 0; i < 80; i++) vmem[24 * 80 + i] = (uint16_t)footer[i] | 0x7000;
     
-    for(int i = 0; i < 80; i++) {
-        vmem[24 * 80 + i] = (uint16_t)footer[i] | 0x7000;
-    }
-    
-    /* Hardware cursor positioning (x, y + 1 due to the header line) */
+    /* Hardware cursor positioning (adjusted for scroll) */
     extern void update_cursor(int, int);
-    update_cursor(edit_cx, edit_cy + 1);
+    update_cursor(edit_cx, (edit_cy - scroll_y) + 1);
 }
 
 void run_nano(const char* filename) {
     /* Clean up the editor memory */
-    for(int l = 0; l < 22; l++) {
+    for(int l = 0; l < NANO_MAX_LINES; l++) {
         for(int c = 0; c < 80; c++) edit_lines[l][c] = '\0';
         edit_lens[l] = 0;
     }
-    edit_cx = 0; edit_cy = 0;
+    edit_cx = 0; edit_cy = 0; scroll_y = 0;
     
     /* Load the file if it exists on disk */
     uint8_t* buf = NULL;
     uint32_t size = 0;
     if (fs_load_file(filename, &buf, &size)) {
         int l = 0, c = 0;
-        for (uint32_t i = 0; i < size && l < 22; i++) {
+        for (uint32_t i = 0; i < size && l < NANO_MAX_LINES; i++) {
             if (buf[i] == '\n') {
                 edit_lines[l][c] = '\0';
                 edit_lens[l] = c;
@@ -977,115 +975,117 @@ void run_nano(const char* filename) {
             } else if (buf[i] == '\r') {
                 /* Ignore */
             } else {
-                if (c < 79) {
-                    edit_lines[l][c++] = buf[i];
-                }
+                if (c < 79) edit_lines[l][c++] = buf[i];
             }
         }
-        if (l < 22 && c > 0) {
+        if (l < NANO_MAX_LINES && c > 0) {
             edit_lines[l][c] = '\0';
             edit_lens[l] = c;
         }
         kfree(buf);
-    } else {
-        /* Block if reading is forbidden */
-        if (fs_error == FS_ERR_PERMISSION) {
-            kprintf("Error: Permission denied (Read access required).\n");
-            return;
-        }
+    } else if (fs_error == FS_ERR_PERMISSION) {
+        kprintf("Error: Permission denied.\n");
+        return;
     }
     
     while (1) {
         draw_editor(filename);
         char c = wait_key();
         
-        if (c == 24) { /* Ctrl+X -> Quit */
-            break;
-        }
-        else if (c == 19) { /* Ctrl+S -> Save */
-            /* Search for the last non-empty line to avoid saving unnecessary blank lines */
+        if (c == 24) break; /* Ctrl+X */
+        else if (c == 19) { /* Ctrl+S */
             int last_non_empty = -1;
-            for (int l = 21; l >= 0; l--) {
-                if (edit_lens[l] > 0) {
-                    last_non_empty = l;
-                    break;
-                }
+            for (int l = NANO_MAX_LINES - 1; l >= 0; l--) {
+                if (edit_lens[l] > 0) { last_non_empty = l; break; }
             }
-            
-            char out_buf[2000];
-            int out_idx = 0;
-            /* If the entire file is empty, write nothing. Otherwise, stop at the last active line */
             int max_line_to_write = (last_non_empty == -1) ? 0 : last_non_empty;
             
+            /* Dynamically allocate exact save buffer size */
+            uint32_t required_size = 0;
+            for (int l = 0; l <= max_line_to_write; l++) required_size += edit_lens[l] + 1;
+            
+            char* out_buf = (char*)kmalloc(required_size + 1);
+            int out_idx = 0;
             for (int l = 0; l <= max_line_to_write; l++) {
-                for (int col = 0; col < edit_lens[l]; col++) {
-                    out_buf[out_idx++] = edit_lines[l][col];
-                }
+                for (int col = 0; col < edit_lens[l]; col++) out_buf[out_idx++] = edit_lines[l][col];
                 out_buf[out_idx++] = '\n';
             }
             out_buf[out_idx] = '\0';
             
-            fs_write(filename, out_buf);
+            /* Use our new binary write function to save files larger than 512 bytes safely! */
+            extern int fs_write_bin(const char*, uint8_t*, uint32_t);
+            fs_write_bin(filename, (uint8_t*)out_buf, out_idx);
+            kfree(out_buf);
             
-            /* Green visual confirmation on the status line */
+            /* Visual confirmation */
             uint16_t* vmem = (uint16_t*)0xB8000;
             char* save_msg = "  [ File successfully saved! ]  ";
             int s_idx = 0;
             while(save_msg[s_idx]) {
-                vmem[23 * 80 + 20 + s_idx] = (uint16_t)save_msg[s_idx] | 0x0A00; /* Green on Black */
+                vmem[23 * 80 + 20 + s_idx] = (uint16_t)save_msg[s_idx] | 0x0A00;
                 s_idx++;
             }
-            
-            /* PIT Usage for a pause of precisely 1.5s */
             uint32_t start_ticks = timer_ticks;
-            while (timer_ticks < start_ticks + 150) {
-                __asm__ volatile("hlt"); /* Put the processor to sleep while waiting for timer interrupts */
-            }
+            while (timer_ticks < start_ticks + 150) __asm__ volatile("hlt");
         }
-        else if (c == 17) {
+        else if (c == 17) { /* Up */
             if (edit_cy > 0) {
                 edit_cy--;
+                if (edit_cy < scroll_y) scroll_y--;
                 if (edit_cx > edit_lens[edit_cy]) edit_cx = edit_lens[edit_cy];
             }
         }
-        else if (c == 18) {
-            if (edit_cy < 21) {
+        else if (c == 18) { /* Down */
+            if (edit_cy < NANO_MAX_LINES - 1) {
                 edit_cy++;
+                if (edit_cy >= scroll_y + 22) scroll_y++;
                 if (edit_cx > edit_lens[edit_cy]) edit_cx = edit_lens[edit_cy];
             }
         }
-        else if (c == 20) {
-            if (edit_cx > 0) {
-                edit_cx--;
-            } else if (edit_cy > 0) {
+        else if (c == 20) { /* Left */
+            if (edit_cx > 0) edit_cx--;
+            else if (edit_cy > 0) {
                 edit_cy--;
+                if (edit_cy < scroll_y) scroll_y--;
                 edit_cx = edit_lens[edit_cy];
             }
         }
-        else if (c == 21) {
-            if (edit_cx < edit_lens[edit_cy]) {
-                edit_cx++;
-            } else if (edit_cy < 21) {
+        else if (c == 21) { /* Right */
+            if (edit_cx < edit_lens[edit_cy]) edit_cx++;
+            else if (edit_cy < NANO_MAX_LINES - 1) {
                 edit_cy++;
+                if (edit_cy >= scroll_y + 22) scroll_y++;
                 edit_cx = 0;
             }
         }
-        else if (c == '\n' || c == '\r') { /* Enter -> Next line */
-            if (edit_cy < 21) {
+        else if (c == '\n' || c == '\r') { /* Enter */
+            if (edit_cy < NANO_MAX_LINES - 1) {
+                /* Shift lines down */
+                for (int l = NANO_MAX_LINES - 1; l > edit_cy; l--) {
+                    for(int col = 0; col < 80; col++) edit_lines[l][col] = edit_lines[l - 1][col];
+                    edit_lens[l] = edit_lens[l - 1];
+                }
+                /* Split line at cursor */
+                int remaining = edit_lens[edit_cy] - edit_cx;
+                for (int col = 0; col < remaining; col++) {
+                    edit_lines[edit_cy + 1][col] = edit_lines[edit_cy][edit_cx + col];
+                }
+                edit_lens[edit_cy + 1] = remaining;
+                edit_lens[edit_cy] = edit_cx;
+                
                 edit_cy++;
+                if (edit_cy >= scroll_y + 22) scroll_y++;
                 edit_cx = 0;
             }
         }
         else if (c == '\b' || c == 127) { /* Backspace */
             if (edit_cx > 0) {
-                /* Moves characters one step left */
                 for (int col = edit_cx - 1; col < edit_lens[edit_cy]; col++) {
                     edit_lines[edit_cy][col] = edit_lines[edit_cy][col + 1];
                 }
                 edit_cx--;
                 edit_lens[edit_cy]--;
             } else if (edit_cy > 0) {
-                /* Merge the current line with the previous line if there is enough space */
                 int prev_len = edit_lens[edit_cy - 1];
                 int curr_len = edit_lens[edit_cy];
                 if (prev_len + curr_len < 80) {
@@ -1093,22 +1093,20 @@ void run_nano(const char* filename) {
                         edit_lines[edit_cy - 1][prev_len + col] = edit_lines[edit_cy][col];
                     }
                     edit_lens[edit_cy - 1] += curr_len;
-                    /* Shift all lines below upwards */
-                    for (int l = edit_cy; l < 21; l++) {
+                    for (int l = edit_cy; l < NANO_MAX_LINES - 1; l++) {
                         for(int col = 0; col < 80; col++) edit_lines[l][col] = edit_lines[l + 1][col];
                         edit_lens[l] = edit_lens[l + 1];
                     }
-                    for(int col = 0; col < 80; col++) edit_lines[21][col] = '\0';
-                    edit_lens[21] = 0;
+                    edit_lens[NANO_MAX_LINES - 1] = 0;
                     
                     edit_cy--;
+                    if (edit_cy < scroll_y) scroll_y--;
                     edit_cx = prev_len;
                 }
             }
         }
-        else if (c >= 32 && c <= 126) { /* Printable character */
+        else if (c >= 32 && c <= 126) { /* Typing text */
             if (edit_lens[edit_cy] < 79) {
-                /* Insertion: shift characters on the right to the right */
                 for (int col = edit_lens[edit_cy]; col > edit_cx; col--) {
                     edit_lines[edit_cy][col] = edit_lines[edit_cy][col - 1];
                 }
@@ -1118,8 +1116,7 @@ void run_nano(const char* filename) {
             }
         }
     }
-    
-    clear_terminal(); /* Restores clean shell screen on exit */
+    clear_terminal(); 
 }
 
 /* PASSWORD OVERWRITTING */
@@ -1923,7 +1920,7 @@ void execute_command() {
             kprintf("Error: DNS Resolution failed.\n");
             goto end_prompt;
         }
-        kprintf("Connecting to %d.%d.%d.%d:80...\n", target_ip[0], target_ip[1], target_ip[2], target_ip[3]);
+        kprintf("Connecting to %d.%d.%d.%d:80...\n", target_ip[0], target_ip[1], target_ip[2], target_ip[3]); 
         
         /* 3. TCP Connect */
         extern int net_alloc_socket(int);
@@ -1967,8 +1964,8 @@ void execute_command() {
         sockets[sock_idx].seq_num += r_idx;
         
         /* 5. Receive HTTP Data */
-        /* Allocate a 64KB buffer on the kernel heap */
-        uint8_t* http_data = (uint8_t*)kmalloc(65536); 
+        uint32_t MAX_DL_SIZE = 1024 * 1024; /* 1 MB limit */
+        uint8_t* http_data = (uint8_t*)kmalloc(MAX_DL_SIZE); 
         uint32_t http_len = 0;
         int conn_closed = 0;
         start = timer_ticks;
@@ -1977,7 +1974,7 @@ void execute_command() {
             if (sockets[sock_idx].rx_ready) {
                 __asm__ volatile("cli");
                 for(uint32_t j=0; j<sockets[sock_idx].rx_len; j++) {
-                    if(http_len < 65536) http_data[http_len++] = sockets[sock_idx].rx_buffer[j];
+                    if(http_len < MAX_DL_SIZE) http_data[http_len++] = sockets[sock_idx].rx_buffer[j];
                 }
                 sockets[sock_idx].rx_len = 0;
                 sockets[sock_idx].rx_ready = 0;

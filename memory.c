@@ -94,9 +94,18 @@ typedef struct heap_block {
 heap_block_t *heap_head = NULL;
 
 void init_heap() {
-    heap_head = (heap_block_t*)pmm_alloc_page();
+    uint32_t heap_start = 0x10000000; /* Safe kernel virtual address (256 MB mark) */
+    uint32_t heap_size = 1024 * 1024 * 4; /* 4 MB Heap */
+    
+    /* Dynamically allocate and map the physical pages to our virtual heap */
+    for (uint32_t i = 0; i < heap_size; i += 4096) {
+        void* phys = pmm_alloc_page();
+        map_page(heap_start + i, (uint32_t)phys);
+    }
+    
+    heap_head = (heap_block_t*)heap_start;
     heap_head->magic = HEAP_MAGIC;
-    heap_head->size = PAGE_SIZE - sizeof(heap_block_t);
+    heap_head->size = heap_size - sizeof(heap_block_t);
     heap_head->is_free = 1; 
     heap_head->next = NULL;
 }
