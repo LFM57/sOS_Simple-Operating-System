@@ -127,6 +127,20 @@ int strcmp(const char *s1, const char *s2) {
 
 struct multiboot_info {
     uint32_t flags; uint32_t mem_lower; uint32_t mem_upper;
+    uint32_t boot_device; uint32_t cmdline; uint32_t mods_count; uint32_t mods_addr;
+    uint32_t syms[4]; uint32_t mmap_length; uint32_t mmap_addr;
+    uint32_t drives_length; uint32_t drives_addr; uint32_t config_table;
+    uint32_t boot_loader_name; uint32_t apm_table;
+    uint32_t vbe_control_info; uint32_t vbe_mode_info; uint16_t vbe_mode;
+    uint16_t vbe_interface_seg; uint16_t vbe_interface_off; uint16_t vbe_interface_len;
+    /* Framebuffer info (GRUB Multiboot 1 extension) */
+    uint64_t framebuffer_addr;
+    uint32_t framebuffer_pitch;
+    uint32_t framebuffer_width;
+    uint32_t framebuffer_height;
+    uint8_t framebuffer_bpp;
+    uint8_t framebuffer_type;
+    uint8_t color_info[6];
 } __attribute__((packed));
 
 /* --- MULTITASKING (Context Switching) --- */
@@ -2227,22 +2241,43 @@ void logout_and_login(const char* message) {
 }
 
 void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
-    clear_terminal();
+
     kprintf("========================================\n[INFO] Starting sOS...\n");
 
     init_gdt(); kprintf("[INFO] GDT OK\n");
     init_idt(); kprintf("[INFO] IDT OK (Exceptions OK)\n");
     init_pic(); kprintf("[INFO] PIC Reprogrammation OK\n");
 
+    /* VARIABLES TO HOLD VIDEO INFO */
+    uint64_t fb_addr = 0;
+    uint32_t fb_width = 0, fb_height = 0, fb_pitch = 0;
+    uint8_t fb_bpp = 0;
+
     if (magic == 0x2BADB002) {
         struct multiboot_info* mbi = (struct multiboot_info*)mb_info_addr;
         if (mbi->flags & 0x01) total_ram_kb = mbi->mem_lower + mbi->mem_upper;
+        
+        /* BIT 12 indicates that Framebuffer info is provided */
+        if (mbi->flags & (1 << 12)) { 
+            fb_addr = mbi->framebuffer_addr;
+            fb_width = mbi->framebuffer_width;
+            fb_height = mbi->framebuffer_height;
+            fb_pitch = mbi->framebuffer_pitch;
+            fb_bpp = mbi->framebuffer_bpp;
+        }
     }
 
     if (total_ram_kb > 0) {
         init_pmm(total_ram_kb); kprintf("[INFO] PMM OK\n");
         init_paging(); kprintf("[INFO] Paging OK\n");
     }
+
+    /* INITIALIZE GRAPHICS DIRECTLY AFTER PAGING */
+    extern void init_graphics(uint32_t, uint32_t, uint32_t, uint32_t, uint8_t);
+    init_graphics((uint32_t)fb_addr, fb_width, fb_height, fb_pitch, fb_bpp);
+    
+    /* We can clear the terminal (which will now clear the graphics screen) */
+    clear_terminal();
 
     init_heap(); kprintf("[INFO] Heap (kmalloc) OK\n");
     init_fs();

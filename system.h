@@ -40,6 +40,12 @@ int fs_suggest_file(const char* target_name, char* out_suggestion);
 void clear_terminal();
 void kprintf(const char* format, ...);
 void kputc(char c);
+void init_graphics(uint32_t phys_addr, uint32_t width, uint32_t height, uint32_t pitch, uint8_t bpp);
+void put_pixel(uint32_t x, uint32_t y, uint32_t color);
+void swap_buffers(void);
+extern int is_graphics_mode;
+void draw_char(char c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color);
+void draw_string(const char* str, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color);
 
 /* --- Descriptors (gdt_idt.c) --- */
 void init_gdt();

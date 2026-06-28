@@ -4,8 +4,21 @@
 /* --- Multiboot Header --- */
 .balign 4
 .long 0x1BADB002    /* MAGIC */
-.long 0x00000003    /* FLAGS (ALIGN | MEMINFO) */
-.long 0xE4524FFB    /* CHECKSUM */
+.long 0x00000007    /* FLAGS (ALIGN | MEMINFO | VIDEO) */
+.long 0xE4524FF7    /* CHECKSUM = -(0x1BADB002 + 0x00000007) */
+
+/* The Multiboot spec requires these 5 address fields to be zeroed when skipping to the video fields */
+.long 0 /* header_addr */
+.long 0 /* load_addr */
+.long 0 /* load_end_addr */
+.long 0 /* bss_end_addr */
+.long 0 /* entry_addr */
+
+/* Video Mode Request Fields */
+.long 0    /* 0 = Linear Graphics Mode */
+.long 1024 /* Width */
+.long 768  /* Height */
+.long 32   /* 32-bit color depth (ARGB) */
 /* ----------------------------------------------------------- */
 
 .type _start, @function
