@@ -5,6 +5,8 @@
 #include "e1000.h"
 #include "crypto.h" 
 
+#define SOS_VERSION "2.4.2"
+
 extern int fs_load_file(const char*, uint8_t**, uint32_t*);
 
 /* Forward declarations to fix the implicit declaration warnings */
@@ -1008,64 +1010,122 @@ int get_user_info(const char* username, char* out_password, uint8_t* out_uid) {
     kfree(buf); return 0;
 }
 
-/* NANO LIGHT WITH SCROLLING */
-
+/* --- NANO LIGHT WITH SCROLLING AND DYNAMIC RESOLUTION --- */
 #define NANO_MAX_LINES 1024
-char edit_lines[NANO_MAX_LINES][80];
+#define NANO_MAX_COLS  128  /* Increased to support 1024px width */
+char edit_lines[NANO_MAX_LINES][NANO_MAX_COLS];
 int edit_lens[NANO_MAX_LINES];
 int edit_cx = 0;
 int edit_cy = 0;
-int scroll_y = 0; /* Tracks which line is at the top of the screen */
+int scroll_y = 0; 
 
-/* Draw the complete editor on the VGA screen */
+/* Expose graphics engine dimensions */
+extern uint32_t g_width, g_height;
+
 void draw_editor(const char* filename) {
-    uint16_t* vmem = (uint16_t*)0xB8000;
+    /* Dynamically calculate terminal size */
+    int term_cols = is_graphics_mode ? (g_width / 8) : 80;
+    int term_rows = is_graphics_mode ? (g_height / 16) : 25;
+    int visible_lines = term_rows - 3; /* Header, Footer, and Status take 3 lines */
+
+    if (term_cols > NANO_MAX_COLS) term_cols = NANO_MAX_COLS;
+
+    /* 1. Format Header & Footer Strings to span the whole width */
+    char header[129];
+    for(int i = 0; i < term_cols; i++) header[i] = ' ';
+    header[term_cols] = '\0';
     
-    /* 1. Header Bar (Line 0) */
-    char header[80];
-    for(int i = 0; i < 80; i++) header[i] = ' ';
-    char* title = "  sOS Nano Light v3.0 -- File: ";
+    char* title = "  sOS Nano Light v3.1 -- File: ";
     int idx = 0;
     while(title[idx]) { header[idx] = title[idx]; idx++; }
     int f_idx = 0;
-    while(filename[f_idx] && idx < 75) { header[idx++] = filename[f_idx++]; }
-    for(int i = 0; i < 80; i++) vmem[i] = (uint16_t)header[i] | 0x7000;
+    while(filename[f_idx] && idx < term_cols - 5) { header[idx++] = filename[f_idx++]; }
     
-    /* 2. Editing Area (Lines 1 to 22) - Maps to scroll_y */
-    for (int l = 0; l < 22; l++) {
-        for (int c = 0; c < 80; c++) {
-            char char_to_draw = ' ';
-            if (scroll_y + l < NANO_MAX_LINES && c < edit_lens[scroll_y + l]) {
-                char_to_draw = edit_lines[scroll_y + l][c];
-            }
-            vmem[(l + 1) * 80 + c] = (uint16_t)char_to_draw | 0x0F00;
-        }
-    }
+    char footer[129];
+    for(int i = 0; i < term_cols; i++) footer[i] = ' ';
+    footer[term_cols] = '\0';
     
-    /* 3. Status Line (Line 23) */
-    for (int i = 0; i < 80; i++) vmem[23 * 80 + i] = ' ' | 0x0F00;
-    
-    /* 4. Shortcut Bar (Line 24) */
-    char footer[80];
-    for(int i = 0; i < 80; i++) footer[i] = ' ';
     char* f_text = "  ^S: Save    ^X: Quit    (Use Arrows to Scroll)";
     int f_text_idx = 0;
     while(f_text[f_text_idx]) { footer[f_text_idx] = f_text[f_text_idx]; f_text_idx++; }
-    for(int i = 0; i < 80; i++) vmem[24 * 80 + i] = (uint16_t)footer[i] | 0x7000;
-    
-    /* Hardware cursor positioning (adjusted for scroll) */
-    extern void update_cursor(int, int);
-    update_cursor(edit_cx, (edit_cy - scroll_y) + 1);
+
+    /* 2. Graphical Rendering Mode */
+    if (is_graphics_mode) {
+        uint32_t bg_normal = 0x00000000; /* Black */
+        uint32_t fg_normal = 0x00FFFFFF; /* White */
+        uint32_t bg_invert = 0x00AAAAAA; /* Gray */
+        uint32_t fg_invert = 0x00000000; /* Black */
+
+        /* Header */
+        draw_string(header, 0, 0, fg_invert, bg_invert);
+
+        /* Editing Area */
+        for (int l = 0; l < visible_lines; l++) {
+            for (int c = 0; c < term_cols; c++) {
+                char char_to_draw = ' ';
+                if (scroll_y + l < NANO_MAX_LINES && c < edit_lens[scroll_y + l]) {
+                    char_to_draw = edit_lines[scroll_y + l][c];
+                }
+                draw_char(char_to_draw, c * 8, (l + 1) * 16, fg_normal, bg_normal);
+            }
+        }
+        
+        /* Clear Status Line */
+        for (int c = 0; c < term_cols; c++) {
+            draw_char(' ', c * 8, (term_rows - 2) * 16, fg_normal, bg_normal);
+        }
+
+        /* Footer */
+        draw_string(footer, 0, (term_rows - 1) * 16, fg_invert, bg_invert);
+
+        /* Draw Software Block Cursor */
+        char char_under_cursor = ' ';
+        if (edit_cy < NANO_MAX_LINES && edit_cx < edit_lens[edit_cy]) {
+            char_under_cursor = edit_lines[edit_cy][edit_cx];
+        }
+        draw_char(char_under_cursor, edit_cx * 8, ((edit_cy - scroll_y) + 1) * 16, bg_normal, fg_normal);
+
+        swap_buffers();
+    } 
+    /* 3. Fallback Legacy VGA Mode */
+    else {
+        uint16_t* vmem = (uint16_t*)0xB8000;
+        for(int i = 0; i < 80; i++) vmem[i] = (uint16_t)header[i] | 0x7000;
+        
+        for (int l = 0; l < visible_lines; l++) {
+            for (int c = 0; c < 80; c++) {
+                char char_to_draw = ' ';
+                if (scroll_y + l < NANO_MAX_LINES && c < edit_lens[scroll_y + l]) {
+                    char_to_draw = edit_lines[scroll_y + l][c];
+                }
+                vmem[(l + 1) * 80 + c] = (uint16_t)char_to_draw | 0x0F00;
+            }
+        }
+        
+        for (int i = 0; i < 80; i++) vmem[23 * 80 + i] = ' ' | 0x0F00;
+        for (int i = 0; i < 80; i++) vmem[24 * 80 + i] = (uint16_t)footer[i] | 0x7000;
+        
+        extern void update_cursor(int, int);
+        update_cursor(edit_cx, (edit_cy - scroll_y) + 1);
+    }
 }
 
 void run_nano(const char* filename) {
+    int term_cols = is_graphics_mode ? (g_width / 8) : 80;
+    if (term_cols > NANO_MAX_COLS) term_cols = NANO_MAX_COLS;
+    int term_rows = is_graphics_mode ? (g_height / 16) : 25;
+    int visible_lines = term_rows - 3;
+
     /* Clean up the editor memory */
     for(int l = 0; l < NANO_MAX_LINES; l++) {
-        for(int c = 0; c < 80; c++) edit_lines[l][c] = '\0';
+        for(int c = 0; c < NANO_MAX_COLS; c++) edit_lines[l][c] = '\0';
         edit_lens[l] = 0;
     }
     edit_cx = 0; edit_cy = 0; scroll_y = 0;
     
+    /* VERY IMPORTANT: Wipe the shell output from the screen before launching */
+    clear_terminal();
+
     /* Load the file if it exists on disk */
     uint8_t* buf = NULL;
     uint32_t size = 0;
@@ -1079,7 +1139,7 @@ void run_nano(const char* filename) {
             } else if (buf[i] == '\r') {
                 /* Ignore */
             } else {
-                if (c < 79) edit_lines[l][c++] = buf[i];
+                if (c < term_cols - 1) edit_lines[l][c++] = buf[i];
             }
         }
         if (l < NANO_MAX_LINES && c > 0) {
@@ -1104,7 +1164,6 @@ void run_nano(const char* filename) {
             }
             int max_line_to_write = (last_non_empty == -1) ? 0 : last_non_empty;
             
-            /* Dynamically allocate exact save buffer size */
             uint32_t required_size = 0;
             for (int l = 0; l <= max_line_to_write; l++) required_size += edit_lens[l] + 1;
             
@@ -1116,19 +1175,26 @@ void run_nano(const char* filename) {
             }
             out_buf[out_idx] = '\0';
             
-            /* Use our new binary write function to save files larger than 512 bytes safely! */
             extern int fs_write_bin(const char*, uint8_t*, uint32_t);
             fs_write_bin(filename, (uint8_t*)out_buf, out_idx);
             kfree(out_buf);
             
-            /* Visual confirmation */
-            uint16_t* vmem = (uint16_t*)0xB8000;
+            /* Visual confirmation adapted for graphics mode */
             char* save_msg = "  [ File successfully saved! ]  ";
-            int s_idx = 0;
-            while(save_msg[s_idx]) {
-                vmem[23 * 80 + 20 + s_idx] = (uint16_t)save_msg[s_idx] | 0x0A00;
-                s_idx++;
+            if (is_graphics_mode) {
+                uint32_t bg_success = 0x0000AA00;
+                uint32_t fg_success = 0x00FFFFFF;
+                draw_string(save_msg, 20 * 8, (term_rows - 2) * 16, fg_success, bg_success);
+                swap_buffers();
+            } else {
+                uint16_t* vmem = (uint16_t*)0xB8000;
+                int s_idx = 0;
+                while(save_msg[s_idx]) {
+                    vmem[23 * 80 + 20 + s_idx] = (uint16_t)save_msg[s_idx] | 0x0A00;
+                    s_idx++;
+                }
             }
+            
             uint32_t start_ticks = timer_ticks;
             while (timer_ticks < start_ticks + 150) __asm__ volatile("hlt");
         }
@@ -1142,7 +1208,7 @@ void run_nano(const char* filename) {
         else if (c == 18) { /* Down */
             if (edit_cy < NANO_MAX_LINES - 1) {
                 edit_cy++;
-                if (edit_cy >= scroll_y + 22) scroll_y++;
+                if (edit_cy >= scroll_y + visible_lines) scroll_y++;
                 if (edit_cx > edit_lens[edit_cy]) edit_cx = edit_lens[edit_cy];
             }
         }
@@ -1158,18 +1224,16 @@ void run_nano(const char* filename) {
             if (edit_cx < edit_lens[edit_cy]) edit_cx++;
             else if (edit_cy < NANO_MAX_LINES - 1) {
                 edit_cy++;
-                if (edit_cy >= scroll_y + 22) scroll_y++;
+                if (edit_cy >= scroll_y + visible_lines) scroll_y++;
                 edit_cx = 0;
             }
         }
         else if (c == '\n' || c == '\r') { /* Enter */
             if (edit_cy < NANO_MAX_LINES - 1) {
-                /* Shift lines down */
                 for (int l = NANO_MAX_LINES - 1; l > edit_cy; l--) {
-                    for(int col = 0; col < 80; col++) edit_lines[l][col] = edit_lines[l - 1][col];
+                    for(int col = 0; col < NANO_MAX_COLS; col++) edit_lines[l][col] = edit_lines[l - 1][col];
                     edit_lens[l] = edit_lens[l - 1];
                 }
-                /* Split line at cursor */
                 int remaining = edit_lens[edit_cy] - edit_cx;
                 for (int col = 0; col < remaining; col++) {
                     edit_lines[edit_cy + 1][col] = edit_lines[edit_cy][edit_cx + col];
@@ -1178,7 +1242,7 @@ void run_nano(const char* filename) {
                 edit_lens[edit_cy] = edit_cx;
                 
                 edit_cy++;
-                if (edit_cy >= scroll_y + 22) scroll_y++;
+                if (edit_cy >= scroll_y + visible_lines) scroll_y++;
                 edit_cx = 0;
             }
         }
@@ -1192,13 +1256,13 @@ void run_nano(const char* filename) {
             } else if (edit_cy > 0) {
                 int prev_len = edit_lens[edit_cy - 1];
                 int curr_len = edit_lens[edit_cy];
-                if (prev_len + curr_len < 80) {
+                if (prev_len + curr_len < term_cols - 1) {
                     for (int col = 0; col < curr_len; col++) {
                         edit_lines[edit_cy - 1][prev_len + col] = edit_lines[edit_cy][col];
                     }
                     edit_lens[edit_cy - 1] += curr_len;
                     for (int l = edit_cy; l < NANO_MAX_LINES - 1; l++) {
-                        for(int col = 0; col < 80; col++) edit_lines[l][col] = edit_lines[l + 1][col];
+                        for(int col = 0; col < NANO_MAX_COLS; col++) edit_lines[l][col] = edit_lines[l + 1][col];
                         edit_lens[l] = edit_lens[l + 1];
                     }
                     edit_lens[NANO_MAX_LINES - 1] = 0;
@@ -1210,7 +1274,7 @@ void run_nano(const char* filename) {
             }
         }
         else if (c >= 32 && c <= 126) { /* Typing text */
-            if (edit_lens[edit_cy] < 79) {
+            if (edit_lens[edit_cy] < term_cols - 1) {
                 for (int col = edit_lens[edit_cy]; col > edit_cx; col--) {
                     edit_lines[edit_cy][col] = edit_lines[edit_cy][col - 1];
                 }
@@ -1531,7 +1595,7 @@ void execute_command() {
 
     if (strcmp(cmd, "help") == 0) {
         /* This line is ugly and non dynamic: it will be modified later on */
-        kprintf("Available commands:\n  help      clear    uptime\n  ram       ls       cd\n  cat       mkdir    rm\n  touch     write    loop\n  run       df       ps\n  kill      about    shutdown\n  whoami    chown    chmod\n  su        sudo     userlist\n  nano      passwd   cp\n  mv        hex      ifconfig\n");
+        kprintf("Available commands:\n  help      clear    uptime\n  ram       ls       cd\n  cat       mkdir    rm\n  touch     write    loop\n  run       df       ps\n  kill      about    shutdown\n  whoami    chown    chmod\n  su        sudo     userlist\n  nano      passwd   cp\n  mv        hex      ifconfig\n  wget      update\n");
     }
     else if (strcmp(cmd, "ifconfig") == 0) {
         kprintf("e1000     Link encap: Ethernet  HWaddr ");
@@ -1691,7 +1755,7 @@ void execute_command() {
         kprintf(" \\___ \\ /    |    \\ /        \\ \n");
         kprintf("/____  >\\_______  //_______  /\n");
         kprintf("     \\/         \\/         \\/ \n\n");
-        kprintf("sOS (Simple Operating System) - v2.3\n");
+        kprintf("sOS (Simple Operating System) - v%s\n", SOS_VERSION); 
         kprintf("Arch  : i686 (32-bit x86 Intel)\n");
         kprintf("Memory: %d MB\n", total_ram_kb / 1024);
         kprintf("FS    : FAT16 (ATA PIO Mode)\n");
@@ -2219,15 +2283,13 @@ void execute_command() {
         char mac_hex[65];
         bin_to_hex(mac, 32, mac_hex);
         
-        /* --- ADDED DIAGNOSTIC PRINTS --- */
-        kprintf("\n[DEBUG] Downloaded File Size: %d bytes\n", bin_len);
+        kprintf("\n[+] Downloaded File Size: %d bytes\n", bin_len);
         
-        kprintf("[DEBUG] Expected Sig : ");
+        kprintf("[+] Expected Sig : ");
         for(int j=0; j<64; j++) kputc(sig_data[j]);
         kprintf("\n");
         
-        kprintf("[DEBUG] Computed Sig : %s\n\n", mac_hex);
-        /* ------------------------------- */
+        kprintf("[+] Computed Sig : %s\n\n", mac_hex);
         
         int match = 1;
         for (int j = 0; j < 64; j++) {
@@ -2240,6 +2302,24 @@ void execute_command() {
             kfree(sig_data); kfree(bin_data);
             goto end_prompt;
         }
+
+        kprintf("[+] Checking current version against update...\n");
+        uint8_t* cur_bin = NULL;
+        uint32_t cur_len = 0;
+        if (fs_load_file("kernel.bin", &cur_bin, &cur_len)) {
+            if (cur_len == bin_len) {
+                int is_diff = 0;
+                for (uint32_t j = 0; j < bin_len; j++) {
+                    if (cur_bin[j] != bin_data[j]) { is_diff = 1; break; }
+                }
+                if (!is_diff) {
+                    kprintf("\033[32mYour system is already up to date! (Identical kernel.bin)\033[0m\n");
+                    kfree(cur_bin); kfree(sig_data); kfree(bin_data);
+                    goto end_prompt;
+                }
+            }
+            kfree(cur_bin);
+        }
         
         kprintf("[4/4] Flashing new kernel to disk...\n");
         extern int fs_write_bin(const char*, uint8_t*, uint32_t);
@@ -2248,6 +2328,9 @@ void execute_command() {
             kprintf("\033[32mSuccess! Firmware verified and updated.\033[0m\n");
             kprintf("\nRebooting system in 3 seconds...\n");
             
+            extern void fs_touch(const char*);
+            fs_touch("updt.flg");
+
             uint32_t start_wait = timer_ticks;
             while(timer_ticks < start_wait + 300) { __asm__ volatile("hlt"); }
             
@@ -2406,9 +2489,26 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
 
     kprintf("[INFO] Booting finished without errors!\n");
     kprintf("========================================\n");
-    kprintf("         Welcome to SimpleOS\n");
+    kprintf("         Welcome to SimpleOS v%s\n", SOS_VERSION);
     kprintf("========================================\n\n");
     
+    uint8_t* flg_buf = NULL;
+    uint32_t flg_size = 0;
+    if (fs_load_file("updt.flg", &flg_buf, &flg_size)) {
+        kfree(flg_buf);
+        extern void fs_rm(const char*, const char*);
+        fs_rm("updt.flg", NULL); /* Delete the flag so it only shows once */
+        
+        kprintf("\033[32m"); /* Switch to Green */
+        kprintf("========================================\n");
+        kprintf("  SYSTEM UPDATE APPLIED SUCCESSFULLY!   \n");
+        kprintf("========================================\n");
+        kprintf("\033[0m\n"); /* Reset color */
+        
+        uint32_t wait_ticks = timer_ticks;
+        while(timer_ticks < wait_ticks + 200) { __asm__ volatile("hlt"); }
+    }
+
     logout_and_login(NULL);
 
     while(1) {
