@@ -3,6 +3,7 @@
 #include "pci.h"
 #include "net.h"
 #include "e1000.h"
+#include "crypto.h" 
 
 extern int fs_load_file(const char*, uint8_t**, uint32_t*);
 
@@ -46,7 +47,8 @@ const char* system_commands[] = {
     "mkdir", "rm", "touch", "write", "cat", "loop", 
     "run", "ps", "kill", "df", "about", "shutdown",
     "whoami", "chown", "chmod", "su", "sudo", "userlist",
-    "nano", "passwd", "cp", "mv", "hex", "ifconfig", "wget"
+    "nano", "passwd", "cp", "mv", "hex", "ifconfig", "wget",
+    "update"
 };
 unsigned int num_system_commands = sizeof(system_commands) / sizeof(system_commands[0]);
 
@@ -1370,6 +1372,104 @@ void run_hexdump(const char* filename) {
     kfree(file_buf);
 }
 
+/* --- INSERT THESE FUNCTIONS DIRECTLY ABOVE execute_command() --- */
+
+void bin_to_hex(const uint8_t* bin, size_t len, char* hex_out) {
+    const char* hex_chars = "0123456789abcdef";
+    for(size_t i = 0; i < len; i++) {
+        hex_out[i * 2] = hex_chars[(bin[i] >> 4) & 0x0F];
+        hex_out[i * 2 + 1] = hex_chars[bin[i] & 0x0F];
+    }
+    hex_out[len * 2] = '\0';
+}
+
+/* Reusable HTTP Downloader extracted from wget */
+int http_get(const char* host, uint16_t port, const char* path, uint8_t** out_data, uint32_t* out_len) {
+    uint8_t target_ip[4];
+    extern int net_gethostbyname(const char*, uint8_t*);
+    if (!net_gethostbyname(host, target_ip)) return 0;
+    
+    extern int net_alloc_socket(int);
+    int sock_idx = net_alloc_socket(2); /* TCP */
+    if (sock_idx == -1) return 0;
+    
+    extern socket_t sockets[];
+    /* Randomize local port slightly to prevent TIME_WAIT TCP conflicts on consecutive requests */
+    sockets[sock_idx].local_port = 55555 + (timer_ticks % 10000); 
+    for(int k=0; k<4; k++) sockets[sock_idx].remote_ip[k] = target_ip[k];
+    sockets[sock_idx].remote_port = port; /* Direct port assignment */
+    sockets[sock_idx].seq_num = timer_ticks * 100;
+    sockets[sock_idx].ack_num = 0;
+    sockets[sock_idx].tcp_state = 1; /* TCP_SYN_SENT */
+    
+    extern void net_send_tcp_raw(int, uint8_t, uint8_t*, uint16_t);
+    net_send_tcp_raw(sock_idx, 0x02, NULL, 0); /* Send SYN */
+    
+    __asm__ volatile("sti");
+    uint32_t start = timer_ticks;
+    while(sockets[sock_idx].tcp_state != 2) { /* 2 = TCP_ESTABLISHED */
+        if (timer_ticks > start + 500) { sockets[sock_idx].is_used = 0; return 0; }
+        __asm__ volatile("hlt");
+    }
+    
+    char request[256];
+    int r_idx = 0;
+    const char* p1 = "GET "; while(*p1) request[r_idx++] = *p1++;
+    const char* p2 = path; while(*p2) request[r_idx++] = *p2++;
+    const char* p3 = " HTTP/1.0\r\nHost: "; while(*p3) request[r_idx++] = *p3++;
+    const char* p4 = host; while(*p4) request[r_idx++] = *p4++;
+    const char* p5 = "\r\nConnection: close\r\n\r\n"; while(*p5) request[r_idx++] = *p5++;
+    request[r_idx] = '\0';
+    
+    net_send_tcp_raw(sock_idx, 0x18, (uint8_t*)request, r_idx);
+    sockets[sock_idx].seq_num += r_idx;
+    
+    uint32_t MAX_DL_SIZE = 1024 * 1024; /* 1 MB limit */
+    uint8_t* http_data = (uint8_t*)kmalloc(MAX_DL_SIZE); 
+    uint32_t http_len = 0;
+    int conn_closed = 0;
+    start = timer_ticks;
+    
+    while(timer_ticks < start + 500 && !conn_closed) {
+        if (sockets[sock_idx].rx_ready) {
+            __asm__ volatile("cli");
+            for(uint32_t j=0; j<sockets[sock_idx].rx_len; j++) {
+                if(http_len < MAX_DL_SIZE) http_data[http_len++] = sockets[sock_idx].rx_buffer[j];
+            }
+            sockets[sock_idx].rx_len = 0;
+            sockets[sock_idx].rx_ready = 0;
+            __asm__ volatile("sti");
+            start = timer_ticks;
+        }
+        if (sockets[sock_idx].tcp_state == 0) conn_closed = 1;
+        else __asm__ volatile("hlt");
+    }
+    sockets[sock_idx].is_used = 0;
+    
+    if (http_len == 0) { kfree(http_data); return 0; }
+    
+    uint32_t payload_start = 0;
+    for(uint32_t i=0; i < http_len - 3; i++) {
+        if(http_data[i] == '\r' && http_data[i+1] == '\n' && 
+           http_data[i+2] == '\r' && http_data[i+3] == '\n') {
+            payload_start = i + 4;
+            break;
+        }
+    }
+    
+    if (payload_start == 0) { kfree(http_data); return 0; }
+    
+    uint32_t file_size = http_len - payload_start;
+    /* Allocate exact size, copy payload, and free the massive buffer! */
+    uint8_t* clean_buf = (uint8_t*)kmalloc(file_size);
+    for(uint32_t i=0; i<file_size; i++) clean_buf[i] = http_data[payload_start + i];
+    
+    kfree(http_data);
+    *out_data = clean_buf;
+    *out_len = file_size;
+    return 1;
+}
+
 void execute_command() {
     shell_input_enabled = 0; 
 
@@ -1993,44 +2093,25 @@ void execute_command() {
             kprintf("Error: User '%s' not found.\n", target);
         }
     }
+    /* --- REPLACE THE wget COMMAND BLOCK IN kernel.c WITH THIS --- */
     else if (strcmp(cmd, "wget") == 0) {
         if (!arg1 || !arg2) {
-            kprintf("Usage: wget <http://domain.com/path> <out.txt>\n");
+            kprintf("Usage: wget <http://domain.com:port/path> <out.txt>\n");
             goto end_prompt;
         }
 
-        /* 1. FAT16 Filename Validation (8.3 format max) */
-        int name_len = 0, ext_len = 0, has_ext = 0;
-        for (int i = 0; arg2[i] != '\0'; i++) {
-            if (arg2[i] == '.') {
-                has_ext = 1;
-                continue;
-            }
-            if (has_ext) ext_len++;
-            else name_len++;
-        }
-        if (name_len > 8 || ext_len > 3) {
-            kprintf("Error: Output filename too long for FAT16 (Max 8.3 format).\n");
-            goto end_prompt;
-        }
-        
-        /* 2. URL Parsing and Protocol Validation */
         char* url = arg1;
-        
-        /* Reject HTTPS explicitely */
         if (url[0] == 'h' && url[1] == 't' && url[2] == 't' && url[3] == 'p' && 
             url[4] == 's' && url[5] == ':' && url[6] == '/' && url[7] == '/') {
             kprintf("Error: HTTPS is not supported. Please use HTTP URLs.\n");
             goto end_prompt;
         }
         
-        /* Strip http:// if present */
         if (url[0] == 'h' && url[1] == 't' && url[2] == 't' && url[3] == 'p' && 
             url[4] == ':' && url[5] == '/' && url[6] == '/') {
             url += 7;
         }
 
-        /* Extract Host and Path */
         char host[64] = {0}; char path[128] = {0};
         int i = 0;
         while (url[i] && url[i] != '/' && i < 63) { host[i] = url[i]; i++; }
@@ -2044,117 +2125,139 @@ void execute_command() {
             path[0] = '/'; path[1] = '\0'; 
         }
 
-        if (host[0] == '\0') {
-            kprintf("Error: Invalid URL format.\n");
-            goto end_prompt;
-        }
-
-        /* 3. DNS Resolution */
-        kprintf("Resolving %s...\n", host);
-        uint8_t target_ip[4];
-        extern int net_gethostbyname(const char*, uint8_t*);
-        if (!net_gethostbyname(host, target_ip)) {
-            kprintf("Error: DNS Resolution failed.\n");
-            goto end_prompt;
-        }
-        kprintf("Connecting to %d.%d.%d.%d:80...\n", target_ip[0], target_ip[1], target_ip[2], target_ip[3]); 
-        
-        /* 3. TCP Connect */
-        extern int net_alloc_socket(int);
-        int sock_idx = net_alloc_socket(2); /* TCP */
-        if (sock_idx == -1) { kprintf("Error: No sockets available.\n"); goto end_prompt; }
-        
-        extern socket_t sockets[];
-        sockets[sock_idx].local_port = 55555;
-        for(int k=0; k<4; k++) sockets[sock_idx].remote_ip[k] = target_ip[k];
-        sockets[sock_idx].remote_port = 80;
-        sockets[sock_idx].seq_num = timer_ticks * 100;
-        sockets[sock_idx].ack_num = 0;
-        sockets[sock_idx].tcp_state = 1; /* TCP_SYN_SENT */
-        
-        extern void net_send_tcp_raw(int, uint8_t, uint8_t*, uint16_t);
-        net_send_tcp_raw(sock_idx, 0x02, NULL, 0); /* Send SYN */
-        
-        __asm__ volatile("sti");
-        uint32_t start = timer_ticks;
-        while(sockets[sock_idx].tcp_state != 2) { /* 2 = TCP_ESTABLISHED */
-            if (timer_ticks > start + 500) { 
-                kprintf("Error: Connection timeout.\n"); 
-                sockets[sock_idx].is_used = 0; 
-                goto end_prompt; 
-            }
-            __asm__ volatile("hlt");
-        }
-        
-        /* 4. Format and Send HTTP GET Request */
-        kprintf("Request sent. Downloading...\n");
-        char request[256];
-        int r_idx = 0;
-        const char* p1 = "GET "; while(*p1) request[r_idx++] = *p1++;
-        char* p2_path = path; while(*p2_path) request[r_idx++] = *p2_path++;
-        const char* p3 = " HTTP/1.0\r\nHost: "; while(*p3) request[r_idx++] = *p3++;
-        char* p4_host = host; while(*p4_host) request[r_idx++] = *p4_host++;
-        const char* p5 = "\r\nConnection: close\r\n\r\n"; while(*p5) request[r_idx++] = *p5++;
-        request[r_idx] = '\0';
-        
-        net_send_tcp_raw(sock_idx, 0x18, (uint8_t*)request, r_idx);
-        sockets[sock_idx].seq_num += r_idx;
-        
-        /* 5. Receive HTTP Data */
-        uint32_t MAX_DL_SIZE = 1024 * 1024; /* 1 MB limit */
-        uint8_t* http_data = (uint8_t*)kmalloc(MAX_DL_SIZE); 
-        uint32_t http_len = 0;
-        int conn_closed = 0;
-        start = timer_ticks;
-        
-        while(timer_ticks < start + 500 && !conn_closed) {
-            if (sockets[sock_idx].rx_ready) {
-                __asm__ volatile("cli");
-                for(uint32_t j=0; j<sockets[sock_idx].rx_len; j++) {
-                    if(http_len < MAX_DL_SIZE) http_data[http_len++] = sockets[sock_idx].rx_buffer[j];
+        /* Extract optional port (e.g. host:8080) */
+        uint16_t port = 80;
+        for (int k = 0; host[k] != '\0'; k++) {
+            if (host[k] == ':') {
+                host[k] = '\0'; /* Split string at colon */
+                port = 0;
+                int p_idx = k + 1;
+                while (host[p_idx] >= '0' && host[p_idx] <= '9') {
+                    port = port * 10 + (host[p_idx] - '0');
+                    p_idx++;
                 }
-                sockets[sock_idx].rx_len = 0;
-                sockets[sock_idx].rx_ready = 0;
-                __asm__ volatile("sti");
-                start = timer_ticks; /* Reset timeout on active traffic */
-            }
-            if (sockets[sock_idx].tcp_state == 0) { /* 0 = TCP_CLOSED */
-                conn_closed = 1;
-            } else {
-                __asm__ volatile("hlt");
-            }
-        }
-        sockets[sock_idx].is_used = 0; /* Free Socket */
-        
-        if (http_len == 0) { 
-            kprintf("Error: No data received.\n"); 
-            kfree(http_data); 
-            goto end_prompt; 
-        }
-        
-        /* 6. Strip HTTP Headers and Write to File System */
-        uint32_t payload_start = 0;
-        for(uint32_t i=0; i < http_len - 3; i++) {
-            if(http_data[i] == '\r' && http_data[i+1] == '\n' && 
-               http_data[i+2] == '\r' && http_data[i+3] == '\n') {
-                payload_start = i + 4;
                 break;
             }
         }
+
+        kprintf("Downloading from %s:%d%s...\n", host, port, path);
         
-        if (payload_start == 0) {
-            kprintf("Error: Invalid HTTP response (no headers found).\n");
-        } else {
-            uint32_t file_size = http_len - payload_start;
-            kprintf("Saving %d bytes to '%s'...\n", file_size, arg2);
+        uint8_t* dl_data = NULL;
+        uint32_t dl_size = 0;
+        
+        if (http_get(host, port, path, &dl_data, &dl_size)) {
+            kprintf("Saving %d bytes to '%s'...\n", dl_size, arg2);
             extern int fs_write_bin(const char*, uint8_t*, uint32_t);
-            if (fs_write_bin(arg2, http_data + payload_start, file_size)) {
+            if (fs_write_bin(arg2, dl_data, dl_size)) {
                 kprintf("Success! Use 'cat %s' to read it.\n", arg2);
             } else {
                 kprintf("Error: File system write failed.\n");
             }
+            kfree(dl_data);
+        } else {
+            kprintf("Error: Download failed or timeout.\n");
         }
-        kfree(http_data);
+    }
+    /* --- REPLACE THE update COMMAND BLOCK IN kernel.c WITH THIS --- */
+    else if (strcmp(cmd, "update") == 0) {
+        if (current_uid != 0) {
+            kprintf("Error: Root privileges required. Use 'sudo update <server_ip:port>'\n");
+            goto end_prompt;
+        }
+        if (!arg1) {
+            kprintf("Usage: sudo update <server_ip:port>\n");
+            kprintf("Example: sudo update 10.0.2.2:8080\n");
+            goto end_prompt;
+        }
+        
+        kprintf("========================================\n");
+        kprintf("       sOS Over-The-Air Update          \n");
+        kprintf("========================================\n");
+
+        /* Parse host and optional port from arg1 (e.g. 10.0.2.2:8080) */
+        char host[64];
+        uint16_t port = 80;
+        int idx = 0;
+        while (arg1[idx] && arg1[idx] != ':' && idx < 63) {
+            host[idx] = arg1[idx];
+            idx++;
+        }
+        host[idx] = '\0';
+        if (arg1[idx] == ':') {
+            idx++;
+            port = 0;
+            while (arg1[idx] >= '0' && arg1[idx] <= '9') {
+                port = port * 10 + (arg1[idx] - '0');
+                idx++;
+            }
+        }
+        
+        uint8_t* sig_data = NULL;
+        uint32_t sig_len = 0;
+        kprintf("[1/4] Fetching kernel signature from %s:%d...\n", host, port);
+        if (!http_get(host, port, "/kernel.sig", &sig_data, &sig_len)) {
+            kprintf("Error: Could not download /kernel.sig from %s:%d\n", host, port);
+            goto end_prompt;
+        }
+        
+        uint8_t* bin_data = NULL;
+        uint32_t bin_len = 0;
+        kprintf("[2/4] Downloading kernel.bin...\n");
+        if (!http_get(host, port, "/kernel.bin", &bin_data, &bin_len)) {
+            kprintf("Error: Could not download /kernel.bin from %s:%d\n", host, port);
+            kfree(sig_data);
+            goto end_prompt;
+        }
+        
+        kprintf("[3/4] Verifying cryptographic signature...\n");
+        
+        uint8_t mac[32];
+        const uint8_t key[] = "sOS_super_secret_ota_key_2024";
+        /* 29 is the exact length of the key string above */
+        hmac_sha256(key, 29, bin_data, bin_len, mac);
+        
+        char mac_hex[65];
+        bin_to_hex(mac, 32, mac_hex);
+        
+        /* --- ADDED DIAGNOSTIC PRINTS --- */
+        kprintf("\n[DEBUG] Downloaded File Size: %d bytes\n", bin_len);
+        
+        kprintf("[DEBUG] Expected Sig : ");
+        for(int j=0; j<64; j++) kputc(sig_data[j]);
+        kprintf("\n");
+        
+        kprintf("[DEBUG] Computed Sig : %s\n\n", mac_hex);
+        /* ------------------------------- */
+        
+        int match = 1;
+        for (int j = 0; j < 64; j++) {
+            if (mac_hex[j] != sig_data[j]) { match = 0; break; }
+        }
+        
+        if (!match) {
+            kprintf("\033[31mCRITICAL ERROR: Signature mismatch! Update rejected.\033[0m\n");
+            kprintf("The file is corrupt, unsigned, or has been tampered with.\n");
+            kfree(sig_data); kfree(bin_data);
+            goto end_prompt;
+        }
+        
+        kprintf("[4/4] Flashing new kernel to disk...\n");
+        extern int fs_write_bin(const char*, uint8_t*, uint32_t);
+        
+        if (fs_write_bin("kernel.bin", bin_data, bin_len)) {
+            kprintf("\033[32mSuccess! Firmware verified and updated.\033[0m\n");
+            kprintf("\nRebooting system in 3 seconds...\n");
+            
+            uint32_t start_wait = timer_ticks;
+            while(timer_ticks < start_wait + 300) { __asm__ volatile("hlt"); }
+            
+            outb(0x64, 0xFE);
+            while(1) { __asm__ volatile("cli; hlt"); }
+        } else {
+            kprintf("Error: Failed to write kernel to disk.\n");
+        }
+        
+        kfree(sig_data); kfree(bin_data);
     }
     else if (strcmp(cmd, "lock") == 0) {
         clear_terminal();

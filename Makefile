@@ -10,7 +10,7 @@ LDFLAGS = -T linker.ld
 USER_CC = i686-linux-gnu-gcc
 USER_LD = i686-linux-gnu-ld
 
-OBJS = boot.o print.o memory.o gdt_idt.o disk.o fs.o kernel.o pci.o e1000.o net.o
+OBJS = boot.o print.o memory.o gdt_idt.o disk.o fs.o kernel.o pci.o e1000.o net.o crypto.o
 
 # The 'all' target compiles everything
 all: kernel.bin drive.img sos.iso drive.vdi

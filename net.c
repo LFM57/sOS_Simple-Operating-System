@@ -159,7 +159,7 @@ void net_send_tcp_raw(int sock_idx, uint8_t flags, uint8_t* payload, uint16_t le
     tcp->seq = htonl(sockets[sock_idx].seq_num);
     tcp->ack = htonl(sockets[sock_idx].ack_num);
     tcp->flags_offset = htons((5 << 12) | flags); /* 5 words (20 bytes) offset + flags */
-    tcp->window_size = htons(8192);
+    tcp->window_size = htons(32768); /* Advertise our new massive 32KB window */
     tcp->checksum = 0;
     tcp->urgent_p = 0;
 
@@ -480,15 +480,29 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
                         
                         /* State 2: Established & Receiving Data (PSH or just data) */
                         else if (sockets[i].tcp_state == TCP_ESTABLISHED && payload_len > 0) {
-                            /* Append data to socket buffer */
-                            for(int j=0; j<payload_len; j++) {
-                                if (sockets[i].rx_len < SOCK_BUF_SIZE) {
+                            uint32_t seq = ntohl(tcp->seq);
+                            
+                            /* TCP RELIABILITY: Ensure packet is exactly the next one we expect (In-Order) */
+                            if (seq != sockets[i].ack_num) {
+                                /* Out of order or dropped packet
+                                   Send a duplicate ACK of what we actually have to force a retransmission. */
+                                net_send_tcp_raw(i, 0x10, NULL, 0);
+                                break;
+                            }
+                            
+                            /* TCP RELIABILITY: Ensure we have enough space in our local buffer */
+                            if (sockets[i].rx_len + payload_len <= SOCK_BUF_SIZE) {
+                                /* Append data to socket buffer */
+                                for(int j=0; j<payload_len; j++) {
                                     sockets[i].rx_buffer[sockets[i].rx_len++] = payload[j];
                                 }
+                                sockets[i].rx_ready = 1;
+                                sockets[i].ack_num += payload_len;
+                                net_send_tcp_raw(i, 0x10, NULL, 0); /* Send ACK for successful receipt */
+                            } else {
+                                /* Buffer Full! Drop packet and send duplicate ACK to throttle server */
+                                net_send_tcp_raw(i, 0x10, NULL, 0);
                             }
-                            sockets[i].rx_ready = 1;
-                            sockets[i].ack_num += payload_len;
-                            net_send_tcp_raw(i, 0x10, NULL, 0); /* Send ACK for data */
                         }
                         
                         /* State 3: Disconnect Request (FIN) */
@@ -506,6 +520,25 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
 }
 
 int net_gethostbyname(const char* hostname, uint8_t* out_ip) {
+    /* 1. FAST PATH: Check if the string is already a raw IPv4 address (e.g. 192.168.1.45) */
+    int is_ip = 1, dots = 0;
+    for (int i = 0; hostname[i] != '\0'; i++) {
+        if (hostname[i] == '.') dots++;
+        else if (hostname[i] < '0' || hostname[i] > '9') is_ip = 0;
+    }
+    
+    if (is_ip && dots == 3) {
+        int ip[4] = {0, 0, 0, 0};
+        int part = 0;
+        for (int i = 0; hostname[i] != '\0'; i++) {
+            if (hostname[i] == '.') part++;
+            else ip[part] = ip[part] * 10 + (hostname[i] - '0');
+        }
+        for (int i = 0; i < 4; i++) out_ip[i] = (uint8_t)ip[i];
+        return 1; /* Success without needing a DNS query! */
+    }
+
+    /* 2. SLOW PATH: It's a domain name, proceed with standard DNS Resolution */
     uint8_t dns_ip[4];
     for(int i=0; i<4; i++) dns_ip[i] = sOS_dns[i];
     if (dns_ip[0] == 0 && dns_ip[1] == 0) {

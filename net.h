@@ -63,7 +63,7 @@ typedef struct {
 } __attribute__((packed)) udp_hdr_t;
 
 #define MAX_SOCKETS 16
-#define SOCK_BUF_SIZE 8192  /* Increased to 8KB for HTTP payloads */
+#define SOCK_BUF_SIZE 32768  /* Increased to 32KB to handle high-speed downloads */
 
 /* TCP States */
 #define TCP_CLOSED      0
