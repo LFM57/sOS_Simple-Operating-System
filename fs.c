@@ -954,6 +954,23 @@ void fs_rm(const char* arg1, const char* arg2) {
                 format_fat_name(dir[i].name, entry_name);
                 if (entry_name[0] == '.') continue; /* Ignore '.' and '..' */
 
+                /* --- KERNEL.BIN PROTECTION --- */
+                if (entry_name[0]=='k' && entry_name[1]=='e' && entry_name[2]=='r' && entry_name[3]=='n' && 
+                    entry_name[4]=='e' && entry_name[5]=='l' && entry_name[6]=='.' && entry_name[7]=='b' && 
+                    entry_name[8]=='i' && entry_name[9]=='n' && entry_name[10]=='\0') {
+                    kprintf("\n[WARNING] You are about to delete the system kernel (kernel.bin)!\n");
+                    kprintf("This is irreversible and will brick the OS upon reboot.\n");
+                    kprintf("Proceed? [y/N]: ");
+                    extern char wait_key(void);
+                    char choice = wait_key();
+                    kprintf("%c\n", choice);
+                    if (choice != 'y' && choice != 'Y') {
+                        kprintf("Skipped kernel.bin.\n");
+                        continue;
+                    }
+                }
+                /* -------------------------------------- */
+
                 if (dir[i].attributes & 0x10) {
                     uint32_t sub_cluster = dir[i].first_cluster_low;
                     uint32_t target_sector = data_start + ((sub_cluster - 2) * sectors_per_cluster);
@@ -1028,6 +1045,23 @@ void fs_rm(const char* arg1, const char* arg2) {
         kprintf("Error: Unable to delete '.' or '..'\n");
         return;
     }
+
+    /* --- KERNEL.BIN PROTECTION --- */
+    if (target_fat[0]=='K' && target_fat[1]=='E' && target_fat[2]=='R' && target_fat[3]=='N' && 
+        target_fat[4]=='E' && target_fat[5]=='L' && target_fat[6]==' ' && target_fat[7]==' ' && 
+        target_fat[8]=='B' && target_fat[9]=='I' && target_fat[10]=='N') {
+        kprintf("\n[WARNING] You are about to delete the system kernel (kernel.bin)!\n");
+        kprintf("This is irreversible and will brick the OS upon reboot.\n");
+        kprintf("Proceed? [y/N]: ");
+        extern char wait_key(void);
+        char choice = wait_key();
+        kprintf("%c\n", choice);
+        if (choice != 'y' && choice != 'Y') {
+            kprintf("Aborted.\n");
+            return;
+        }
+    }
+    /* -------------------------------------- */
 
     uint32_t old_cluster = current_dir_cluster;
     uint32_t old_sector = current_dir_sector;
