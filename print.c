@@ -275,6 +275,10 @@ void clear_terminal() {
         for (uint32_t i = 0; i < total_pixels; i++) {
             backbuffer[i] = term_bg_color;
         }
+
+        // PoC ; not useful on production
+        // draw_test_logo(g_width - 40, 8);
+        
         swap_buffers();
         cursor_x = 0; cursor_y = 0;
         return;
@@ -320,4 +324,71 @@ void kprintf(const char* format, ...) {
         }
     }
     va_end(args);
+}
+
+void draw_sprite(const uint32_t* sprite, uint32_t width, uint32_t height, uint32_t x, uint32_t y) {
+    if (!is_graphics_mode) return;
+
+    for (uint32_t sy = 0; sy < height; sy++) {
+        for (uint32_t sx = 0; sx < width; sx++) {
+            if (x + sx >= g_width || y + sy >= g_height) continue;
+
+            uint32_t src_color = sprite[sy * width + sx];
+            uint32_t a = (src_color >> 24) & 0xFF; /* Extract Alpha channel */
+
+            if (a == 255) {
+                /* Fully opaque, write directly */
+                put_pixel(x + sx, y + sy, src_color);
+            } 
+            else if (a > 0) {
+                /* Semi-transparent: We must blend with the background */
+                
+                /* 1. Grab the existing pixel from the backbuffer */
+                uint32_t offset = ((y + sy) * g_pitch) + ((x + sx) * (g_bpp / 8));
+                uint32_t bg_color = *(uint32_t*)((uint8_t*)backbuffer + offset);
+
+                /* 2. Separate into Red, Green, Blue */
+                uint32_t br = (bg_color >> 16) & 0xFF;
+                uint32_t bg = (bg_color >> 8) & 0xFF;
+                uint32_t bb = bg_color & 0xFF;
+
+                uint32_t sr = (src_color >> 16) & 0xFF;
+                uint32_t sg = (src_color >> 8) & 0xFF;
+                uint32_t sb = src_color & 0xFF;
+
+                /* 3. Alpha Blending Formula */
+                uint32_t new_r = (sr * a + br * (255 - a)) / 255;
+                uint32_t new_g = (sg * a + bg * (255 - a)) / 255;
+                uint32_t new_b = (sb * a + bb * (255 - a)) / 255;
+
+                /* 4. Reconstruct the blended 32-bit pixel and draw it */
+                uint32_t final_color = (new_r << 16) | (new_g << 8) | new_b;
+                put_pixel(x + sx, y + sy, final_color);
+            }
+        }
+    }
+}
+
+/* A small algorithmic sprite to prove alpha blending works without pasting huge arrays */
+void draw_test_logo(uint32_t start_x, uint32_t start_y) {
+    uint32_t sprite[32 * 32];
+    for (int y = 0; y < 32; y++) {
+        for (int x = 0; x < 32; x++) {
+            int dx = x - 16;
+            int dy = y - 16;
+            int dist_squared = (dx * dx + dy * dy);
+            
+            if (dist_squared < 256) {
+                /* Create a smooth alpha fade out to the edges */
+                uint32_t alpha = 255 - dist_squared; 
+                if (alpha > 255) alpha = 0;
+                
+                /* Orange core, fading to transparency */
+                sprite[y * 32 + x] = (alpha << 24) | 0x00FF8800; 
+            } else {
+                sprite[y * 32 + x] = 0x00000000; /* Fully transparent */
+            }
+        }
+    }
+    draw_sprite(sprite, 32, 32, start_x, start_y);
 }
