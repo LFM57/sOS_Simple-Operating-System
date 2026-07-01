@@ -5,7 +5,7 @@
 #include "e1000.h"
 #include "crypto.h" 
 
-#define SOS_VERSION "2.4.2"
+#define SOS_VERSION "2.4.4"
 
 extern int fs_load_file(const char*, uint8_t**, uint32_t*);
 
@@ -1510,7 +1510,9 @@ int http_get(const char* host, uint16_t port, const char* path, uint8_t** out_da
     }
     sockets[sock_idx].is_used = 0;
     
-    if (http_len == 0) { kfree(http_data); return 0; }
+    /* Ensure the buffer is at least 4 bytes long to prevent integer underflow
+       when evaluating (http_len - 3) in the loop condition below. */
+    if (http_len < 4) { kfree(http_data); return 0; }
     
     uint32_t payload_start = 0;
     for(uint32_t i=0; i < http_len - 3; i++) {
@@ -2262,6 +2264,14 @@ void execute_command() {
             kprintf("Error: Could not download /kernel.sig from %s:%d\n", host, port);
             goto end_prompt;
         }
+
+        /* Ensure the downloaded signature is exactly 64 bytes long 
+           before attempting to read from the buffer later on. */
+        if (sig_len != 64) {
+            kprintf("Error: Invalid signature length (%d bytes). Expected exactly 64.\n", sig_len);
+            kfree(sig_data);
+            goto end_prompt;
+        }
         
         uint8_t* bin_data = NULL;
         uint32_t bin_len = 0;
@@ -2305,7 +2315,7 @@ void execute_command() {
         kprintf("[+] Checking current version against update...\n\n");
         uint8_t* cur_bin = NULL;
         uint32_t cur_len = 0;
-        if (fs_load_file("kernel.bin", &cur_bin, &cur_len)) {
+        if (fs_load_file("/kernel.bin", &cur_bin, &cur_len)) {
             if (cur_len == bin_len) {
                 int is_diff = 0;
                 for (uint32_t j = 0; j < bin_len; j++) {
@@ -2323,15 +2333,15 @@ void execute_command() {
         kprintf("[4/4] Flashing new kernel to disk...\n");
         extern int fs_write_bin(const char*, uint8_t*, uint32_t);
         
-        if (fs_write_bin("kernel.bin", bin_data, bin_len)) {
+        if (fs_write_bin("/kernel.bin", bin_data, bin_len)) {
             kprintf("\033[32mSuccess! Firmware verified and updated.\033[0m\n");
-            kprintf("\nRebooting system in 3 seconds...\n");
+            kprintf("\nRebooting system in 5 seconds...\n");
             
             extern void fs_touch(const char*);
-            fs_touch("updt.flg");
+            fs_touch("/updt.flg");
 
             uint32_t start_wait = timer_ticks;
-            while(timer_ticks < start_wait + 300) { __asm__ volatile("hlt"); }
+            while(timer_ticks < start_wait + 500) { __asm__ volatile("hlt"); }
             
             outb(0x64, 0xFE);
             while(1) { __asm__ volatile("cli; hlt"); }
