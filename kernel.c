@@ -2222,7 +2222,6 @@ void execute_command() {
             kprintf("Error: Download failed or timeout.\n");
         }
     }
-    /* --- REPLACE THE update COMMAND BLOCK IN kernel.c WITH THIS --- */
     else if (strcmp(cmd, "update") == 0) {
         if (current_uid != 0) {
             kprintf("Error: Root privileges required. Use 'sudo update <server_ip:port>'\n");
@@ -2289,7 +2288,7 @@ void execute_command() {
         for(int j=0; j<64; j++) kputc(sig_data[j]);
         kprintf("\n");
         
-        kprintf("[+] Computed Sig : %s\n\n", mac_hex);
+        kprintf("[+] Computed Sig : %s\n", mac_hex);
         
         int match = 1;
         for (int j = 0; j < 64; j++) {
@@ -2297,13 +2296,13 @@ void execute_command() {
         }
         
         if (!match) {
-            kprintf("\033[31mCRITICAL ERROR: Signature mismatch! Update rejected.\033[0m\n");
+            kprintf("\n\033[31mCRITICAL ERROR: Signature mismatch! Update rejected.\033[0m\n");
             kprintf("The file is corrupt, unsigned, or has been tampered with.\n");
             kfree(sig_data); kfree(bin_data);
             goto end_prompt;
         }
 
-        kprintf("[+] Checking current version against update...\n");
+        kprintf("[+] Checking current version against update...\n\n");
         uint8_t* cur_bin = NULL;
         uint32_t cur_len = 0;
         if (fs_load_file("kernel.bin", &cur_bin, &cur_len)) {
@@ -2313,7 +2312,7 @@ void execute_command() {
                     if (cur_bin[j] != bin_data[j]) { is_diff = 1; break; }
                 }
                 if (!is_diff) {
-                    kprintf("\033[32mYour system is already up to date! (Identical kernel.bin)\033[0m\n");
+                    kprintf("\033[32mYour system is already up to date\033[0m\n");
                     kfree(cur_bin); kfree(sig_data); kfree(bin_data);
                     goto end_prompt;
                 }
