@@ -5,7 +5,7 @@
 #include "e1000.h"
 #include "crypto.h" 
 
-#define SOS_VERSION "2.4.4"
+#define SOS_VERSION "2.6.0"
 
 extern int fs_load_file(const char*, uint8_t**, uint32_t*);
 
