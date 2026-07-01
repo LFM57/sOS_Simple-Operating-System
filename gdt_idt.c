@@ -133,9 +133,63 @@ void fault_handler(registers_t *regs) {
             return;
         }
 
-        kprintf("\n[KERNEL PANIC] EXCEPTION %d : %s\n", regs->int_no, exception_messages[regs->int_no]);
-        kprintf("SYSTEME STOPPED.\n");
-        while(1) { __asm__ volatile ("hlt"); }
+        /* --- GRAPHICAL BSOD TRIGGER --- */
+        if (is_graphics_mode) {
+            show_cursor = 0;            /* Erase and hide the blinking cursor */
+            term_bg_color = 0x000000AA; /* BSOD Blue */
+            term_fg_color = 0x00FFFFFF; /* White text */
+            clear_terminal();
+            
+            /* Dynamically calculate coordinates */
+            int cols = g_width / 8;
+            int rows = g_height / 16;
+            int cx = cols / 2;
+            int cy = rows / 2;
+
+            /* Line 1: Top Border (50 chars) */
+            cursor_x = cx - 25; cursor_y = cy - 10;
+            kprintf("==================================================");
+
+            /* Line 2: Title (50 chars) */
+            cursor_x = cx - 25; cursor_y = cy - 9;
+            kprintf("         sOS FATAL ERROR / KERNEL PANIC           ");
+
+            /* Line 3: Bottom Border (50 chars) */
+            cursor_x = cx - 25; cursor_y = cy - 8;
+            kprintf("==================================================");
+
+            /* Line 4: Message 1 (43 chars) */
+            cursor_x = cx - 21; cursor_y = cy - 5;
+            kprintf("An unrecoverable system error has occurred.");
+
+            /* Line 5: Message 2 (47 chars) */
+            cursor_x = cx - 23; cursor_y = cy - 4;
+            kprintf("The kernel has halted safely to prevent damage.");
+
+            /* Line 6: Exception Details Block (Left-aligned, centered as a unit) */
+            cursor_x = cx - 18; cursor_y = cy - 1;
+            kprintf("EXCEPTION  : %s (Code: %d)", exception_messages[regs->int_no], regs->int_no);
+
+            /* Line 7: EIP */
+            cursor_x = cx - 18; cursor_y = cy;
+            kprintf("EIP        : 0x%x", regs->eip);
+
+            /* Line 8: Error Code */
+            cursor_x = cx - 18; cursor_y = cy + 1;
+            kprintf("ERROR CODE : 0x%x", regs->err_code);
+
+            /* Line 9: Warning Border (50 chars) */
+            cursor_x = cx - 25; cursor_y = cy + 4;
+            kprintf("==================================================");
+
+            /* Line 10: Restart Message (38 chars) */
+            cursor_x = cx - 19; cursor_y = cy + 5;
+            kprintf("Please manually restart your computer.");
+        } else {
+            kprintf("\n[KERNEL PANIC] EXCEPTION %d : %s\n", regs->int_no, exception_messages[regs->int_no]);
+            kprintf("SYSTEM STOPPED.\n");
+        }
+        while(1) { __asm__ volatile ("cli; hlt"); }
     }
 }
 

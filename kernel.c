@@ -31,6 +31,7 @@ volatile int ctrl_active = 0;
 volatile int is_logging_out = 0;
 volatile int shell_input_enabled = 1;
 volatile int session_reset = 0; 
+volatile int fg_task = -1; /* Tracks the currently blocking foreground task */
 
 char cmd_buffer[256];
 int cmd_idx = 0;
@@ -338,10 +339,16 @@ void kernel_gets(char* buffer, int max_len, int hidden, int allow_empty) {
         while (kernel_gets_char == 0) { __asm__ volatile("hlt"); }
         char c = kernel_gets_char;
         
-        if (c == '\r' || c == '\n') { 
+        if (c == 3) { /* Ctrl+C pressed */
+            buffer[0] = '\0';
+            kprintf("^C\n");
+            is_kernel_gets_active = 0;
+            return;
+        }
+        else if (c == '\r' || c == '\n') { 
             if (!allow_empty && i == 0) continue; 
             kprintf("\n"); break; 
-        } 
+        }
         else if (c == '\b' || c == 127) { 
             if (i > 0) { i--; kprintf("\b \b"); } 
         } else if (c >= 32 && c <= 126) {
@@ -354,6 +361,16 @@ void kernel_gets(char* buffer, int max_len, int hidden, int allow_empty) {
 }
 
 void handle_input_char(char c) {
+    if (c == 3) { /* Ctrl+C pressed */
+        kprintf("^C\n");
+        cmd_idx = 0;
+        cmd_buffer[0] = '\0';
+        cursor_pos = 0;
+        history_index = -1;
+        kprintf("\033[32m%s@sOS\033[0m \033[34m%s\033[0m\033[33m%c\033[0m ", current_user, get_current_path(), current_uid == 0 ? '#' : '$');
+        return;
+    }
+
     /* Simple state machine to detect consecutive double tabs */
     static int last_key_was_tab = 0;
     int is_double_tab = (c == 9 && last_key_was_tab);
@@ -363,7 +380,7 @@ void handle_input_char(char c) {
         last_key_was_tab = 1;
     }
 
-    if (c == '\r' || c == '\n') { 
+    if (c == '\r' || c == '\n') {
         kprintf("\n"); 
         cmd_buffer[cmd_idx] = '\0'; 
         
@@ -586,6 +603,7 @@ void keyboard_handler() {
             /* Ctrl Shortcuts */
             if (scancode == 0x1F) ascii = 19;  /* Ctrl+S */
             else if (scancode == 0x2D) ascii = 24; /* Ctrl+X */
+            else if (scancode == 0x2E) ascii = 3;  /* Ctrl+C */
         } else if (shift_active) {
             ascii = kbd_us_shift[scancode];
         } else {
@@ -593,7 +611,14 @@ void keyboard_handler() {
         }
         
         if (ascii != 0) {
-            if (is_kernel_gets_active) {
+            /* Scenario 1: A foreground task is running */
+            if (ascii == 3 && fg_task != -1 && tasks[fg_task].state != 0) {
+                kprintf("^C\n");
+                cleanup_task_memory(fg_task);
+                fg_task = -1;
+            } 
+            /* Scenarios 2 & 3: Pass to kernel prompts or shell */
+            else if (is_kernel_gets_active) {
                 kernel_gets_char = ascii;
             } else if (shell_input_enabled) {
                 handle_input_char(ascii);
@@ -1694,9 +1719,11 @@ void execute_command() {
                         /* Prompt is given back instantly to the user */
                     } else {
                         /* Classic blocking synchronous mode */
+                        fg_task = task_id;
                         while(tasks[task_id].state != 0) {
                             __asm__ volatile("sti; hlt");
                         }
+                        fg_task = -1;
                     }
                 }
             } else {
@@ -2355,6 +2382,11 @@ void execute_command() {
         clear_terminal();
         logout_and_login("Session locked.");
         return;
+    }
+    else if (strcmp(cmd, "crash") == 0) {
+        /* Triggers Exception 14 (Page Fault) by dereferencing an unmapped address */
+        volatile int* trap = (int*)0xDEADBEEF;
+        *trap = 0xDEAD; 
     }
     else {
         kprintf("Unknown command: '%s'\n", cmd);

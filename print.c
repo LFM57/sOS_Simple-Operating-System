@@ -6,6 +6,7 @@
 
 /* --- NEW GRAPHICS ENGINE --- */
 int is_graphics_mode = 0;
+int show_cursor = 1; /* Global flag to toggle the software cursor */
 uint32_t* lfb_mem = (uint32_t*)0xE0000000;    /* Physical Video RAM mapped here */
 uint32_t* backbuffer = (uint32_t*)0xE1000000; /* RAM Backbuffer mapped here */
 uint32_t g_width = 0, g_height = 0, g_pitch = 0, g_bpp = 0;
@@ -129,6 +130,9 @@ void update_software_cursor() {
             }
         }
     }
+
+    /* FIX: If the cursor has been disabled, do not draw the new one */
+    if (!show_cursor) return;
 
     /* 2. DRAW: Draw the new cursor (a 2-pixel underline) directly to the screen (LFB), NOT the backbuffer */
     for (int cy = 13; cy < 15; cy++) {

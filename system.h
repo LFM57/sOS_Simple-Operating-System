@@ -44,6 +44,13 @@ void init_graphics(uint32_t phys_addr, uint32_t width, uint32_t height, uint32_t
 void put_pixel(uint32_t x, uint32_t y, uint32_t color);
 void swap_buffers(void);
 extern int is_graphics_mode;
+extern uint32_t term_fg_color;
+extern uint32_t term_bg_color;
+extern uint32_t g_width;
+extern uint32_t g_height;
+extern int cursor_x;
+extern int cursor_y;
+extern int show_cursor;
 void draw_char(char c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color);
 void draw_string(const char* str, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color);
 void draw_sprite(const uint32_t* sprite, uint32_t width, uint32_t height, uint32_t x, uint32_t y);
