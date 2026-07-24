@@ -150,6 +150,6 @@ Upon booting, sOS will prompt you to log in. The Makefile pre-configures `/passw
 
 ## Disclaimer & Credits
 
-**Disclaimer:** sOS was developed as a hobbyist research and learning operating system with support from Artificial Intelligence models (Gemini 3.1 Pro Preview and Gemini 3.5 Flash). It serves as an exploration into x86 kernel architecture, networking, graphics, and operating system design.
+**Disclaimer:** sOS was developed as a hobbyist research and learning operating system with heavy support from Artificial Intelligence (Gemini 3.1 Pro Preview and Gemini 3.5 Flash). It serves as an exploration into OS architecture and **does not reflect any personnal skill**.
 
 **Credits:** Special thanks to the French YouTuber [**V2F**](https://www.youtube.com/@V2F). His video on OS development inspired this project, and the name "sOS" was borrowed directly from [his video](https://www.youtube.com/watch?v=ELTwwTsR5w8).
