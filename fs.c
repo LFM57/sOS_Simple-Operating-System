@@ -784,7 +784,7 @@ void fs_mkdir(const char* dirname) {
 
     /* 1. Find free space on the disk (Reading the FAT table) */
     uint32_t free_cluster = 0;
-    for (int i = 2; i < 256; i++) {
+    for (uint32_t i = 2; i < 0xFFF0; i++) {
         if (read_fat_entry(i) == 0x0000) {
             free_cluster = i;
             write_fat_entry(i, 0xFFFF);
@@ -1247,7 +1247,7 @@ int fs_write(const char* filename, const char* text) {
     /* 2. Allocate a cluster if it does not have one yet */
     uint32_t cluster = entry.first_cluster_low;
     if (cluster == 0) {
-        for (int i = 2; i < 256; i++) {
+        for (uint32_t i = 2; i < 0xFFF0; i++) {
             if (read_fat_entry(i) == 0x0000) {
                 cluster = i;
                 write_fat_entry(i, 0xFFFF);
@@ -1421,7 +1421,7 @@ int fs_cp(const char* src_name, const char* dest_name) {
 
         /* Find a free cluster */
         uint32_t free_cluster = 0;
-        for (int i = 2; i < 256; i++) {
+        for (uint32_t i = 2; i < 0xFFF0; i++) {
             if (read_fat_entry(i) == 0x0000) {
                 free_cluster = i;
                 write_fat_entry(i, 0xFFFF);
@@ -1838,7 +1838,7 @@ int fs_write_bin(const char* filename, uint8_t* data, uint32_t size) {
     if (size > 0) {
         while (bytes_left > 0) {
             uint32_t free_cluster = 0;
-            for (int i = 2; i < 256; i++) {
+            for (uint32_t i = 2; i < 0xFFF0; i++) {
                 if (read_fat_entry(i) == 0x0000) {
                     free_cluster = i;
                     write_fat_entry(i, 0xFFFF);
