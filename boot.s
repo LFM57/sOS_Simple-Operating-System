@@ -157,7 +157,6 @@ irq4:
 .type isr128, @function
 isr128:
     cli
-    /* Save all registers EXCEPT EAX (which will contain the return value of the C function) */
     push %ebx
     push %ecx
     push %edx
@@ -166,6 +165,15 @@ isr128:
     push %ebp
     push %ds
     push %es
+    push %fs
+    push %gs
+    
+    /* Load Kernel Data Segment (0x10) */
+    mov $0x10, %bx
+    mov %bx, %ds
+    mov %bx, %es
+    mov %bx, %fs
+    mov %bx, %gs
     
     /* Push arguments for C */
     push %edx  /* arg3 */
@@ -174,9 +182,10 @@ isr128:
     push %eax  /* syscall_num */
     
     call syscall_handler
-    add $16, %esp  /* Cleaning the 4 arguments */
+    add $16, %esp
     
-    /* Restore registers; EAX is untouched and retains its return value */
+    pop %gs
+    pop %fs
     pop %es
     pop %ds
     pop %ebp

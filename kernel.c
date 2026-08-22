@@ -957,19 +957,24 @@ void generate_salt(char* out_salt) {
     out_salt[8] = '\0';
 }
 
-/* [FIX ADDITION] Salted and stretched hashing */
 void hash_password_salted(const char* password, const char* salt, char* out_hash_str) {
     char buffer[64];
-    custom_strcpy(buffer, salt);
-    int salt_len = 0; while(salt[salt_len]) salt_len++;
-    int pass_len = 0; while(password[pass_len]) pass_len++;
+    int salt_len = 0;
+    while (salt[salt_len] && salt_len < 32) {
+        buffer[salt_len] = salt[salt_len];
+        salt_len++;
+    }
     
-    for(int i=0; i<pass_len && (salt_len + i < 63); i++) buffer[salt_len + i] = password[i];
-    buffer[salt_len + pass_len] = '\0';
+    int i = 0;
+    while (password[i] && (salt_len + i < 63)) {
+        buffer[salt_len + i] = password[i];
+        i++;
+    }
+    buffer[salt_len + i] = '\0';
     
-    /* Key stretching (10,000 iterations) to massively slow down brute-force */
+    /* Key stretching (10,000 iterations) */
     uint32_t hash = fnv1a_hash(buffer);
-    for(int i = 0; i < 10000; i++) {
+    for (int it = 0; it < 10000; it++) {
         hash ^= fnv1a_hash((char*)&hash);
     }
     hash_to_str(hash, out_hash_str);
