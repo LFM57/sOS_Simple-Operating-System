@@ -19,6 +19,11 @@ void init_pmm(uint32_t ram_kb) {
     if (total_pages > 32768 * 32) {
         total_pages = 32768 * 32;
     }
+
+    /* Cap to 64 MB (16 page tables * 1024 pages) matching kernel identity mapping */
+    if (total_pages > 16 * 1024) {
+        total_pages = 16 * 1024;
+    }
     
     for (int i = 0; i < 32768; i++) pmm_bitmap[i] = 0xFFFFFFFF; 
     for (uint32_t i = 0; i < total_pages; i++) pmm_mark_free(i);
@@ -39,13 +44,14 @@ void pmm_free_page(void* ptr) { pmm_mark_free((uint32_t)ptr / PAGE_SIZE); }
 
 /* --- PAGING --- */
 uint32_t kernel_page_directory[1024] __attribute__((aligned(4096)));
-uint32_t first_page_table[4][1024] __attribute__((aligned(4096)));
+#define NUM_IDENTITY_TABLES 16 /* Identity-maps 64 MB (16 * 4 MB = 64 MB) */
+uint32_t first_page_table[NUM_IDENTITY_TABLES][1024] __attribute__((aligned(4096)));
 
 void init_paging() {
     /* Offline kernel directory initialization in Supervisor mode (0x02) */
     for (int i = 0; i < 1024; i++) kernel_page_directory[i] = 0x02; 
     
-    for(int t = 0; t < 4; t++) {
+    for(int t = 0; t < NUM_IDENTITY_TABLES; t++) {
         for (int i = 0; i < 1024; i++) {
             first_page_table[t][i] = ((t * 4194304) + (i * 4096)) | 0x03;
         }
