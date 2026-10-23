@@ -27,6 +27,7 @@ struct e1000_tx_desc {
     uint16_t special;
 } __attribute__((packed));
 
+extern int e1000_installed;
 void init_e1000(void);
 void e1000_transmit(uint8_t* payload, uint16_t length);
 

@@ -5,6 +5,7 @@
 
 uint32_t e1000_mmio_base = 0;
 uint8_t  e1000_mac[6];
+int      e1000_installed = 0;
 
 /* Helper functions to read/write e1000 memory-mapped registers */
 void e1000_write_reg(uint16_t offset, uint32_t val) {
@@ -72,6 +73,8 @@ void e1000_tx_init(void) {
 }
 
 void e1000_transmit(uint8_t* payload, uint16_t length) {
+    if (!e1000_installed || !tx_descs) return;
+
     /* Set the memory address of the buffer to send */
     tx_descs[tx_curr].addr = (uint64_t)(uint32_t)payload;
     tx_descs[tx_curr].length = length;
@@ -88,8 +91,10 @@ void e1000_transmit(uint8_t* payload, uint16_t length) {
 
 /* This function is called by the boot.s irq_nic assembly wrapper */
 void e1000_handler(void) {
+    if (!e1000_installed || !rx_descs) return;
+
     /* Read ICR to clear the interrupt on the card */
-    e1000_read_reg(0x00C0); 
+    e1000_read_reg(0x00C0);
 
     /* Loop through descriptors to see if any are marked DONE (0x01) */
     while ((rx_descs[rx_curr].status & 0x01)) { 
@@ -202,5 +207,6 @@ void init_e1000(void) {
     /* Enable specific interrupts on the E1000 (IMS Register) */
     e1000_write_reg(0x00D0, 0x1F6DC); 
     e1000_read_reg(0x00C0); /* Clear any pending interrupts */
+    e1000_installed = 1;
     kprintf("\n[INFO] Intel E1000 Initialization complete!\n");
 }

@@ -1488,6 +1488,7 @@ void bin_to_hex(const uint8_t* bin, size_t len, char* hex_out) {
 
 /* Reusable HTTP Downloader extracted from wget */
 int http_get(const char* host, uint16_t port, const char* path, uint8_t** out_data, uint32_t* out_len) {
+    if (!e1000_installed) return 0;
     uint8_t target_ip[4];
     extern int net_gethostbyname(const char*, uint8_t*);
     if (!net_gethostbyname(host, target_ip)) return 0;
@@ -1639,6 +1640,10 @@ void execute_command() {
         kprintf("Available commands:\n  help      clear    uptime\n  ram       ls       cd\n  cat       mkdir    rm\n  touch     write    loop\n  run       df       ps\n  kill      about    shutdown\n  whoami    chown    chmod\n  su        sudo     userlist\n  nano      passwd   cp\n  mv        hex      ifconfig\n  wget      update\n");
     }
     else if (strcmp(cmd, "ifconfig") == 0) {
+        if (!e1000_installed) {
+            kprintf("No network interface detected.\n");
+            goto end_prompt;
+        }
         kprintf("e1000     Link encap: Ethernet  HWaddr ");
         
         /* Print MAC Address in hex format */
@@ -2531,19 +2536,23 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
     
     init_multitasking(); kprintf("[INFO] Multitasking OK\n");
 
-    /* Request IP from VirtualBox/QEMU DHCP Server */
-    extern void net_dhcp_discover(void);
-    net_dhcp_discover();
+    /* Request IP from VirtualBox/QEMU DHCP Server only if NIC is present */
+    if (e1000_installed) {
+        extern void net_dhcp_discover(void);
+        net_dhcp_discover();
 
-    /* --- Block OS boot until DHCP completes or times out --- */
-    extern uint8_t sOS_ip[4];
-    uint32_t timeout = timer_ticks + 300; /* 3 seconds timeout (100 Hz = 300 ticks) */
-    while (sOS_ip[0] == 0 && timer_ticks < timeout) {
-        __asm__ volatile("hlt"); /* Yield CPU while waiting for network interrupt */
-    }
+        /* --- Block OS boot until DHCP completes or times out --- */
+        extern uint8_t sOS_ip[4];
+        uint32_t timeout = timer_ticks + 300; /* 3 seconds timeout (100 Hz = 300 ticks) */
+        while (sOS_ip[0] == 0 && timer_ticks < timeout) {
+            __asm__ volatile("hlt"); /* Yield CPU while waiting for network interrupt */
+        }
 
-    if (sOS_ip[0] == 0) {
-        kprintf("[WARNING] DHCP Timeout! Network might be unavailable.\n");
+        if (sOS_ip[0] == 0) {
+            kprintf("[WARNING] DHCP Timeout! Network might be unavailable.\n");
+        }
+    } else {
+        kprintf("[INFO] Network skipped (No compatible NIC detected).\n");
     }
 
     kprintf("[INFO] Booting finished without errors!\n");
