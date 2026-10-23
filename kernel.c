@@ -1810,7 +1810,7 @@ void execute_command() {
         kprintf("sOS (Simple Operating System) - v%s\n", SOS_VERSION); 
         kprintf("Arch  : i686 (32-bit x86 Intel)\n");
         kprintf("Memory: %d MB\n", total_ram_kb / 1024);
-        kprintf("FS    : FAT16 (ATA PIO Mode)\n");
+        kprintf("FS    : FAT32 (ATA PIO Mode)\n");
         kprintf("Uptime: %d sec\n", timer_ticks / 100);
         kprintf("Author: LFM57\n\n");
     }
@@ -2007,7 +2007,7 @@ void execute_command() {
             int u_len = 0;
             while (username[u_len] != '\0') u_len++;
             if (u_len > 8) {
-                kprintf("Error: Username is too long (max 8 characters allowed for FAT16 home folder).\n");
+                kprintf("Error: Username is too long (max 8 characters allowed for FAT32 8.3 home folder).\n");
                 goto end_prompt;
             }
 

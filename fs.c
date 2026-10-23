@@ -1,10 +1,43 @@
 #include "system.h"
 
 typedef struct {
-    uint8_t  jump[3]; char oem[8]; uint16_t bytes_per_sector; uint8_t sectors_per_cluster;
-    uint16_t reserved_sectors; uint8_t fat_count; uint16_t dir_entries;
-    uint16_t total_sectors; uint8_t media_descriptor; uint16_t sectors_per_fat;
-} __attribute__((packed)) fat16_bpb_t;
+    uint8_t  jump[3];
+    char     oem[8];
+    uint16_t bytes_per_sector;
+    uint8_t  sectors_per_cluster;
+    uint16_t reserved_sectors;
+    uint8_t  fat_count;
+    uint16_t dir_entries;        /* Must be 0 for FAT32 */
+    uint16_t total_sectors_16;   /* 0 for FAT32 */
+    uint8_t  media_descriptor;
+    uint16_t sectors_per_fat_16; /* 0 for FAT32 */
+    uint16_t sectors_per_track;
+    uint16_t num_heads;
+    uint32_t hidden_sectors;
+    uint32_t total_sectors_32;
+
+    /* FAT32 Extended Fields */
+    uint32_t sectors_per_fat_32;
+    uint16_t ext_flags;
+    uint16_t fs_version;
+    uint32_t root_cluster;       /* Starting cluster of the root directory (usually 2) */
+    uint16_t fs_info;
+    uint16_t backup_boot_sector;
+    uint8_t  reserved[12];
+    uint8_t  drive_number;
+    uint8_t  reserved1;
+    uint8_t  boot_sig;
+    uint32_t volume_id;
+    char     volume_label[11];
+    char     fs_type[8];
+} __attribute__((packed)) fat32_bpb_t;
+
+/* Helper macros for 32-bit cluster combining and setting */
+#define get_cluster(entry) (((uint32_t)(entry).first_cluster_high << 16) | (entry).first_cluster_low)
+#define set_cluster(entry, clus) do { \
+    (entry).first_cluster_low = (uint16_t)((clus) & 0xFFFF); \
+    (entry).first_cluster_high = (uint16_t)(((clus) >> 16) & 0xFFFF); \
+} while(0)
 
 typedef struct {
     char name[11]; uint8_t attributes; uint8_t sec_byte; /* <-- This is OUR security byte (formerly reserved) */
@@ -14,9 +47,9 @@ typedef struct {
     uint16_t first_cluster_low; uint32_t size;
 } __attribute__((packed)) fat_dir_entry_t;
 
-/* --- INTERNAL FUNCTION PROTOTYPES (Avoids implicit declaration type conflicts) --- */
-uint16_t read_fat_entry(uint32_t cluster);
-void write_fat_entry(uint32_t cluster, uint16_t value);
+/* --- INTERNAL FUNCTION PROTOTYPES --- */
+uint32_t read_fat_entry(uint32_t cluster);
+void write_fat_entry(uint32_t cluster, uint32_t value);
 void format_fat_name(const char* fat_name, char* out_name);
 void to_fat_name(const char* input, char* fat_name);
 int find_entry(const char* target_name, fat_dir_entry_t* out_entry, uint32_t* out_sec, int* out_idx);
@@ -25,12 +58,14 @@ void free_fat_chain(uint32_t cluster);
 
 uint32_t root_dir_start;
 uint32_t data_start;
-uint32_t fat_start; /* Where the sector map begins */
+uint32_t fat_start;
+uint32_t root_cluster;
+uint32_t sectors_per_fat;
+uint32_t total_clusters;
 uint8_t  sectors_per_cluster;
-uint32_t root_dir_entries;
 
 uint32_t current_dir_sector;
-uint32_t current_dir_cluster = 0; /* Stores the cluster (0 = Root) */
+uint32_t current_dir_cluster = 2; /* In FAT32, root starts at root_cluster (typically 2) */
 static volatile int bypass_dir_permission = 0;
 
 int fs_error = 0;
@@ -70,8 +105,8 @@ int resolve_path(const char* path, uint32_t* out_parent_cluster, uint32_t* out_p
     const char* p = path;
     /* If the path starts with '/', start the search from the root */
     if (p[0] == '/') {
-        cluster = 0;
-        sector = root_dir_start;
+        cluster = root_cluster;
+        sector = data_start + ((root_cluster - 2) * sectors_per_cluster);
         p++;
     }
 
@@ -81,8 +116,8 @@ int resolve_path(const char* path, uint32_t* out_parent_cluster, uint32_t* out_p
     p = next_component(p, comp);
     if (comp[0] == '\0') {
         /* The path was simply "/" */
-        *out_parent_cluster = 0;
-        *out_parent_sector = root_dir_start;
+        *out_parent_cluster = root_cluster;
+        *out_parent_sector = data_start + ((root_cluster - 2) * sectors_per_cluster);
         out_fat_name[0] = '\0'; 
         return 1;
     }
@@ -122,12 +157,11 @@ int resolve_path(const char* path, uint32_t* out_parent_cluster, uint32_t* out_p
         }
 
         /* Transition to the intermediate directory */
-        cluster = entry.first_cluster_low;
+        cluster = get_cluster(entry);
         if (cluster == 0) {
-            sector = root_dir_start;
-        } else {
-            sector = data_start + ((cluster - 2) * sectors_per_cluster);
+            cluster = root_cluster;
         }
+        sector = data_start + ((cluster - 2) * sectors_per_cluster);
 
         /* The next component becomes the current component */
         for (int i = 0; i < 64; i++) comp[i] = next_comp[i];
@@ -183,7 +217,7 @@ int check_current_dir_permission(int is_write) {
     if (bypass_dir_permission) return 1; /* Allows the kernel to write its own system files */
     uint8_t active_uid = get_active_uid();
     if (active_uid == 0) return 1; 
-    if (current_dir_cluster == 0) {
+    if (current_dir_cluster == root_cluster || current_dir_cluster == 0) {
         return is_write ? 0 : 1;
     }
     
@@ -215,8 +249,8 @@ void print_perms(uint8_t sec_byte) {
 void fs_chown(const char* filename, uint8_t new_uid) {
     /* WILDCARD (*) HANDLING */
     if (strcmp(filename, "*") == 0) {
-        uint32_t cluster = current_dir_cluster;
-        uint32_t sec = current_dir_sector;
+        uint32_t cluster = (current_dir_cluster == 0) ? root_cluster : current_dir_cluster;
+        uint32_t sec = data_start + ((cluster - 2) * sectors_per_cluster);
         uint32_t sec_offset = 0;
         uint8_t* sector = (uint8_t*)kmalloc(512);
         char entry_name[13];
@@ -242,7 +276,7 @@ void fs_chown(const char* filename, uint8_t new_uid) {
                     modified = 1;
                     
                     if (dir[i].attributes & 0x10) {
-                        uint32_t sub_cluster = dir[i].first_cluster_low;
+                        uint32_t sub_cluster = get_cluster(dir[i]);
                         uint32_t sub_sec = data_start + ((sub_cluster - 2) * sectors_per_cluster);
                         uint8_t* sub_sector = (uint8_t*)kmalloc(512);
                         ata_read_sector(sub_sec, sub_sector);
@@ -266,19 +300,14 @@ void fs_chown(const char* filename, uint8_t new_uid) {
             }
 
             sec_offset++;
-            if (cluster == 0) { 
-                if (sec_offset >= (root_dir_entries * 32 / 512)) break; 
-                sec = root_dir_start + sec_offset; 
-            } 
-            else {
-                if (sec_offset % sectors_per_cluster == 0) {
-                    cluster = read_fat_entry(cluster);
-                    if (cluster < 2 || cluster >= 0xFFF8) break; 
-                    sec = data_start + ((cluster - 2) * sectors_per_cluster);
-                } else sec++;
+            if (sec_offset % sectors_per_cluster == 0) {
+                cluster = read_fat_entry(cluster);
+                if (cluster < 2 || cluster >= 0x0FFFFFF8) break; 
+                sec = data_start + ((cluster - 2) * sectors_per_cluster);
+            } else {
+                sec++;
             }
         }
-    chown_wildcard_end:
         kfree(sector);
         kprintf("Ownership updated for all files.\n");
         return;
@@ -304,7 +333,7 @@ void fs_chown(const char* filename, uint8_t new_uid) {
     ata_write_sector(dir_sec, dir_sector);
     
     if (dir[dir_idx].attributes & 0x10) {
-        uint32_t sub_cluster = dir[dir_idx].first_cluster_low;
+        uint32_t sub_cluster = get_cluster(dir[dir_idx]);
         uint32_t sub_sec = data_start + ((sub_cluster - 2) * sectors_per_cluster);
         uint8_t* sub_sector = (uint8_t*)kmalloc(512);
         ata_read_sector(sub_sec, sub_sector);
@@ -322,8 +351,8 @@ void fs_chown(const char* filename, uint8_t new_uid) {
 void fs_chmod(const char* filename, uint8_t new_perms) {
     /* WILDCARD (*) HANDLING */
     if (strcmp(filename, "*") == 0) {
-        uint32_t cluster = current_dir_cluster;
-        uint32_t sec = current_dir_sector;
+        uint32_t cluster = (current_dir_cluster == 0) ? root_cluster : current_dir_cluster;
+        uint32_t sec = data_start + ((cluster - 2) * sectors_per_cluster);
         uint32_t sec_offset = 0;
         uint8_t* sector = (uint8_t*)kmalloc(512);
         char entry_name[13];
@@ -349,7 +378,7 @@ void fs_chmod(const char* filename, uint8_t new_perms) {
                     modified = 1;
                     
                     if (dir[i].attributes & 0x10) {
-                        uint32_t sub_cluster = dir[i].first_cluster_low;
+                        uint32_t sub_cluster = get_cluster(dir[i]);
                         uint32_t sub_sec = data_start + ((sub_cluster - 2) * sectors_per_cluster);
                         uint8_t* sub_sector = (uint8_t*)kmalloc(512);
                         ata_read_sector(sub_sec, sub_sector);
@@ -373,16 +402,12 @@ void fs_chmod(const char* filename, uint8_t new_perms) {
             }
 
             sec_offset++;
-            if (cluster == 0) { 
-                if (sec_offset >= (root_dir_entries * 32 / 512)) break; 
-                sec = root_dir_start + sec_offset; 
-            } 
-            else {
-                if (sec_offset % sectors_per_cluster == 0) {
-                    cluster = read_fat_entry(cluster);
-                    if (cluster < 2 || cluster >= 0xFFF8) break; 
-                    sec = data_start + ((cluster - 2) * sectors_per_cluster);
-                } else sec++;
+            if (sec_offset % sectors_per_cluster == 0) {
+                cluster = read_fat_entry(cluster);
+                if (cluster < 2 || cluster >= 0x0FFFFFF8) break; 
+                sec = data_start + ((cluster - 2) * sectors_per_cluster);
+            } else {
+                sec++;
             }
         }
         kfree(sector);
@@ -407,7 +432,7 @@ void fs_chmod(const char* filename, uint8_t new_perms) {
     ata_write_sector(dir_sec, dir_sector);
     
     if (dir[dir_idx].attributes & 0x10) {
-        uint32_t sub_cluster = dir[dir_idx].first_cluster_low;
+        uint32_t sub_cluster = get_cluster(dir[dir_idx]);
         uint32_t sub_sec = data_start + ((sub_cluster - 2) * sectors_per_cluster);
         uint8_t* sub_sector = (uint8_t*)kmalloc(512);
         ata_read_sector(sub_sec, sub_sector);
@@ -425,40 +450,51 @@ void fs_chmod(const char* filename, uint8_t new_perms) {
 void init_fs() {
     uint8_t* boot_sector = (uint8_t*)kmalloc(512);
     ata_read_sector(0, boot_sector);
-    fat16_bpb_t* bpb = (fat16_bpb_t*)boot_sector;
+    fat32_bpb_t* bpb = (fat32_bpb_t*)boot_sector;
     
     fat_start = bpb->reserved_sectors;
-    root_dir_start = bpb->reserved_sectors + (bpb->fat_count * bpb->sectors_per_fat);
-    data_start = root_dir_start + ((bpb->dir_entries * 32 + 511) / 512);
+    sectors_per_fat = bpb->sectors_per_fat_32;
     sectors_per_cluster = bpb->sectors_per_cluster;
-    root_dir_entries = bpb->dir_entries;
+    root_cluster = bpb->root_cluster;
     
+    /* In FAT32, data_start begins immediately after the reserved sectors and all FAT copies */
+    data_start = bpb->reserved_sectors + (bpb->fat_count * sectors_per_fat);
+    
+    /* Calculate total clusters available on the drive */
+    uint32_t total_sectors = (bpb->total_sectors_16 != 0) ? bpb->total_sectors_16 : bpb->total_sectors_32;
+    uint32_t data_sectors = total_sectors - data_start;
+    total_clusters = data_sectors / sectors_per_cluster;
+
+    /* Root directory is located in the data area at root_cluster */
+    root_dir_start = data_start + ((root_cluster - 2) * sectors_per_cluster);
+    current_dir_cluster = root_cluster;
     current_dir_sector = root_dir_start;
-    current_dir_cluster = 0;
     
-    kprintf("[INFO] FS FAT16 OK.\n");
+    kprintf("[INFO] FS FAT32 OK (Root cluster: %d, Total clusters: %d).\n", root_cluster, total_clusters);
     kfree(boot_sector);
 }
 
-/* FAT16 sectors secured against out-of-bounds reads/writes */
-uint16_t read_fat_entry(uint32_t cluster) {
+/* FAT32 reads: 128 entries per sector (4 bytes per entry), top 4 bits reserved */
+uint32_t read_fat_entry(uint32_t cluster) {
     uint8_t* sector = (uint8_t*)kmalloc(512);
-    uint32_t sector_lba = fat_start + (cluster / 256);
-    uint32_t offset = cluster % 256;
+    uint32_t sector_lba = fat_start + (cluster / 128);
+    uint32_t offset = cluster % 128;
     
     ata_read_sector(sector_lba, sector);
-    uint16_t entry = ((uint16_t*)sector)[offset];
+    uint32_t entry = ((uint32_t*)sector)[offset] & 0x0FFFFFFF;
     kfree(sector);
     return entry;
 }
 
-void write_fat_entry(uint32_t cluster, uint16_t value) {
+/* FAT32 writes: Preserves top 4 reserved bits */
+void write_fat_entry(uint32_t cluster, uint32_t value) {
     uint8_t* sector = (uint8_t*)kmalloc(512);
-    uint32_t sector_lba = fat_start + (cluster / 256);
-    uint32_t offset = cluster % 256;
+    uint32_t sector_lba = fat_start + (cluster / 128);
+    uint32_t offset = cluster % 128;
     
     ata_read_sector(sector_lba, sector);
-    ((uint16_t*)sector)[offset] = value;
+    uint32_t old_entry = ((uint32_t*)sector)[offset];
+    ((uint32_t*)sector)[offset] = (old_entry & 0xF0000000) | (value & 0x0FFFFFFF);
     ata_write_sector(sector_lba, sector);
     kfree(sector);
 }
@@ -510,8 +546,8 @@ int fat_strcmp(const char* fat_name, const char* str) {
 
 /* Searches for a file in the current directory (traverses all directory sectors) */
 int find_entry(const char* target_name, fat_dir_entry_t* out_entry, uint32_t* out_sec, int* out_idx) {
-    uint32_t cluster = current_dir_cluster;
-    uint32_t sec = current_dir_sector;
+    uint32_t cluster = (current_dir_cluster == 0) ? root_cluster : current_dir_cluster;
+    uint32_t sec = data_start + ((cluster - 2) * sectors_per_cluster);
     uint32_t sec_offset = 0;
     uint8_t* sector = (uint8_t*)kmalloc(512);
     
@@ -531,29 +567,26 @@ int find_entry(const char* target_name, fat_dir_entry_t* out_entry, uint32_t* ou
             }
         }
         
-        /* Move to the next sector of the directory */
         sec_offset++;
-        if (cluster == 0) { /* Root directory */
-            if (sec_offset >= (root_dir_entries * 32 / 512)) break;
-            sec = root_dir_start + sec_offset;
-        } else { /* Subdirectory (follow the FAT) */
-            if (sec_offset % sectors_per_cluster == 0) {
-                cluster = read_fat_entry(cluster);
-                if (cluster < 2 || cluster >= 0xFFF8) break;
-                sec = data_start + ((cluster - 2) * sectors_per_cluster);
-            } else sec++;
+        if (sec_offset % sectors_per_cluster == 0) {
+            cluster = read_fat_entry(cluster);
+            if (cluster < 2 || cluster >= 0x0FFFFFF8) break;
+            sec = data_start + ((cluster - 2) * sectors_per_cluster);
+        } else {
+            sec++;
         }
     }
 not_found:
     kfree(sector); return 0;
 }
 
-/* Searches for a free entry in the current directory */
+/* Searches for a free entry in the current directory, expanding the directory if needed */
 int find_free_entry(uint32_t* out_sec, int* out_idx) {
-    uint32_t cluster = current_dir_cluster;
-    uint32_t sec = current_dir_sector;
+    uint32_t cluster = (current_dir_cluster == 0) ? root_cluster : current_dir_cluster;
+    uint32_t sec = data_start + ((cluster - 2) * sectors_per_cluster);
     uint32_t sec_offset = 0;
     uint8_t* sector = (uint8_t*)kmalloc(512);
+    uint32_t prev_cluster = cluster;
     
     while (1) {
         ata_read_sector(sec, sector);
@@ -564,17 +597,42 @@ int find_free_entry(uint32_t* out_sec, int* out_idx) {
                 kfree(sector); return 1;
             }
         }
-        /* Same traversal logic as above... */
+
         sec_offset++;
-        if (cluster == 0) {
-            if (sec_offset >= (root_dir_entries * 32 / 512)) break;
-            sec = root_dir_start + sec_offset;
+        if (sec_offset % sectors_per_cluster == 0) {
+            prev_cluster = cluster;
+            cluster = read_fat_entry(cluster);
+            if (cluster < 2 || cluster >= 0x0FFFFFF8) {
+                /* Directory is full: dynamically allocate another cluster for it */
+                uint32_t new_cluster = 0;
+                for (uint32_t i = 2; i < total_clusters + 2; i++) {
+                    if (read_fat_entry(i) == 0x00000000) {
+                        new_cluster = i;
+                        write_fat_entry(i, 0x0FFFFFFF);
+                        break;
+                    }
+                }
+                if (new_cluster == 0) {
+                    kfree(sector);
+                    return 0; /* Disk full */
+                }
+                write_fat_entry(prev_cluster, new_cluster);
+                
+                /* Zero out the new directory cluster */
+                for (int b = 0; b < 512; b++) sector[b] = 0;
+                uint32_t new_sec_lba = data_start + ((new_cluster - 2) * sectors_per_cluster);
+                for (int s = 0; s < sectors_per_cluster; s++) {
+                    ata_write_sector(new_sec_lba + s, sector);
+                }
+                
+                *out_sec = new_sec_lba;
+                *out_idx = 0;
+                kfree(sector);
+                return 1;
+            }
+            sec = data_start + ((cluster - 2) * sectors_per_cluster);
         } else {
-            if (sec_offset % sectors_per_cluster == 0) {
-                cluster = read_fat_entry(cluster);
-                if (cluster < 2 || cluster >= 0xFFF8) break;
-                sec = data_start + ((cluster - 2) * sectors_per_cluster);
-            } else sec++;
+            sec++;
         }
     }
     kfree(sector); return 0;
@@ -606,8 +664,8 @@ void fs_ls() {
     kprintf("-------------------------------------------------\n");
     
     char printable_name[13];
-    uint32_t cluster = current_dir_cluster;
-    uint32_t sec = current_dir_sector;
+    uint32_t cluster = (current_dir_cluster == 0) ? root_cluster : current_dir_cluster;
+    uint32_t sec = data_start + ((cluster - 2) * sectors_per_cluster);
     uint32_t sec_offset = 0;
     uint8_t* sector = (uint8_t*)kmalloc(512);
     
@@ -650,16 +708,12 @@ void fs_ls() {
         }
         
         sec_offset++;
-        if (cluster == 0) { 
-            if (sec_offset >= (root_dir_entries * 32 / 512)) break; 
-            sec = root_dir_start + sec_offset; 
-        } 
-        else {
-            if (sec_offset % sectors_per_cluster == 0) {
-                cluster = read_fat_entry(cluster);
-                if (cluster < 2 || cluster >= 0xFFF8) break; 
-                sec = data_start + ((cluster - 2) * sectors_per_cluster);
-            } else sec++;
+        if (sec_offset % sectors_per_cluster == 0) {
+            cluster = read_fat_entry(cluster);
+            if (cluster < 2 || cluster >= 0x0FFFFFF8) break; 
+            sec = data_start + ((cluster - 2) * sectors_per_cluster);
+        } else {
+            sec++;
         }
     }
 ls_end:
@@ -669,25 +723,24 @@ ls_end:
 void fs_df() {
     uint8_t* sector = (uint8_t*)kmalloc(512);
     uint32_t free_clusters = 0;
+    uint32_t clusters_checked = 0;
     
-    /* Size of the first FAT table */
-    uint32_t fat1_sectors = (root_dir_start - fat_start) / 2;
-    
-    /* Scan the FAT to count clusters marked as 0x0000 (Free) */
-    for(uint32_t s = 0; s < fat1_sectors; s++) {
+    for (uint32_t s = 0; s < sectors_per_fat && clusters_checked < total_clusters; s++) {
         ata_read_sector(fat_start + s, sector);
-        uint16_t* fat_entries = (uint16_t*)sector;
-        for(int i = 0; i < 256; i++) {
-            if (fat_entries[i] == 0x0000) {
-                free_clusters++;
+        uint32_t* fat_entries = (uint32_t*)sector;
+        for (int i = 0; i < 128 && clusters_checked < total_clusters; i++) {
+            uint32_t cluster_idx = s * 128 + i;
+            if (cluster_idx >= 2 && cluster_idx < total_clusters + 2) {
+                if ((fat_entries[i] & 0x0FFFFFFF) == 0x00000000) {
+                    free_clusters++;
+                }
+                clusters_checked++;
             }
         }
     }
     kfree(sector);
     
-    /* Conversion to kilobytes (Each cluster is 'sectors_per_cluster' * 512 bytes) */
     uint32_t free_kb = (free_clusters * sectors_per_cluster * 512) / 1024;
-    
     kprintf("Free storage space: %d KB (%d.%d MB)\n", 
             free_kb, 
             free_kb / 1024, 
@@ -696,8 +749,8 @@ void fs_df() {
 
 void fs_cd(const char* path) {
     if (strcmp(path, "/") == 0 || strcmp(path, "") == 0) {
-        current_dir_sector = root_dir_start;
-        current_dir_cluster = 0;
+        current_dir_cluster = root_cluster;
+        current_dir_sector = data_start + ((root_cluster - 2) * sectors_per_cluster);
         current_path[0] = '/';
         current_path[1] = '\0';
         return;
@@ -711,8 +764,8 @@ void fs_cd(const char* path) {
     }
 
     if (target_fat[0] == '\0') {
-        current_dir_sector = root_dir_start;
-        current_dir_cluster = 0;
+        current_dir_cluster = root_cluster;
+        current_dir_sector = data_start + ((root_cluster - 2) * sectors_per_cluster);
         current_path[0] = '/';
         current_path[1] = '\0';
         return;
@@ -748,14 +801,12 @@ void fs_cd(const char* path) {
         }
     }
 
-    uint32_t cluster = entry.first_cluster_low;
+    uint32_t cluster = get_cluster(entry);
     if (cluster == 0) {
-        current_dir_sector = root_dir_start;
-        current_dir_cluster = 0;
-    } else {
-        current_dir_sector = data_start + ((cluster - 2) * sectors_per_cluster);
-        current_dir_cluster = cluster;
+        cluster = root_cluster;
     }
+    current_dir_cluster = cluster;
+    current_dir_sector = data_start + ((cluster - 2) * sectors_per_cluster);
 
     /* Dynamic and robust reconstruction of the command prompt path */
     if (path[0] == '/') {
@@ -782,12 +833,12 @@ void fs_mkdir(const char* dirname) {
         return;
     }
 
-    /* 1. Find free space on the disk (Reading the FAT table) */
+    /* 1. Find free cluster in FAT32 */
     uint32_t free_cluster = 0;
-    for (uint32_t i = 2; i < 0xFFF0; i++) {
-        if (read_fat_entry(i) == 0x0000) {
+    for (uint32_t i = 2; i < total_clusters + 2; i++) {
+        if (read_fat_entry(i) == 0x00000000) {
             free_cluster = i;
-            write_fat_entry(i, 0xFFFF);
+            write_fat_entry(i, 0x0FFFFFFF);
             break;
         }
     }
@@ -806,8 +857,8 @@ void fs_mkdir(const char* dirname) {
     fat_dir_entry_t* dir = (fat_dir_entry_t*)dir_sector;
 
     for(int i=0; i<11; i++) dir[free_entry].name[i] = fat_name[i];
-    dir[free_entry].attributes = 0x10; /* Is a directory */
-    dir[free_entry].first_cluster_low = (uint16_t)free_cluster;
+    dir[free_entry].attributes = 0x10;
+    set_cluster(dir[free_entry], free_cluster);
     dir[free_entry].size = 0;
     /* By default: Creator = owner. Permissions: Owner R+W (0x30), Others none -> Total 0x30 */
     dir[free_entry].sec_byte = (get_active_uid() & 0x0F) | 0x30;
@@ -824,15 +875,15 @@ void fs_mkdir(const char* dirname) {
     for(int i=0; i<11; i++) new_dir[0].name[i] = ' ';
     new_dir[0].name[0] = '.';
     new_dir[0].attributes = 0x10;
-    new_dir[0].first_cluster_low = (uint16_t)free_cluster;
-    /* [SECURITY] Apply the creator's UID and 0x30 permissions (Owner R/W, none for others) */
+    set_cluster(new_dir[0], free_cluster);
     new_dir[0].sec_byte = (current_uid & 0x0F) | 0x30; 
 
-    /* Directory ".." (Parent) */
+    /* Directory ".." (Parent - In FAT32 spec, points to 0 if parent is root) */
     for(int i=0; i<11; i++) new_dir[1].name[i] = ' ';
     new_dir[1].name[0] = '.'; new_dir[1].name[1] = '.';
     new_dir[1].attributes = 0x10;
-    new_dir[1].first_cluster_low = (uint16_t)current_dir_cluster;
+    uint32_t parent_cluster = (current_dir_cluster == root_cluster) ? 0 : current_dir_cluster;
+    set_cluster(new_dir[1], parent_cluster);
 
     /* Save this new directory to its new disk space */
     uint32_t new_sec_lba = data_start + ((free_cluster - 2) * sectors_per_cluster);
@@ -879,10 +930,10 @@ void fs_cat(const char* filename) {
     kprintf("\n--- %s ---\n", filename);
     
     uint32_t bytes_left = entry.size;
-    uint32_t cluster = entry.first_cluster_low;
+    uint32_t cluster = get_cluster(entry);
     uint8_t* sector = (uint8_t*)kmalloc(512);
     
-    while (bytes_left > 0 && cluster >= 2 && cluster < 0xFFF8) {
+    while (bytes_left > 0 && cluster >= 2 && cluster < 0x0FFFFFF8) {
         uint32_t f_sec = data_start + ((cluster - 2) * sectors_per_cluster);
         for (int s = 0; s < sectors_per_cluster && bytes_left > 0; s++) {
             ata_read_sector(f_sec + s, sector);
@@ -904,9 +955,9 @@ void fs_cat(const char* filename) {
 
 void free_fat_chain(uint32_t cluster) {
     if (cluster < 2) return;
-    while (cluster >= 2 && cluster < 0xFFF8) {
-        uint16_t next = read_fat_entry(cluster);
-        write_fat_entry(cluster, 0x0000);
+    while (cluster >= 2 && cluster < 0x0FFFFFF8) {
+        uint32_t next = read_fat_entry(cluster);
+        write_fat_entry(cluster, 0x00000000);
         cluster = next;
     }
 }
@@ -927,13 +978,13 @@ void fs_rm(const char* arg1, const char* arg2) {
             return;
         }
 
-        if (current_dir_cluster == 0 && current_uid != 0) {
+        if ((current_dir_cluster == root_cluster || current_dir_cluster == 0) && current_uid != 0) {
             kprintf("Error: Permission denied (Write access to '/' required).\n");
             return;
         }
 
-        uint32_t cluster = current_dir_cluster;
-        uint32_t sec = current_dir_sector;
+        uint32_t cluster = (current_dir_cluster == 0) ? root_cluster : current_dir_cluster;
+        uint32_t sec = data_start + ((cluster - 2) * sectors_per_cluster);
         uint32_t sec_offset = 0;
         uint8_t* sector = (uint8_t*)kmalloc(512);
         char entry_name[13];
@@ -995,13 +1046,13 @@ void fs_rm(const char* arg1, const char* arg2) {
                         for(int j = 0; j < 16; j++) {
                             if (sub_dir[j].name[0] == 0x00) break;
                             if (sub_dir[j].name[0] == (char)0xE5 || sub_dir[j].name[0] == '.') continue;
-                            free_fat_chain(sub_dir[j].first_cluster_low);
+                            free_fat_chain(get_cluster(sub_dir[j]));
                         }
                     }
                     kfree(sub_sector);
                 }
 
-                free_fat_chain(dir[i].first_cluster_low);
+                free_fat_chain(get_cluster(dir[i]));
                 dir[i].name[0] = (char)0xE5;
                 modified = 1;
             }
@@ -1016,16 +1067,12 @@ void fs_rm(const char* arg1, const char* arg2) {
             }
 
             sec_offset++;
-            if (cluster == 0) { 
-                if (sec_offset >= (root_dir_entries * 32 / 512)) break; 
-                sec = root_dir_start + sec_offset; 
-            } 
-            else {
-                if (sec_offset % sectors_per_cluster == 0) {
-                    cluster = read_fat_entry(cluster);
-                    if (cluster < 2 || cluster >= 0xFFF8) break; 
-                    sec = data_start + ((cluster - 2) * sectors_per_cluster);
-                } else sec++;
+            if (sec_offset % sectors_per_cluster == 0) {
+                cluster = read_fat_entry(cluster);
+                if (cluster < 2 || cluster >= 0x0FFFFFF8) break; 
+                sec = data_start + ((cluster - 2) * sectors_per_cluster);
+            } else {
+                sec++;
             }
         }
         kfree(sector);
@@ -1091,7 +1138,7 @@ void fs_rm(const char* arg1, const char* arg2) {
         if (dir[i].name[0] == (char)0xE5) continue;
         
         if (fat_strcmp(dir[i].name, target_fat)) {
-            uint32_t cluster = dir[i].first_cluster_low;
+            uint32_t cluster = get_cluster(dir[i]);
             
             if (dir[i].attributes & 0x10) {
                 uint32_t target_sector = data_start + ((cluster - 2) * sectors_per_cluster);
@@ -1188,6 +1235,7 @@ void fs_touch(const char* filename) {
     for(int i=0; i<11; i++) dir[free_entry].name[i] = target_fat[i];
     dir[free_entry].attributes = 0x20; 
     dir[free_entry].first_cluster_low = 0; 
+    dir[free_entry].first_cluster_high = 0; 
     dir[free_entry].size = 0;
     dir[free_entry].sec_byte = (get_active_uid() & 0x0F) | 0x30;
 
@@ -1245,12 +1293,12 @@ int fs_write(const char* filename, const char* text) {
     current_dir_sector = old_sector;
 
     /* 2. Allocate a cluster if it does not have one yet */
-    uint32_t cluster = entry.first_cluster_low;
+    uint32_t cluster = get_cluster(entry);
     if (cluster == 0) {
-        for (uint32_t i = 2; i < 0xFFF0; i++) {
-            if (read_fat_entry(i) == 0x0000) {
+        for (uint32_t i = 2; i < total_clusters + 2; i++) {
+            if (read_fat_entry(i) == 0x00000000) {
                 cluster = i;
-                write_fat_entry(i, 0xFFFF);
+                write_fat_entry(i, 0x0FFFFFFF);
                 break;
             }
         }
@@ -1276,7 +1324,7 @@ int fs_write(const char* filename, const char* text) {
     ata_read_sector(dir_sec, dir_sector);
     fat_dir_entry_t* dir = (fat_dir_entry_t*)dir_sector;
     
-    dir[dir_idx].first_cluster_low = cluster;
+    set_cluster(dir[dir_idx], cluster);
     dir[dir_idx].size = text_len;
     
     ata_write_sector(dir_sec, dir_sector);
@@ -1314,8 +1362,9 @@ int fs_cp(const char* src_name, const char* dest_name) {
 
     /* UNIX BEHAVIOR: If the destination is an existing directory, copy THE FILE INSIDE IT */
     if (dest_exists && (dest_dir_entry.attributes & 0x10)) {
-        dest_parent_cluster = dest_dir_entry.first_cluster_low;
-        dest_parent_sector = (dest_parent_cluster == 0) ? root_dir_start : data_start + ((dest_parent_cluster - 2) * sectors_per_cluster);
+        dest_parent_cluster = get_cluster(dest_dir_entry);
+        if (dest_parent_cluster == 0) dest_parent_cluster = root_cluster;
+        dest_parent_sector = data_start + ((dest_parent_cluster - 2) * sectors_per_cluster);
         for (int i = 0; i < 11; i++) {
             dest_fat[i] = src_fat[i];
         }
@@ -1381,8 +1430,9 @@ int fs_cp(const char* src_name, const char* dest_name) {
         for (int i = 0; i < 11; i++) {
             dir[free_entry].name[i] = dest_fat[i];
         }
-        dir[free_entry].attributes = 0x20; /* Archive (file) */
+        dir[free_entry].attributes = 0x20;
         dir[free_entry].first_cluster_low = 0;
+        dir[free_entry].first_cluster_high = 0;
         dir[free_entry].size = 0;
         dir[free_entry].sec_byte = (get_active_uid() & 0x0F) | 0x30; /* Secured by default to 0x30 */
 
@@ -1398,7 +1448,7 @@ int fs_cp(const char* src_name, const char* dest_name) {
     current_dir_cluster = old_cluster;
     current_dir_sector = old_sector;
 
-    uint32_t src_cluster = src_entry.first_cluster_low;
+    uint32_t src_cluster = get_cluster(src_entry);
     if (src_cluster == 0) {
         return 1; /* Empty file copied successfully */
     }
@@ -1408,7 +1458,7 @@ int fs_cp(const char* src_name, const char* dest_name) {
     uint32_t last_dest_cluster = 0;
     uint32_t first_dest_cluster = 0;
 
-    while (src_cluster >= 2 && src_cluster < 0xFFF8) {
+    while (src_cluster >= 2 && src_cluster < 0x0FFFFFF8) {
         uint32_t src_sec_lba = data_start + ((src_cluster - 2) * sectors_per_cluster);
         for (int s = 0; s < sectors_per_cluster; s++) {
             ata_read_sector(src_sec_lba + s, cluster_buf + (s * 512));
@@ -1416,10 +1466,10 @@ int fs_cp(const char* src_name, const char* dest_name) {
 
         /* Find a free cluster */
         uint32_t free_cluster = 0;
-        for (uint32_t i = 2; i < 0xFFF0; i++) {
-            if (read_fat_entry(i) == 0x0000) {
+        for (uint32_t i = 2; i < total_clusters + 2; i++) {
+            if (read_fat_entry(i) == 0x00000000) {
                 free_cluster = i;
-                write_fat_entry(i, 0xFFFF);
+                write_fat_entry(i, 0x0FFFFFFF);
                 break;
             }
         }
@@ -1454,7 +1504,7 @@ int fs_cp(const char* src_name, const char* dest_name) {
         ata_read_sector(dest_dir_sec, dir_sector);
         fat_dir_entry_t* dir = (fat_dir_entry_t*)dir_sector;
         
-        dir[dest_dir_idx].first_cluster_low = (uint16_t)first_dest_cluster;
+        set_cluster(dir[dest_dir_idx], first_dest_cluster);
         dir[dest_dir_idx].size = src_entry.size;
         dir[dest_dir_idx].sec_byte = (current_uid & 0x0F) | 0x30; /* Secured by default to 0x30 */
         
@@ -1514,12 +1564,12 @@ int fs_load_file(const char* filename, uint8_t** buffer_out, uint32_t* size_out)
     *buffer_out = (uint8_t*)kmalloc(entry.size);
     
     uint32_t bytes_left = entry.size;
-    uint32_t cluster = entry.first_cluster_low;
+    uint32_t cluster = get_cluster(entry);
     uint8_t* sector = (uint8_t*)kmalloc(512);
     
     uint8_t* write_ptr = *buffer_out;
 
-    while (bytes_left > 0 && cluster >= 2 && cluster < 0xFFF8) {
+    while (bytes_left > 0 && cluster >= 2 && cluster < 0x0FFFFFF8) {
         uint32_t f_sec = data_start + ((cluster - 2) * sectors_per_cluster);
         for (int s = 0; s < sectors_per_cluster && bytes_left > 0; s++) {
             ata_read_sector(f_sec + s, sector);
@@ -1570,15 +1620,12 @@ int fs_suggest_file(const char* target_name, char* out_suggestion) {
         }
         
         sec_offset++;
-        if (cluster == 0) {
-            if (sec_offset >= (root_dir_entries * 32 / 512)) break;
-            sec = root_dir_start + sec_offset;
+        if (sec_offset % sectors_per_cluster == 0) {
+            cluster = read_fat_entry(cluster);
+            if (cluster < 2 || cluster >= 0x0FFFFFF8) break;
+            sec = data_start + ((cluster - 2) * sectors_per_cluster);
         } else {
-            if (sec_offset % sectors_per_cluster == 0) {
-                cluster = read_fat_entry(cluster);
-                if (cluster < 2 || cluster >= 0xFFF8) break;
-                sec = data_start + ((cluster - 2) * sectors_per_cluster);
-            } else sec++;
+            sec++;
         }
     }
 end_suggest:
@@ -1634,8 +1681,8 @@ int fs_complete(const char* prefix, char* out_match, int* out_match_count, int p
             }
 
             if (target_fat[0] == '\0') {
-                target_cluster = 0;
-                target_sector = root_dir_start;
+                target_cluster = root_cluster;
+                target_sector = data_start + ((root_cluster - 2) * sectors_per_cluster);
             } else {
                 uint32_t saved_cluster = current_dir_cluster;
                 uint32_t saved_sector = current_dir_sector;
@@ -1661,8 +1708,9 @@ int fs_complete(const char* prefix, char* out_match, int* out_match_count, int p
                     }
                 }
 
-                target_cluster = entry.first_cluster_low;
-                target_sector = (target_cluster == 0) ? root_dir_start : data_start + ((target_cluster - 2) * sectors_per_cluster);
+                target_cluster = get_cluster(entry);
+                if (target_cluster == 0) target_cluster = root_cluster;
+                target_sector = data_start + ((target_cluster - 2) * sectors_per_cluster);
             }
         }
 
@@ -1730,16 +1778,12 @@ int fs_complete(const char* prefix, char* out_match, int* out_match_count, int p
         }
         
         sec_offset++;
-        if (cluster == 0) { 
-            if (sec_offset >= (root_dir_entries * 32 / 512)) break; 
-            sec = root_dir_start + sec_offset; 
-        } 
-        else {
-            if (sec_offset % sectors_per_cluster == 0) {
-                cluster = read_fat_entry(cluster);
-                if (cluster < 2 || cluster >= 0xFFF8) break; 
-                sec = data_start + ((cluster - 2) * sectors_per_cluster);
-            } else sec++;
+        if (sec_offset % sectors_per_cluster == 0) {
+            cluster = read_fat_entry(cluster);
+            if (cluster < 2 || cluster >= 0x0FFFFFF8) break; 
+            sec = data_start + ((cluster - 2) * sectors_per_cluster);
+        } else {
+            sec++;
         }
     }
 end_complete:
@@ -1809,8 +1853,9 @@ int fs_write_bin(const char* filename, uint8_t* data, uint32_t size) {
     }
 
     /* Free previous clusters if overwriting */
-    if (entry.first_cluster_low != 0) {
-        free_fat_chain(entry.first_cluster_low);
+    uint32_t prev_cluster = get_cluster(entry);
+    if (prev_cluster != 0) {
+        free_fat_chain(prev_cluster);
     }
 
     uint32_t bytes_left = size;
@@ -1821,10 +1866,10 @@ int fs_write_bin(const char* filename, uint8_t* data, uint32_t size) {
     if (size > 0) {
         while (bytes_left > 0) {
             uint32_t free_cluster = 0;
-            for (uint32_t i = 2; i < 0xFFF0; i++) {
-                if (read_fat_entry(i) == 0x0000) {
+            for (uint32_t i = 2; i < total_clusters + 2; i++) {
+                if (read_fat_entry(i) == 0x00000000) {
                     free_cluster = i;
-                    write_fat_entry(i, 0xFFFF);
+                    write_fat_entry(i, 0x0FFFFFFF);
                     break;
                 }
             }
@@ -1851,8 +1896,8 @@ int fs_write_bin(const char* filename, uint8_t* data, uint32_t size) {
     ata_read_sector(dir_sec, dir_sector);
     fat_dir_entry_t* dir = (fat_dir_entry_t*)dir_sector;
     
-    dir[dir_idx].first_cluster_low = first_cluster;
-    dir[dir_idx].size = size - bytes_left; 
+    set_cluster(dir[dir_idx], first_cluster);
+    dir[dir_idx].size = size - bytes_left;
     
     ata_write_sector(dir_sec, dir_sector);
     kfree(dir_sector);

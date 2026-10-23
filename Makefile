@@ -33,12 +33,12 @@ app.sos: app.c sos.c
 	$(USER_LD) -T app_linker.ld app.o sos.o -o app.sos
 	rm -f app.o sos.o
 
-# Creation of the 16 MB raw FAT16 disk
+# Creation of the 64 MB raw FAT32 disk
 drive.img: app.sos kernel.bin
-	@echo "Creation of the 16 MB disk..."
-	dd if=/dev/zero of=drive.img bs=1M count=16 status=none
-	@echo "Formating in FAT16..."
-	/usr/sbin/mkfs.fat -F 16 drive.img
+	@echo "Creation of the 64 MB disk..."
+	dd if=/dev/zero of=drive.img bs=1M count=64 status=none
+	@echo "Formatting in FAT32..."
+	/usr/sbin/mkfs.fat -F 32 drive.img
 	
 	@echo "Creating user database..."
 	echo "root:20fd0e45:0" > passwd
