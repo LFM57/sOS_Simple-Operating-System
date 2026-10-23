@@ -1390,18 +1390,13 @@ int fs_cp(const char* src_name, const char* dest_name) {
         kfree(dir_sector);
     }
     
-    fat_dir_entry_t dest_entry;
-    uint32_t dest_dir_sec;
-    int dest_dir_idx;
-    int dest_found = find_entry(dest_fat, &dest_entry, &dest_dir_sec, &dest_dir_idx);
+    /* We already know the sector and index where the entry was just created */
+    uint32_t dest_dir_sec = target_sec;
+    int dest_dir_idx = free_entry;
 
+    /* Restore the working directory context */
     current_dir_cluster = old_cluster;
     current_dir_sector = old_sector;
-
-    if (!dest_found) {
-        kprintf("Error: Failed to locate created destination file.\n");
-        return 0;
-    }
 
     uint32_t src_cluster = src_entry.first_cluster_low;
     if (src_cluster == 0) {
@@ -1476,19 +1471,7 @@ int fs_cp(const char* src_name, const char* dest_name) {
 void fs_mv(const char* src_name, const char* dest_name) {
     /* The source file is only deleted if the copy succeeded (returns 1) */
     if (fs_cp(src_name, dest_name)) {
-        uint32_t src_parent_cluster, src_parent_sector;
-        char src_fat[11];
-        if (resolve_path(src_name, &src_parent_cluster, &src_parent_sector, src_fat)) {
-            uint32_t old_cluster = current_dir_cluster;
-            uint32_t old_sector = current_dir_sector;
-            current_dir_cluster = src_parent_cluster;
-            current_dir_sector = src_parent_sector;
-            
-            fs_rm(src_fat, NULL); /* Delete the original */
-            
-            current_dir_cluster = old_cluster;
-            current_dir_sector = old_sector;
-        }
+        fs_rm(src_name, NULL); /* Delete the original using its standard path */
     } else {
         kprintf("Error: Move failed.\n");
     }
