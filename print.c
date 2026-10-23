@@ -236,15 +236,16 @@ void scroll() {
             uint32_t row_bytes = 16 * g_pitch;
             uint32_t total_shift_bytes = (term_rows - 1) * row_bytes;
             
-            /* Shift the backbuffer up by one text row (16 pixels) */
-            uint8_t* dst = (uint8_t*)backbuffer;
-            uint8_t* src = (uint8_t*)backbuffer + row_bytes;
-            for (uint32_t i = 0; i < total_shift_bytes; i++) {
+            /* Shift the backbuffer up by one text row (16 pixels) using 32-bit dwords */
+            uint32_t total_dwords = total_shift_bytes / 4;
+            uint32_t* dst = backbuffer;
+            uint32_t* src = backbuffer + (row_bytes / 4);
+            for (uint32_t i = 0; i < total_dwords; i++) {
                 dst[i] = src[i];
             }
             
             /* Clear the very last text row with the background color */
-            uint32_t* last_line = (uint32_t*)(dst + total_shift_bytes);
+            uint32_t* last_line = dst + total_dwords;
             uint32_t pixels_to_clear = row_bytes / 4;
             for (uint32_t i = 0; i < pixels_to_clear; i++) {
                 last_line[i] = term_bg_color;
