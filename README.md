@@ -96,7 +96,7 @@ VirtualBox offers full Intel E1000 emulation, VBE graphics, and NAT network conn
 You can run sOS directly using QEMU with network support enabled:
 
 ```bash
-qemu-system-i386 -m 64M -cdrom sos.iso -drive file=drive.img,format=raw,index=0,media=disk -net nic,model=e1000 -net user
+qemu-system-i386 -m 64M -boot d -cdrom sos.iso -drive file=drive.img,format=raw,index=0,media=disk -net nic,model=e1000 -net user
 ```
 
 ---
