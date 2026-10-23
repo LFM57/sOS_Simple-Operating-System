@@ -176,6 +176,13 @@ void init_multitasking() {
 uint32_t schedule(uint32_t current_esp) {
     if (current_task == -1) return current_esp;
 
+    /* Clean up any zombie task while running safely in another task's context */
+    for (int i = 1; i < MAX_TASKS; i++) {
+        if (tasks[i].state == 3 && i != current_task) {
+            cleanup_task_memory(i);
+        }
+    }
+
     if (tasks[current_task].state == 1) {
         tasks[current_task].esp = current_esp;
         tasks[current_task].state = 2; 
@@ -184,7 +191,7 @@ uint32_t schedule(uint32_t current_esp) {
     int next_task = current_task;
     do {
         next_task = (next_task + 1) % MAX_TASKS;
-    } while (tasks[next_task].state != 2); 
+    } while (tasks[next_task].state != 2);
 
     if (current_task != next_task) {
         current_task = next_task;
@@ -254,7 +261,10 @@ void cleanup_task_memory(int id) {
 }
 
 void kill_current_task() {
-    cleanup_task_memory(current_task);
+    __asm__ volatile("cli");
+    if (current_task > 0) {
+        tasks[current_task].state = 3; /* Mark as ZOMBIE; deferred cleanup */
+    }
     while(1) {
         __asm__ volatile("sti; hlt");
     }
@@ -614,8 +624,7 @@ void keyboard_handler() {
             /* Scenario 1: A foreground task is running */
             if (ascii == 3 && fg_task != -1 && tasks[fg_task].state != 0) {
                 kprintf("^C\n");
-                cleanup_task_memory(fg_task);
-                fg_task = -1;
+                tasks[fg_task].state = 3; /* Mark as zombie; foreground wait loop cleans it up */
             } 
             /* Scenarios 2 & 3: Pass to kernel prompts or shell */
             else if (is_kernel_gets_active) {
@@ -1726,6 +1735,10 @@ void execute_command() {
                         /* Classic blocking synchronous mode */
                         fg_task = task_id;
                         while(tasks[task_id].state != 0) {
+                            if (tasks[task_id].state == 3) {
+                                cleanup_task_memory(task_id);
+                                break;
+                            }
                             __asm__ volatile("sti; hlt");
                         }
                         fg_task = -1;
@@ -1753,7 +1766,7 @@ void execute_command() {
         for(int i = 0; i < MAX_TASKS; i++) {
             if (tasks[i].state != 0) {
                 const char* type = (i == 0) ? "Shell" : (tasks[i].code_page == NULL ? "SysTask" : "UserApp");
-                const char* state = (tasks[i].state == 1) ? "RUNNING" : "READY";
+                const char* state = (tasks[i].state == 1) ? "RUNNING" : ((tasks[i].state == 3) ? "ZOMBIE" : "READY");
                 kprintf(" %d  | %s", i, type);
                 int len = 0; while(type[len]) len++;
                 for(int s = len; s < 10; s++) kprintf(" ");
