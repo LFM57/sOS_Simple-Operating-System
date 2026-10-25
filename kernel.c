@@ -1797,13 +1797,14 @@ int http_get(const char* host, uint16_t port, const char* path, uint8_t** out_da
         __asm__ volatile("hlt");
     }
     
-    char request[256];
+    char request[512];
     int r_idx = 0;
-    const char* p1 = "GET "; while(*p1) request[r_idx++] = *p1++;
-    const char* p2 = path; while(*p2) request[r_idx++] = *p2++;
-    const char* p3 = " HTTP/1.0\r\nHost: "; while(*p3) request[r_idx++] = *p3++;
-    const char* p4 = host; while(*p4) request[r_idx++] = *p4++;
-    const char* p5 = "\r\nConnection: close\r\n\r\n"; while(*p5) request[r_idx++] = *p5++;
+    int r_max = (int)sizeof(request) - 1;
+    const char* p1 = "GET "; while(*p1 && r_idx < r_max) request[r_idx++] = *p1++;
+    const char* p2 = path; while(*p2 && r_idx < r_max) request[r_idx++] = *p2++;
+    const char* p3 = " HTTP/1.0\r\nHost: "; while(*p3 && r_idx < r_max) request[r_idx++] = *p3++;
+    const char* p4 = host; while(*p4 && r_idx < r_max) request[r_idx++] = *p4++;
+    const char* p5 = "\r\nConnection: close\r\n\r\n"; while(*p5 && r_idx < r_max) request[r_idx++] = *p5++;
     request[r_idx] = '\0';
     
     net_send_tcp_raw(sock_idx, 0x18, (uint8_t*)request, r_idx);
