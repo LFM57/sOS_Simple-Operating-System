@@ -161,7 +161,10 @@ void net_send_tcp_raw(int sock_idx, uint8_t flags, uint8_t* payload, uint16_t le
     tcp->seq = htonl(sockets[sock_idx].seq_num);
     tcp->ack = htonl(sockets[sock_idx].ack_num);
     tcp->flags_offset = htons((5 << 12) | flags); /* 5 words (20 bytes) offset + flags */
-    tcp->window_size = htons(32768); /* Advertise our new massive 32KB window */
+    uint16_t avail_win = (sockets[sock_idx].rx_len < SOCK_BUF_SIZE)
+                         ? (uint16_t)(SOCK_BUF_SIZE - sockets[sock_idx].rx_len)
+                         : 0;
+    tcp->window_size = htons(avail_win);
     tcp->checksum = 0;
     tcp->urgent_p = 0;
 
