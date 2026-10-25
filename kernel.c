@@ -321,6 +321,7 @@ void create_task(void (*entry_point)()) {
     if (id == -1) { kprintf("Error: Max threads reached.\n"); return; }
 
     uint32_t* stack = (uint32_t*)pmm_alloc_page();
+    if (!stack) { kprintf("Error: Out of memory.\n"); return; }
     uint32_t* top = (uint32_t*)((uint32_t)stack + 4096);
 
     *(--top) = 0x202;                
@@ -333,6 +334,10 @@ void create_task(void (*entry_point)()) {
     *(--top) = 0x10; *(--top) = 0x10; *(--top) = 0x10; *(--top) = 0x10;
 
     tasks[id].esp = (uint32_t)top;
+    tasks[id].kernel_esp = (uint32_t)stack + 4096;
+    tasks[id].kernel_stack = (void*)stack;
+    tasks[id].user_stack = NULL;
+    tasks[id].code_page = NULL;
     tasks[id].id = id;
     tasks[id].uid = current_uid; /* Saves the creator */
     tasks[id].page_directory = kernel_page_directory;
