@@ -78,7 +78,9 @@ void swap_buffers(void) {
 void draw_char(char c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color) {
     if (!is_graphics_mode || x + 8 > g_width || y + 16 > g_height) return;
 
-    const unsigned char* glyph = font8x16[(unsigned char)c];
+    unsigned char idx = (unsigned char)c;
+    if (idx >= 128) idx = '?';
+    const unsigned char* glyph = font8x16[idx];
     uint32_t bytes_per_pixel = g_bpp / 8;
     uint32_t row_offset = (y * g_pitch) + (x * bytes_per_pixel);
 
