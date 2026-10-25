@@ -682,65 +682,53 @@ void fs_ls() {
         kprintf("Error: Permission denied (Read access required).\n");
         return;
     }
+
+    vfs_node_t* dir_node = vfs_open(get_current_path(), O_RDONLY);
+    if (!dir_node) {
+        kprintf("Error: Permission denied (Read access required).\n");
+        return;
+    }
     
     kprintf("Permissions | Name           | Type      | Size\n");
     kprintf("-------------------------------------------------\n");
     
-    char printable_name[13];
-    uint32_t cluster = (current_dir_cluster == 0) ? root_cluster : current_dir_cluster;
-    uint32_t sec = data_start + ((cluster - 2) * sectors_per_cluster);
-    uint32_t sec_offset = 0;
-    uint8_t* sector = (uint8_t*)kmalloc(512);
-    
-    while (1) {
-        ata_read_sector(sec, sector);
-        fat_dir_entry_t* dir = (fat_dir_entry_t*)sector;
-
-        for (int i = 0; i < 16; i++) {
-            if (dir[i].name[0] == 0x00) goto ls_end;
-            if (dir[i].name[0] == (char)0xE5 || dir[i].attributes == 0x0F) continue;
-
-            format_fat_name(dir[i].name, printable_name);
-            print_perms(dir[i].sec_byte);
-            kprintf("%s", printable_name);
-            
-            int len = 0; while(printable_name[len] != '\0') len++;
-            for(int s = len; s < 15; s++) kprintf(" "); 
-            
-            if (dir[i].attributes & 0x10) {
-                kprintf("| Directory | -\n");
-            } else {
-                /* Dynamic detection of the ".SOS" extension */
-                int is_sos = (dir[i].name[8] == 'S' && dir[i].name[9] == 'O' && dir[i].name[10] == 'S');
-                char type[4];
-                type[0] = dir[i].name[8];
-                type[1] = dir[i].name[9];
-                type[2] = dir[i].name[10];
-                type[3] = '\0';
-                
-                if (is_sos) {
-                    kprintf("| App       | ");
-                    print_human_size(dir[i].size);
-                    kprintf("\n");
-                } else {
-                    kprintf("| File: %s | ", type);
-                    print_human_size(dir[i].size);
-                    kprintf("\n");
+    vfs_dirent_t dirent;
+    uint32_t idx = 0;
+    while (vfs_readdir(dir_node, idx++, &dirent)) {
+        print_perms(dirent.sec_byte);
+        kprintf("%s", dirent.name);
+        
+        int len = 0; while (dirent.name[len] != '\0') len++;
+        for (int s = len; s < 15; s++) kprintf(" ");
+        
+        if (dirent.type == VFS_DIRECTORY) {
+            kprintf("| Directory | -\n");
+        } else {
+            char type[4] = {' ', ' ', ' ', '\0'};
+            int dot = -1;
+            for (int k = 0; dirent.name[k] != '\0'; k++) {
+                if (dirent.name[k] == '.') dot = k;
+            }
+            if (dot >= 0 && dirent.name[dot + 1] != '\0') {
+                for (int k = 0; k < 3 && dirent.name[dot + 1 + k] != '\0'; k++) {
+                    char c = dirent.name[dot + 1 + k];
+                    type[k] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
                 }
             }
-        }
-        
-        sec_offset++;
-        if (sec_offset % sectors_per_cluster == 0) {
-            cluster = read_fat_entry(cluster);
-            if (cluster < 2 || cluster >= 0x0FFFFFF8) break; 
-            sec = data_start + ((cluster - 2) * sectors_per_cluster);
-        } else {
-            sec++;
+            int is_sos = (type[0] == 'S' && type[1] == 'O' && type[2] == 'S');
+            if (is_sos) {
+                kprintf("| App       | ");
+                print_human_size(dirent.size);
+                kprintf("\n");
+            } else {
+                kprintf("| File: %s | ", type);
+                print_human_size(dirent.size);
+                kprintf("\n");
+            }
         }
     }
-ls_end:
-    kfree(sector);
+
+    vfs_close(dir_node);
 }
 
 void fs_df() {
@@ -925,51 +913,38 @@ void fs_mkdir(const char* dirname) {
 }
 
 void fs_cat(const char* filename) {
-    uint32_t parent_cluster, parent_sector;
-    char target_fat[11];
-    if (!resolve_path(filename, &parent_cluster, &parent_sector, target_fat)) {
-        kprintf("Error: '%s': No such file.\n", filename); 
+    vfs_node_t* node = vfs_open(filename, O_RDONLY);
+    if (!node) {
+        if (fs_error == FS_ERR_PERMISSION) {
+            kprintf("Error: Permission denied (Read access required).\n");
+        } else {
+            kprintf("Error: '%s': No such file.\n", filename);
+        }
         return;
     }
 
-    fat_dir_entry_t entry;
-    int found = find_entry_in(parent_cluster, target_fat, &entry, NULL, NULL);
-
-    if (!found) {
-        kprintf("Error: '%s': No such file.\n", filename);
-        return;
-    }
-    if (entry.attributes & 0x10) {
+    if (node->type == VFS_DIRECTORY) {
         kprintf("Error: '%s' is a directory.\n", filename);
-        return;
-    }
-
-    if (!check_permission_byte(entry.sec_byte, 0)) {
-        kprintf("Error: Permission denied (Read access required).\n");
+        vfs_close(node);
         return;
     }
     
     kprintf("\n--- %s ---\n", filename);
     
-    uint32_t bytes_left = entry.size;
-    uint32_t cluster = get_cluster(entry);
     uint8_t* sector = (uint8_t*)kmalloc(512);
+    uint32_t offset = 0;
+    int bytes_read;
     
-    while (bytes_left > 0 && cluster >= 2 && cluster < 0x0FFFFFF8) {
-        uint32_t f_sec = data_start + ((cluster - 2) * sectors_per_cluster);
-        for (int s = 0; s < sectors_per_cluster && bytes_left > 0; s++) {
-            ata_read_sector(f_sec + s, sector);
-            uint32_t chunk = (bytes_left > 512) ? 512 : bytes_left;
-            for (uint32_t j = 0; j < chunk; j++) {
-                kprintf("%c", sector[j]);
-            }
-            bytes_left -= chunk;
+    while ((bytes_read = vfs_read(node, offset, 512, sector)) > 0) {
+        for (int j = 0; j < bytes_read; j++) {
+            kprintf("%c", sector[j]);
         }
-        cluster = read_fat_entry(cluster);
+        offset += (uint32_t)bytes_read;
     }
     
     kprintf("\n----------------\n");
     kfree(sector);
+    vfs_close(node);
 }
 
 void free_fat_chain(uint32_t cluster) {
@@ -1239,103 +1214,31 @@ void fs_touch(const char* filename) {
     kprintf("File '%s' created.\n", filename);
 }
 
-/* Write text to a file (replaces the content) */
+/* Write text to a file via VFS (replaces the content) */
 int fs_write(const char* filename, const char* text) {
-    uint32_t parent_cluster, parent_sector;
-    char target_fat[11];
-    if (!resolve_path(filename, &parent_cluster, &parent_sector, target_fat)) {
-        return 0; /* Invalid parent path */
-    }
+    if (!filename || !text) return 0;
+    uint32_t text_len = 0;
+    while (text[text_len]) text_len++;
 
-    fat_dir_entry_t entry;
-    uint32_t dir_sec;
-    int dir_idx;
+    vfs_node_t* node = vfs_open(filename, O_WRONLY | O_CREAT | O_TRUNC);
+    if (!node) return 0;
 
-    /* 1. Find the file or create it if it does not exist */
-    if (!find_entry_in(parent_cluster, target_fat, &entry, &dir_sec, &dir_idx)) {
-        fs_touch(filename);
-        if (!find_entry_in(parent_cluster, target_fat, &entry, &dir_sec, &dir_idx)) {
+    if (text_len > 0) {
+        int written = vfs_write(node, 0, text_len, (const uint8_t*)text);
+        if (written < 0 || (uint32_t)written != text_len) {
+            vfs_close(node);
             return 0;
         }
     }
-
-    if (entry.attributes & 0x10) { 
-        fs_error = FS_ERR_NOT_FOUND;
-        return 0; 
-    }
-
-    if (!check_permission_byte(entry.sec_byte, 1)) {
-        fs_error = FS_ERR_PERMISSION;
-        return 0;
-    }
-
-    /* 2. Free previous clusters if overwriting */
-    uint32_t prev_cluster = get_cluster(entry);
-    if (prev_cluster != 0) {
-        free_fat_chain(prev_cluster);
-    }
-
-    /* 3. Prepare and write the data across sectors/clusters */
-    uint32_t text_len = 0; 
-    while(text[text_len]) text_len++;
-
-    uint32_t bytes_left = text_len;
-    uint32_t data_idx = 0;
-    uint32_t last_cluster = 0;
-    uint32_t first_cluster = 0;
-
-    if (text_len > 0) {
-        uint8_t* sec_buf = (uint8_t*)kmalloc(512);
-        while (bytes_left > 0) {
-            uint32_t free_cluster = 0;
-            for (uint32_t i = 2; i < total_clusters + 2; i++) {
-                if (read_fat_entry(i) == 0x00000000) {
-                    free_cluster = i;
-                    write_fat_entry(i, 0x0FFFFFFF);
-                    break;
-                }
-            }
-            if (free_cluster == 0) {
-                kfree(sec_buf);
-                if (first_cluster != 0) free_fat_chain(first_cluster);
-                return 0; /* Disk Full */
-            }
-
-            if (first_cluster == 0) first_cluster = free_cluster;
-            if (last_cluster != 0) write_fat_entry(last_cluster, free_cluster);
-            last_cluster = free_cluster;
-
-            uint32_t data_sec = data_start + ((free_cluster - 2) * sectors_per_cluster);
-            for (int s = 0; s < sectors_per_cluster && bytes_left > 0; s++) {
-                for (int i = 0; i < 512; i++) sec_buf[i] = 0;
-                uint32_t chunk = (bytes_left > 512) ? 512 : bytes_left;
-                for (uint32_t i = 0; i < chunk; i++) sec_buf[i] = (uint8_t)text[data_idx++];
-                ata_write_sector(data_sec + s, sec_buf);
-                bytes_left -= chunk;
-            }
-        }
-        kfree(sec_buf);
-    }
-
-    /* 4. Update the size and the cluster in the parent entry */
-    uint8_t* dir_sector = (uint8_t*)kmalloc(512);
-    ata_read_sector(dir_sec, dir_sector);
-    fat_dir_entry_t* dir = (fat_dir_entry_t*)dir_sector;
-    
-    set_cluster(dir[dir_idx], first_cluster);
-    dir[dir_idx].size = text_len - bytes_left;
-    
-    ata_write_sector(dir_sec, dir_sector);
-    kfree(dir_sector);
-
+    vfs_close(node);
     return 1;
 }
 
-/* Robust binary file copy (Variable scope fix) */
+/* Robust binary file copy via VFS */
 int fs_cp(const char* src_name, const char* dest_name) {
     uint32_t src_parent_cluster, src_parent_sector;
     char src_fat[11];
-    if (!resolve_path(src_name, &src_parent_cluster, &src_parent_sector, src_fat)) {
+    if (!resolve_path(src_name, &src_parent_cluster, &src_parent_sector, src_fat) || src_fat[0] == '\0') {
         kprintf("Error: Invalid source path '%s'.\n", src_name);
         return 0;
     }
@@ -1348,143 +1251,106 @@ int fs_cp(const char* src_name, const char* dest_name) {
     }
 
     fat_dir_entry_t dest_dir_entry;
-    int dest_exists = find_entry_in(dest_parent_cluster, dest_fat, &dest_dir_entry, NULL, NULL);
+    int dest_exists = (dest_fat[0] != '\0') ? find_entry_in(dest_parent_cluster, dest_fat, &dest_dir_entry, NULL, NULL) : 0;
 
     /* UNIX BEHAVIOR: If the destination is an existing directory, copy THE FILE INSIDE IT */
-    if (dest_exists && (dest_dir_entry.attributes & 0x10)) {
-        dest_parent_cluster = get_cluster(dest_dir_entry);
-        if (dest_parent_cluster == 0) dest_parent_cluster = root_cluster;
-        dest_parent_sector = data_start + ((dest_parent_cluster - 2) * sectors_per_cluster);
-        for (int i = 0; i < 11; i++) {
-            dest_fat[i] = src_fat[i];
+    char actual_dest[256];
+    if (dest_fat[0] == '\0' || (dest_exists && (dest_dir_entry.attributes & 0x10))) {
+        char src_printable[13];
+        format_fat_name(src_fat, src_printable);
+        int d_idx = 0;
+        while (dest_name[d_idx] && d_idx < 240) {
+            actual_dest[d_idx] = dest_name[d_idx];
+            d_idx++;
         }
+        if (d_idx > 0 && actual_dest[d_idx - 1] != '/') {
+            actual_dest[d_idx++] = '/';
+        }
+        int s_idx = 0;
+        while (src_printable[s_idx] && d_idx < 255) {
+            actual_dest[d_idx++] = src_printable[s_idx++];
+        }
+        actual_dest[d_idx] = '\0';
+        if (!resolve_path(actual_dest, &dest_parent_cluster, &dest_parent_sector, dest_fat)) {
+            kprintf("Error: Invalid destination path '%s'.\n", actual_dest);
+            return 0;
+        }
+    } else {
+        int d_idx = 0;
+        while (dest_name[d_idx] && d_idx < 255) {
+            actual_dest[d_idx] = dest_name[d_idx];
+            d_idx++;
+        }
+        actual_dest[d_idx] = '\0';
     }
 
-    /* 1. Load and validate the source file */
-    fat_dir_entry_t src_entry;
-    uint32_t src_dir_sec;
-    int src_dir_idx;
-    int src_found = find_entry_in(src_parent_cluster, src_fat, &src_entry, &src_dir_sec, &src_dir_idx);
-
-    if (!src_found) {
-        kprintf("Error: Source file '%s' not found.\n", src_name);
+    /* 1. Open and validate the source file via VFS */
+    vfs_node_t* src_node = vfs_open(src_name, O_RDONLY);
+    if (!src_node) {
+        if (fs_error == FS_ERR_PERMISSION) {
+            kprintf("Error: Permission denied (Read source required).\n");
+        } else {
+            kprintf("Error: Source file '%s' not found.\n", src_name);
+        }
         return 0;
     }
-    if (src_entry.attributes & 0x10) {
+    if (src_node->type == VFS_DIRECTORY) {
         kprintf("Error: '%s' is a directory.\n", src_name);
-        return 0;
-    }
-    if (!check_permission_byte(src_entry.sec_byte, 0)) {
-        kprintf("Error: Permission denied (Read source required).\n");
+        vfs_close(src_node);
         return 0;
     }
 
     /* 2. Check if the destination file already exists in the target directory */
     if (find_entry_in(dest_parent_cluster, dest_fat, NULL, NULL, NULL)) {
         kprintf("Error: Destination file already exists.\n");
-        return 0;
-    }
-    if (!check_current_dir_permission_in(dest_parent_cluster, 1)) {
-        kprintf("Error: Permission denied (Write to destination directory required).\n");
+        vfs_close(src_node);
         return 0;
     }
 
-    /* 3. Direct creation of the file entry in the target directory (Isolated scope) */
-    uint32_t target_sec;
-    int free_entry;
-    if (!find_free_entry_in(dest_parent_cluster, &target_sec, &free_entry)) {
-        kprintf("Error: No space left in destination directory.\n");
+    /* 3. Create and open destination file via VFS */
+    vfs_node_t* dest_node = vfs_open(actual_dest, O_WRONLY | O_CREAT | O_TRUNC);
+    if (!dest_node) {
+        if (fs_error == FS_ERR_PERMISSION) {
+            kprintf("Error: Permission denied (Write to destination directory required).\n");
+        } else {
+            kprintf("Error: No space left in destination directory.\n");
+        }
+        vfs_close(src_node);
         return 0;
     }
 
-    {
-        uint8_t* dir_sector = (uint8_t*)kmalloc(512);
-        ata_read_sector(target_sec, dir_sector);
-        fat_dir_entry_t* dir = (fat_dir_entry_t*)dir_sector;
-
-        for (int i = 0; i < 11; i++) {
-            dir[free_entry].name[i] = dest_fat[i];
-        }
-        dir[free_entry].attributes = 0x20;
-        dir[free_entry].first_cluster_low = 0;
-        dir[free_entry].first_cluster_high = 0;
-        dir[free_entry].size = 0;
-        dir[free_entry].sec_byte = (get_active_uid() & 0x0F) | 0x30; /* Secured by default to 0x30 */
-
-        ata_write_sector(target_sec, dir_sector);
-        kfree(dir_sector);
-    }
-    
-    /* We already know the sector and index where the entry was just created */
-    uint32_t dest_dir_sec = target_sec;
-    int dest_dir_idx = free_entry;
-
-    uint32_t src_cluster = get_cluster(src_entry);
-    if (src_cluster == 0) {
-        return 1; /* Empty file copied successfully */
-    }
-
-    uint8_t* cluster_buf = (uint8_t*)kmalloc(512 * sectors_per_cluster);
-
-    uint32_t last_dest_cluster = 0;
-    uint32_t first_dest_cluster = 0;
-
-    while (src_cluster >= 2 && src_cluster < 0x0FFFFFF8) {
-        uint32_t src_sec_lba = data_start + ((src_cluster - 2) * sectors_per_cluster);
-        for (int s = 0; s < sectors_per_cluster; s++) {
-            ata_read_sector(src_sec_lba + s, cluster_buf + (s * 512));
-        }
-
-        /* Find a free cluster */
-        uint32_t free_cluster = 0;
-        for (uint32_t i = 2; i < total_clusters + 2; i++) {
-            if (read_fat_entry(i) == 0x00000000) {
-                free_cluster = i;
-                write_fat_entry(i, 0x0FFFFFFF);
-                break;
-            }
-        }
-
-        if (free_cluster == 0) {
-            kprintf("Error: Disk full during copy.\n");
-            if (first_dest_cluster != 0) {
-                free_fat_chain(first_dest_cluster);
-            }
-            kfree(cluster_buf);
+    /* 4. Stream data across VFS nodes */
+    uint32_t total_size = src_node->size;
+    if (total_size > 0) {
+        uint32_t buf_size = 512 * sectors_per_cluster;
+        uint8_t* cluster_buf = (uint8_t*)kmalloc(buf_size);
+        if (!cluster_buf) {
+            vfs_close(src_node);
+            vfs_close(dest_node);
             return 0;
         }
 
-        uint32_t dest_sec_lba = data_start + ((free_cluster - 2) * sectors_per_cluster);
-        for (int s = 0; s < sectors_per_cluster; s++) {
-            ata_write_sector(dest_sec_lba + s, cluster_buf + (s * 512));
+        uint32_t offset = 0;
+        while (offset < total_size) {
+            int r = vfs_read(src_node, offset, buf_size, cluster_buf);
+            if (r <= 0) break;
+            int w = vfs_write(dest_node, offset, (uint32_t)r, cluster_buf);
+            if (w != r) {
+                kprintf("Error: Disk full during copy.\n");
+                kfree(cluster_buf);
+                vfs_close(src_node);
+                vfs_close(dest_node);
+                fs_rm(actual_dest, NULL);
+                return 0;
+            }
+            offset += (uint32_t)w;
         }
-
-        if (last_dest_cluster != 0) {
-            write_fat_entry(last_dest_cluster, free_cluster);
-        } else {
-            first_dest_cluster = free_cluster;
-        }
-        last_dest_cluster = free_cluster;
-
-        src_cluster = read_fat_entry(src_cluster);
+        kfree(cluster_buf);
     }
 
-    /* Update the destination entry (Isolated scope) */
-    {
-        uint8_t* dir_sector = (uint8_t*)kmalloc(512);
-        ata_read_sector(dest_dir_sec, dir_sector);
-        fat_dir_entry_t* dir = (fat_dir_entry_t*)dir_sector;
-        
-        set_cluster(dir[dest_dir_idx], first_dest_cluster);
-        dir[dest_dir_idx].size = src_entry.size;
-        dir[dest_dir_idx].sec_byte = (get_active_uid() & 0x0F) | 0x30; /* Secured by default to 0x30 */
-        
-        ata_write_sector(dest_dir_sec, dir_sector);
-        kfree(dir_sector);
-    }
-
-    kfree(cluster_buf);
-    kprintf("File copied successfully (%d bytes).\n", src_entry.size);
+    vfs_close(src_node);
+    vfs_close(dest_node);
+    kprintf("File copied successfully (%d bytes).\n", total_size);
     return 1;
 }
 
@@ -1500,48 +1366,35 @@ void fs_mv(const char* src_name, const char* dest_name) {
 
 int fs_load_file(const char* filename, uint8_t** buffer_out, uint32_t* size_out) {
     fs_error = FS_ERR_NONE; /* Reset the error */
-    
-    uint32_t parent_cluster, parent_sector;
-    char target_fat[11];
-    if (!resolve_path(filename, &parent_cluster, &parent_sector, target_fat)) {
+
+    vfs_node_t* node = vfs_open(filename, O_RDONLY);
+    if (!node) {
+        return 0;
+    }
+    if (node->type == VFS_DIRECTORY) {
+        vfs_close(node);
         fs_error = FS_ERR_NOT_FOUND;
         return 0;
     }
 
-    fat_dir_entry_t entry;
-    int found = find_entry_in(parent_cluster, target_fat, &entry, NULL, NULL);
-
-    if (!found || (entry.attributes & 0x10)) {
-        fs_error = FS_ERR_NOT_FOUND;
+    *size_out = node->size;
+    *buffer_out = (uint8_t*)kmalloc(node->size ? node->size : 1);
+    if (!*buffer_out) {
+        vfs_close(node);
         return 0;
     }
-    
-    /* SILENT PERMISSION CHECK */
-    if (!check_permission_byte(entry.sec_byte, 0)) {
-        fs_error = FS_ERR_PERMISSION; /* <--- Raise a permission error */
-        return 0; /* Fail silently */
-    }
 
-    *size_out = entry.size;
-    *buffer_out = (uint8_t*)kmalloc(entry.size);
-    
-    uint32_t bytes_left = entry.size;
-    uint32_t cluster = get_cluster(entry);
-    uint8_t* sector = (uint8_t*)kmalloc(512);
-    
-    uint8_t* write_ptr = *buffer_out;
-
-    while (bytes_left > 0 && cluster >= 2 && cluster < 0x0FFFFFF8) {
-        uint32_t f_sec = data_start + ((cluster - 2) * sectors_per_cluster);
-        for (int s = 0; s < sectors_per_cluster && bytes_left > 0; s++) {
-            ata_read_sector(f_sec + s, sector);
-            uint32_t chunk = (bytes_left > 512) ? 512 : bytes_left;
-            for(uint32_t j=0; j<chunk; j++) *(write_ptr++) = sector[j];
-            bytes_left -= chunk;
+    if (node->size > 0) {
+        int bytes_read = vfs_read(node, 0, node->size, *buffer_out);
+        if (bytes_read < 0) {
+            kfree(*buffer_out);
+            *buffer_out = NULL;
+            vfs_close(node);
+            return 0;
         }
-        cluster = read_fat_entry(cluster);
     }
-    kfree(sector);
+
+    vfs_close(node);
     return 1;
 }
 
@@ -1899,31 +1752,15 @@ int fat32_write_at(uint32_t dir_sec, int dir_idx, uint32_t offset, uint32_t coun
     return (bytes_written > 0) ? (int)bytes_written : -1;
 }
 
-/* Append raw bytes to a file using offset-based FAT32 write */
+/* Append raw bytes to a file via VFS */
 void fs_append_bytes(const char* filename, const uint8_t* data, uint32_t len) {
     if (!filename || !data || len == 0) return;
     bypass_dir_permission = 1; /* Enable temporary write permission in the parent directory */
 
-    uint32_t parent_cluster, parent_sector;
-    char target_fat[11];
-    if (!resolve_path(filename, &parent_cluster, &parent_sector, target_fat) || target_fat[0] == '\0') {
-        bypass_dir_permission = 0;
-        return;
-    }
-
-    fat_dir_entry_t entry;
-    uint32_t dir_sec;
-    int dir_idx;
-    if (!find_entry_in(parent_cluster, target_fat, &entry, &dir_sec, &dir_idx)) {
-        fs_touch(filename);
-        if (!find_entry_in(parent_cluster, target_fat, &entry, &dir_sec, &dir_idx)) {
-            bypass_dir_permission = 0;
-            return;
-        }
-    }
-
-    if (!(entry.attributes & 0x10)) {
-        fat32_write_at(dir_sec, dir_idx, entry.size, len, data);
+    vfs_node_t* node = vfs_open(filename, O_WRONLY | O_CREAT | O_APPEND);
+    if (node) {
+        vfs_write(node, node->size, len, data);
+        vfs_close(node);
     }
 
     bypass_dir_permission = 0; /* Immediately restore default security */
@@ -1938,78 +1775,19 @@ void fs_append(const char* filename, const char* text) {
 }
 
 int fs_write_bin(const char* filename, uint8_t* data, uint32_t size) {
-    uint32_t parent_cluster, parent_sector;
-    char target_fat[11];
-    if (!resolve_path(filename, &parent_cluster, &parent_sector, target_fat)) return 0;
+    if (!filename) return 0;
 
-    fat_dir_entry_t entry;
-    uint32_t dir_sec;
-    int dir_idx;
+    vfs_node_t* node = vfs_open(filename, O_WRONLY | O_CREAT | O_TRUNC);
+    if (!node) return 0;
 
-    /* Find file or create it */
-    if (!find_entry_in(parent_cluster, target_fat, &entry, &dir_sec, &dir_idx)) {
-        fs_touch(filename);
-        if (!find_entry_in(parent_cluster, target_fat, &entry, &dir_sec, &dir_idx)) {
+    if (size > 0) {
+        int written = vfs_write(node, 0, size, data);
+        if (written < 0 || (uint32_t)written != size) {
+            vfs_close(node);
             return 0;
         }
     }
 
-    if (entry.attributes & 0x10) { 
-        return 0; 
-    }
-    if (!check_permission_byte(entry.sec_byte, 1)) {
-        return 0;
-    }
-
-    /* Free previous clusters if overwriting */
-    uint32_t prev_cluster = get_cluster(entry);
-    if (prev_cluster != 0) {
-        free_fat_chain(prev_cluster);
-    }
-
-    uint32_t bytes_left = size;
-    uint32_t data_idx = 0;
-    uint32_t last_cluster = 0;
-    uint32_t first_cluster = 0;
-
-    if (size > 0) {
-        while (bytes_left > 0) {
-            uint32_t free_cluster = 0;
-            for (uint32_t i = 2; i < total_clusters + 2; i++) {
-                if (read_fat_entry(i) == 0x00000000) {
-                    free_cluster = i;
-                    write_fat_entry(i, 0x0FFFFFFF);
-                    break;
-                }
-            }
-            if (free_cluster == 0) break; /* Disk Full */
-            
-            if (first_cluster == 0) first_cluster = free_cluster;
-            if (last_cluster != 0) write_fat_entry(last_cluster, free_cluster);
-            last_cluster = free_cluster;
-            
-            uint32_t sec_lba = data_start + ((free_cluster - 2) * sectors_per_cluster);
-            for (int s = 0; s < sectors_per_cluster && bytes_left > 0; s++) {
-                uint8_t sec_buf[512];
-                for(int k=0; k<512; k++) sec_buf[k] = 0;
-                uint32_t chunk = (bytes_left > 512) ? 512 : bytes_left;
-                for(uint32_t j = 0; j < chunk; j++) sec_buf[j] = data[data_idx++];
-                ata_write_sector(sec_lba + s, sec_buf);
-                bytes_left -= chunk;
-            }
-        }
-    }
-
-    /* Update File Size and Cluster in Directory */
-    uint8_t* dir_sector = (uint8_t*)kmalloc(512);
-    ata_read_sector(dir_sec, dir_sector);
-    fat_dir_entry_t* dir = (fat_dir_entry_t*)dir_sector;
-    
-    set_cluster(dir[dir_idx], first_cluster);
-    dir[dir_idx].size = size - bytes_left;
-    
-    ata_write_sector(dir_sec, dir_sector);
-    kfree(dir_sector);
-
+    vfs_close(node);
     return 1;
 }

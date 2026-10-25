@@ -182,17 +182,41 @@ void sleep(unsigned int ms) {
     }
 }
 
-/* File System */
+/* File System (implemented via VFS open/read/write/close syscalls) */
 int read_file(const char* filename, unsigned char* buffer, unsigned int* size_out) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(6), "b"(filename), "c"(buffer), "d"(size_out));
-    return ret;
+    if (!filename || !buffer || !size_out) return 0;
+    unsigned int max_size = *size_out;
+    int fd = open(filename, O_RDONLY);
+    if (fd < 0) return 0;
+
+    int bytes = 0;
+    if (max_size > 0) {
+        bytes = read(fd, buffer, max_size);
+        if (bytes < 0) {
+            close(fd);
+            return 0;
+        }
+    }
+    close(fd);
+    *size_out = (unsigned int)bytes;
+    return 1;
 }
 
 int write_file(const char* filename, const char* text) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(7), "b"(filename), "c"(text));
-    return ret;
+    if (!filename || !text) return 0;
+    int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd < 0) return 0;
+
+    int len = strlen(text);
+    if (len > 0) {
+        int written = write(fd, text, (unsigned int)len);
+        if (written < 0) {
+            close(fd);
+            return 0;
+        }
+    }
+    close(fd);
+    return 1;
 }
 
 typedef struct {

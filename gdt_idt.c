@@ -219,37 +219,22 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
             return (uint32_t)-1; /* Error Code */
         }
 
-        /* Write to the screen (TTY Terminal) */
-        if (tasks[current_task].open_files[fd].type == TYPE_TTY) {
-            /* Support for legacy background task (log redirection) */
-            if (current_task > 0 && tasks[current_task].is_background) {
-                char log_name[32] = "/task_0.log";
-                log_name[6] = '0' + tasks[current_task].id; 
-                fs_append_bytes(log_name, (const uint8_t*)buf, count);
-            } else {
-                /* Direct writing of bytes to the VGA screen */
-                for (uint32_t i = 0; i < count; i++) {
-                    kputc(buf[i]);
-                }
-            }
-            return count; /* Number of bytes actually written */
-        }
-
-        /* Write to a VFS file */
-        if (tasks[current_task].open_files[fd].type == TYPE_FILE) {
+        /* Write via VFS (TTY Terminal or File) */
+        if (tasks[current_task].open_files[fd].type == TYPE_TTY ||
+            tasks[current_task].open_files[fd].type == TYPE_FILE) {
             file_descriptor_t* fd_entry = &tasks[current_task].open_files[fd];
             uint32_t acc = fd_entry->flags & 0x03;
-            if (acc != O_WRONLY && acc != O_RDWR) {
+            if (fd_entry->type == TYPE_FILE && acc != O_WRONLY && acc != O_RDWR) {
                 return (uint32_t)-1;
             }
             if (!fd_entry->node) {
                 return (uint32_t)-1;
             }
-            if (fd_entry->flags & O_APPEND) {
+            if (fd_entry->type == TYPE_FILE && (fd_entry->flags & O_APPEND)) {
                 fd_entry->offset = fd_entry->node->size;
             }
             int bytes = vfs_write(fd_entry->node, fd_entry->offset, count, (const uint8_t*)buf);
-            if (bytes > 0) {
+            if (bytes > 0 && fd_entry->type == TYPE_FILE) {
                 fd_entry->offset += (uint32_t)bytes;
             }
             return (uint32_t)bytes;
@@ -285,30 +270,19 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
             return (uint32_t)-1;
         }
 
-        /* Read from the keyboard (TTY Terminal) */
-        if (tasks[current_task].open_files[fd].type == TYPE_TTY) {
-            if (count == 0) return 0;
-            
-            __asm__ volatile ("sti");
-            extern char wait_key(void);
-            
-            /* For now, we read a single character (raw terminal mode behavior) */
-            buf[0] = wait_key(); 
-            return 1; /* Returns 1 byte read */
-        }
-
-        /* Read from a VFS file */
-        if (tasks[current_task].open_files[fd].type == TYPE_FILE) {
+        /* Read via VFS (TTY Terminal or File) */
+        if (tasks[current_task].open_files[fd].type == TYPE_TTY ||
+            tasks[current_task].open_files[fd].type == TYPE_FILE) {
             file_descriptor_t* fd_entry = &tasks[current_task].open_files[fd];
             uint32_t acc = fd_entry->flags & 0x03;
-            if (acc != O_RDONLY && acc != O_RDWR) {
+            if (fd_entry->type == TYPE_FILE && acc != O_RDONLY && acc != O_RDWR) {
                 return (uint32_t)-1;
             }
             if (!fd_entry->node) {
                 return (uint32_t)-1;
             }
             int bytes = vfs_read(fd_entry->node, fd_entry->offset, count, (uint8_t*)buf);
-            if (bytes > 0) {
+            if (bytes > 0 && fd_entry->type == TYPE_FILE) {
                 fd_entry->offset += (uint32_t)bytes;
             }
             return (uint32_t)bytes;
