@@ -1129,60 +1129,56 @@ void fs_rm(const char* arg1, const char* arg2) {
         return;
     }
 
-    uint8_t* dir_sector = (uint8_t*)kmalloc(512);
-    ata_read_sector(current_dir_sector, dir_sector);
-    fat_dir_entry_t* dir = (fat_dir_entry_t*)dir_sector;
-    
-    for (int i = 0; i < 16; i++) {
-        if (dir[i].name[0] == 0x00) break;
-        if (dir[i].name[0] == (char)0xE5) continue;
-        
-        if (fat_strcmp(dir[i].name, target_fat)) {
-            uint32_t cluster = get_cluster(dir[i]);
-            
-            if (dir[i].attributes & 0x10) {
-                uint32_t target_sector = data_start + ((cluster - 2) * sectors_per_cluster);
-                uint8_t* sub_sector = (uint8_t*)kmalloc(512);
-                ata_read_sector(target_sector, sub_sector);
-                fat_dir_entry_t* sub_dir = (fat_dir_entry_t*)sub_sector;
-                
-                int is_empty = 1;
-                for(int j = 0; j < 16; j++) {
-                    if (sub_dir[j].name[0] == 0x00) break;
-                    if (sub_dir[j].name[0] == (char)0xE5 || sub_dir[j].name[0] == '.') continue;
-                    is_empty = 0; break;
-                }
-
-                if (!is_empty) {
-                    if (!recursive) {
-                        kprintf("Error: Directory is not empty. Use 'rm -r' to force deletion.\n");
-                        kfree(sub_sector); kfree(dir_sector);
-                        current_dir_cluster = old_cluster;
-                        current_dir_sector = old_sector;
-                        return;
-                    }
-                    for(int j = 0; j < 16; j++) {
-                        if (sub_dir[j].name[0] == 0x00) break;
-                        if (sub_dir[j].name[0] == (char)0xE5 || sub_dir[j].name[0] == '.') continue;
-                        free_fat_chain(sub_dir[j].first_cluster_low);
-                    }
-                }
-                kfree(sub_sector);
-            }
-
-            free_fat_chain(cluster);
-            dir[i].name[0] = (char)0xE5;
-            ata_write_sector(current_dir_sector, dir_sector);
-            
-            kprintf("'%s' has been deleted.\n", filename);
-            kfree(dir_sector);
-            current_dir_cluster = old_cluster;
-            current_dir_sector = old_sector;
-            return;
-        }
+    fat_dir_entry_t entry;
+    uint32_t dir_sec;
+    int dir_idx;
+    if (!find_entry(target_fat, &entry, &dir_sec, &dir_idx)) {
+        kprintf("Error: '%s': No such file or directory.\n", filename);
+        current_dir_cluster = old_cluster;
+        current_dir_sector = old_sector;
+        return;
     }
+
+    uint8_t* dir_sector = (uint8_t*)kmalloc(512);
+    ata_read_sector(dir_sec, dir_sector);
+    fat_dir_entry_t* dir = (fat_dir_entry_t*)dir_sector;
+    uint32_t cluster = get_cluster(dir[dir_idx]);
+
+    if (dir[dir_idx].attributes & 0x10) {
+        uint32_t target_sector = data_start + ((cluster - 2) * sectors_per_cluster);
+        uint8_t* sub_sector = (uint8_t*)kmalloc(512);
+        ata_read_sector(target_sector, sub_sector);
+        fat_dir_entry_t* sub_dir = (fat_dir_entry_t*)sub_sector;
+        
+        int is_empty = 1;
+        for(int j = 0; j < 16; j++) {
+            if (sub_dir[j].name[0] == 0x00) break;
+            if (sub_dir[j].name[0] == (char)0xE5 || sub_dir[j].name[0] == '.') continue;
+            is_empty = 0; break;
+        }
+
+        if (!is_empty) {
+            if (!recursive) {
+                kprintf("Error: Directory is not empty. Use 'rm -r' to force deletion.\n");
+                kfree(sub_sector); kfree(dir_sector);
+                current_dir_cluster = old_cluster;
+                current_dir_sector = old_sector;
+                return;
+            }
+            for(int j = 0; j < 16; j++) {
+                if (sub_dir[j].name[0] == 0x00) break;
+                if (sub_dir[j].name[0] == (char)0xE5 || sub_dir[j].name[0] == '.') continue;
+                free_fat_chain(sub_dir[j].first_cluster_low);
+            }
+        }
+        kfree(sub_sector);
+    }
+
+    free_fat_chain(cluster);
+    dir[dir_idx].name[0] = (char)0xE5;
+    ata_write_sector(dir_sec, dir_sector);
     
-    kprintf("Error: '%s': No such file or directory.\n", filename);
+    kprintf("'%s' has been deleted.\n", filename);
     kfree(dir_sector);
     current_dir_cluster = old_cluster;
     current_dir_sector = old_sector;
