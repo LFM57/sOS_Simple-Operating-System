@@ -132,10 +132,11 @@ extern int fs_error;
 #define MAX_OPEN_FILES 16
 
 /* --- File descriptor types (VFS) --- */
-#define TYPE_NONE 0
-#define TYPE_TTY  1
-#define TYPE_FILE 2
+#define TYPE_NONE   0
+#define TYPE_TTY    1
+#define TYPE_FILE   2
 #define TYPE_SOCKET 3
+#define TYPE_PIPE   4
 
 typedef struct {
     uint8_t dest_ip[4];
@@ -146,9 +147,9 @@ typedef struct {
 
 typedef struct {
     int is_used;
-    int type;           /* TYPE_NONE, TYPE_TTY, TYPE_FILE, TYPE_SOCKET */
+    int type;           /* TYPE_NONE, TYPE_TTY, TYPE_FILE, TYPE_SOCKET, TYPE_PIPE */
     uint32_t flags;     /* Open flags (O_RDONLY, O_WRONLY, O_RDWR, O_APPEND, etc.) */
-    uint32_t offset;    /* Current byte offset for TYPE_FILE (or sock_idx for TYPE_SOCKET) */
+    uint32_t offset;    /* Current byte offset for TYPE_FILE */
     struct vfs_node* node;
 } file_descriptor_t;
 

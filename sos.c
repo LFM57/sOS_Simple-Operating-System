@@ -34,6 +34,18 @@ int close(int fd) {
     return ret;
 }
 
+int pipe(int pipefd[2]) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(20), "b"(pipefd) : "memory");
+    return ret;
+}
+
+int dup2(int oldfd, int newfd) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(21), "b"(oldfd), "c"(newfd));
+    return ret;
+}
+
 /* The print() function uses standard write to stdout (FD 1) */
 void print(const char* str) {
     write(1, str, strlen(str));
@@ -380,13 +392,9 @@ int connect(int fd, const unsigned char* dest_ip, unsigned short port) {
 }
 
 int send(int fd, const void* buf, unsigned int len) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(15), "b"(fd), "c"(buf), "d"(len));
-    return ret;
+    return write(fd, buf, len);
 }
 
 int recv(int fd, void* buf, unsigned int len) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(16), "b"(fd), "c"(buf), "d"(len));
-    return ret;
+    return read(fd, buf, len);
 }

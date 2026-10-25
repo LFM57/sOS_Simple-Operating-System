@@ -270,7 +270,31 @@ void scroll(void) {
     }
 }
 
+extern task_t tasks[MAX_TASKS];
+extern int current_task;
+extern volatile int fg_task;
+
 void kputc(char c) {
+    if (current_task == 0 && fg_task == -1 &&
+        tasks[0].open_files[1].is_used &&
+        tasks[0].open_files[1].node != NULL &&
+        tasks[0].open_files[1].node != vfs_get_tty_node()) {
+        static int in_redirect = 0;
+        if (!in_redirect) {
+            in_redirect = 1;
+            file_descriptor_t* fd_entry = &tasks[0].open_files[1];
+            uint8_t ch = (uint8_t)c;
+            if (fd_entry->node->type == VFS_FILE && (fd_entry->flags & O_APPEND)) {
+                fd_entry->offset = fd_entry->node->size;
+            }
+            int w = vfs_write(fd_entry->node, fd_entry->offset, 1, &ch);
+            if (w > 0 && fd_entry->node->type == VFS_FILE) {
+                fd_entry->offset += (uint32_t)w;
+            }
+            in_redirect = 0;
+            return;
+        }
+    }
     write_vga(c);
 }
 

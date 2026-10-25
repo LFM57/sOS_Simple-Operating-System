@@ -24,6 +24,9 @@
 #define VFS_DIRECTORY 0x02
 #define VFS_CHARDEV   0x03
 #define VFS_SOCKET    0x04
+#define VFS_PIPE      0x05
+
+#define PIPE_BUF_SIZE 4096
 
 typedef struct {
     char name[64];
@@ -58,6 +61,8 @@ typedef struct vfs_node {
 
 void init_vfs(void);
 vfs_node_t* vfs_get_tty_node(void);
+vfs_node_t* vfs_create_socket_node(int sock_idx);
+int vfs_create_pipe(vfs_node_t** out_read_node, vfs_node_t** out_write_node);
 vfs_node_t* vfs_open(const char* path, uint32_t flags);
 int vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer);
 int vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const uint8_t* buffer);

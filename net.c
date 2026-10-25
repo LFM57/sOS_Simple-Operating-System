@@ -201,6 +201,8 @@ int net_alloc_socket(int type) {
         if (!sockets[i].is_used) {
             sockets[i].is_used = 1;
             sockets[i].local_port = 0;
+            for (int k = 0; k < 4; k++) sockets[i].remote_ip[k] = 0;
+            sockets[i].remote_port = 0;
             sockets[i].rx_ready = 0;
             sockets[i].type = type; /* 1 = UDP, 2 = TCP */
             sockets[i].tcp_state = TCP_CLOSED;

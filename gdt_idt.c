@@ -219,28 +219,23 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
             return (uint32_t)-1; /* Error Code */
         }
 
-        /* Write via VFS (TTY Terminal or File) */
-        if (tasks[current_task].open_files[fd].type == TYPE_TTY ||
-            tasks[current_task].open_files[fd].type == TYPE_FILE) {
-            file_descriptor_t* fd_entry = &tasks[current_task].open_files[fd];
-            uint32_t acc = fd_entry->flags & 0x03;
-            if (fd_entry->type == TYPE_FILE && acc != O_WRONLY && acc != O_RDWR) {
-                return (uint32_t)-1;
-            }
-            if (!fd_entry->node) {
-                return (uint32_t)-1;
-            }
-            if (fd_entry->type == TYPE_FILE && (fd_entry->flags & O_APPEND)) {
-                fd_entry->offset = fd_entry->node->size;
-            }
-            int bytes = vfs_write(fd_entry->node, fd_entry->offset, count, (const uint8_t*)buf);
-            if (bytes > 0 && fd_entry->type == TYPE_FILE) {
-                fd_entry->offset += (uint32_t)bytes;
-            }
-            return (uint32_t)bytes;
+        /* Write via VFS (TTY, File, Socket, or Pipe) */
+        file_descriptor_t* fd_entry = &tasks[current_task].open_files[fd];
+        if (!fd_entry->node) {
+            return (uint32_t)-1;
         }
-        
-        return (uint32_t)-1;
+        uint32_t acc = fd_entry->flags & 0x03;
+        if (fd_entry->type != TYPE_TTY && acc != O_WRONLY && acc != O_RDWR) {
+            return (uint32_t)-1;
+        }
+        if (fd_entry->node->type == VFS_FILE && (fd_entry->flags & O_APPEND)) {
+            fd_entry->offset = fd_entry->node->size;
+        }
+        int bytes = vfs_write(fd_entry->node, fd_entry->offset, count, (const uint8_t*)buf);
+        if (bytes > 0 && fd_entry->node->type == VFS_FILE) {
+            fd_entry->offset += (uint32_t)bytes;
+        }
+        return (uint32_t)bytes;
     }
     else if (syscall_num == 2) {
         extern void kill_current_task();
@@ -270,25 +265,20 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
             return (uint32_t)-1;
         }
 
-        /* Read via VFS (TTY Terminal or File) */
-        if (tasks[current_task].open_files[fd].type == TYPE_TTY ||
-            tasks[current_task].open_files[fd].type == TYPE_FILE) {
-            file_descriptor_t* fd_entry = &tasks[current_task].open_files[fd];
-            uint32_t acc = fd_entry->flags & 0x03;
-            if (fd_entry->type == TYPE_FILE && acc != O_RDONLY && acc != O_RDWR) {
-                return (uint32_t)-1;
-            }
-            if (!fd_entry->node) {
-                return (uint32_t)-1;
-            }
-            int bytes = vfs_read(fd_entry->node, fd_entry->offset, count, (uint8_t*)buf);
-            if (bytes > 0 && fd_entry->type == TYPE_FILE) {
-                fd_entry->offset += (uint32_t)bytes;
-            }
-            return (uint32_t)bytes;
+        /* Read via VFS (TTY, File, Socket, or Pipe) */
+        file_descriptor_t* fd_entry = &tasks[current_task].open_files[fd];
+        if (!fd_entry->node) {
+            return (uint32_t)-1;
         }
-        
-        return (uint32_t)-1;
+        uint32_t acc = fd_entry->flags & 0x03;
+        if (fd_entry->type != TYPE_TTY && acc != O_RDONLY && acc != O_RDWR) {
+            return (uint32_t)-1;
+        }
+        int bytes = vfs_read(fd_entry->node, fd_entry->offset, count, (uint8_t*)buf);
+        if (bytes > 0 && fd_entry->node->type == VFS_FILE) {
+            fd_entry->offset += (uint32_t)bytes;
+        }
+        return (uint32_t)bytes;
     }
     else if (syscall_num == 5) {
         extern volatile uint32_t timer_ticks;
@@ -364,12 +354,19 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
             if (!tasks[current_task].open_files[i].is_used) {
                 int sock_idx = net_alloc_socket(1);
                 if (sock_idx == -1) return (uint32_t)-1;
+
+                vfs_node_t* node = vfs_create_socket_node(sock_idx);
+                if (!node) {
+                    extern socket_t sockets[];
+                    sockets[sock_idx].is_used = 0;
+                    return (uint32_t)-1;
+                }
                 
                 tasks[current_task].open_files[i].is_used = 1;
                 tasks[current_task].open_files[i].type = TYPE_SOCKET;
                 tasks[current_task].open_files[i].flags = O_RDWR;
-                tasks[current_task].open_files[i].offset = sock_idx; /* Store socket ID in offset */
-                tasks[current_task].open_files[i].node = NULL;
+                tasks[current_task].open_files[i].offset = (uint32_t)sock_idx;
+                tasks[current_task].open_files[i].node = node;
                 return i;
             }
         }
@@ -380,9 +377,11 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         int fd = (int)arg1;
         uint16_t port = (uint16_t)arg2;
         
-        if (fd < 0 || fd >= MAX_OPEN_FILES || tasks[current_task].open_files[fd].type != TYPE_SOCKET) return (uint32_t)-1;
+        if (fd < 0 || fd >= MAX_OPEN_FILES || !tasks[current_task].open_files[fd].is_used) return (uint32_t)-1;
+        vfs_node_t* node = tasks[current_task].open_files[fd].node;
+        if (!node || node->type != VFS_SOCKET) return (uint32_t)-1;
         
-        int sock_idx = tasks[current_task].open_files[fd].offset;
+        int sock_idx = (int)(uintptr_t)node->private_data;
         extern void net_bind_socket(int, uint16_t);
         net_bind_socket(sock_idx, port);
         return 0;
@@ -395,9 +394,14 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         /* Security Checks */
         if (!is_valid_user_range((uint32_t)args, sizeof(sendto_args_t))) return (uint32_t)-1;
         if (!is_valid_user_range((uint32_t)args->payload, args->len)) return (uint32_t)-1;
-        if (fd < 0 || fd >= MAX_OPEN_FILES || tasks[current_task].open_files[fd].type != TYPE_SOCKET) return (uint32_t)-1;
+        if (fd < 0 || fd >= MAX_OPEN_FILES || !tasks[current_task].open_files[fd].is_used) return (uint32_t)-1;
+        vfs_node_t* node = tasks[current_task].open_files[fd].node;
+        if (!node || node->type != VFS_SOCKET) return (uint32_t)-1;
 
-        int sock_idx = tasks[current_task].open_files[fd].offset;
+        int sock_idx = (int)(uintptr_t)node->private_data;
+        extern socket_t sockets[];
+        for (int i = 0; i < 4; i++) sockets[sock_idx].remote_ip[i] = args->dest_ip[i];
+        sockets[sock_idx].remote_port = args->dest_port;
         extern void net_send_udp(int, uint8_t*, uint16_t, uint8_t*, uint16_t);
         net_send_udp(sock_idx, args->dest_ip, args->dest_port, args->payload, args->len);
         return args->len;
@@ -410,11 +414,11 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         
         /* Security Checks */
         if (!is_valid_user_range((uint32_t)buf, max_len)) return (uint32_t)-1;
-        if (fd < 0 || fd >= MAX_OPEN_FILES || tasks[current_task].open_files[fd].type != TYPE_SOCKET) return (uint32_t)-1;
+        if (fd < 0 || fd >= MAX_OPEN_FILES || !tasks[current_task].open_files[fd].is_used) return (uint32_t)-1;
+        vfs_node_t* node = tasks[current_task].open_files[fd].node;
+        if (!node || node->type != VFS_SOCKET) return (uint32_t)-1;
 
-        int sock_idx = tasks[current_task].open_files[fd].offset;
-        extern int net_recv_udp(int, uint8_t*, uint32_t);
-        return net_recv_udp(sock_idx, buf, max_len);
+        return (uint32_t)vfs_read(node, 0, max_len, buf);
     }
     else if (syscall_num == 12) {
         /* Syscall 12: int get_dns_ip(uint8_t* buf) */
@@ -431,12 +435,19 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
             if (!tasks[current_task].open_files[i].is_used) {
                 int sock_idx = net_alloc_socket(2); /* Type 2 = TCP */
                 if (sock_idx == -1) return (uint32_t)-1;
+
+                vfs_node_t* node = vfs_create_socket_node(sock_idx);
+                if (!node) {
+                    extern socket_t sockets[];
+                    sockets[sock_idx].is_used = 0;
+                    return (uint32_t)-1;
+                }
                 
                 tasks[current_task].open_files[i].is_used = 1;
                 tasks[current_task].open_files[i].type = TYPE_SOCKET;
                 tasks[current_task].open_files[i].flags = O_RDWR;
-                tasks[current_task].open_files[i].offset = sock_idx;
-                tasks[current_task].open_files[i].node = NULL;
+                tasks[current_task].open_files[i].offset = (uint32_t)sock_idx;
+                tasks[current_task].open_files[i].node = node;
                 return i;
             }
         }
@@ -449,9 +460,11 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         uint16_t port = (uint16_t)arg3;
         
         if (!is_valid_user_range((uint32_t)dest_ip, 4)) return (uint32_t)-1;
-        if (fd < 0 || fd >= MAX_OPEN_FILES || tasks[current_task].open_files[fd].type != TYPE_SOCKET) return (uint32_t)-1;
+        if (fd < 0 || fd >= MAX_OPEN_FILES || !tasks[current_task].open_files[fd].is_used) return (uint32_t)-1;
+        vfs_node_t* node = tasks[current_task].open_files[fd].node;
+        if (!node || node->type != VFS_SOCKET) return (uint32_t)-1;
 
-        int sock_idx = tasks[current_task].open_files[fd].offset;
+        int sock_idx = (int)(uintptr_t)node->private_data;
         extern socket_t sockets[];
         extern volatile uint32_t timer_ticks;
         
@@ -462,6 +475,10 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         
         for(int i=0; i<4; i++) sockets[sock_idx].remote_ip[i] = dest_ip[i];
         sockets[sock_idx].remote_port = port;
+        if (sockets[sock_idx].type == 1) {
+            return 0;
+        }
+
         sockets[sock_idx].seq_num = timer_ticks * 100; /* Weak random ISN */
         sockets[sock_idx].ack_num = 0;
         sockets[sock_idx].tcp_state = TCP_SYN_SENT;
@@ -481,62 +498,21 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         return 0;
     }
     else if (syscall_num == 15) {
-        /* Syscall 15: int send(int fd, void* buf, uint32_t len) */
-        int fd = (int)arg1;
-        uint8_t* buf = (uint8_t*)arg2;
-        uint32_t len = (uint32_t)arg3;
-        if (!is_valid_user_range((uint32_t)buf, len)) return (uint32_t)-1;
-        if (fd < 0 || fd >= MAX_OPEN_FILES || tasks[current_task].open_files[fd].type != TYPE_SOCKET) return (uint32_t)-1;
-        if (len > 1460) len = 1460;
-        int sock_idx = tasks[current_task].open_files[fd].offset;
-        
-        extern void net_send_tcp_raw(int, uint8_t, uint8_t*, uint16_t);
-        extern socket_t sockets[];
-        
-        /* Send data with PSH + ACK flag (0x18) */
-        net_send_tcp_raw(sock_idx, 0x18, buf, (uint16_t)len);
-        sockets[sock_idx].seq_num += len;
-        return len;
+        /* Syscall 15: int send(int fd, void* buf, uint32_t len) -> thin wrapper over write */
+        return syscall_handler(1, arg1, arg2, arg3);
     }
     else if (syscall_num == 16) {
-        /* Syscall 16: int recv(int fd, void* buf, uint32_t max_len) */
-        int fd = (int)arg1;
-        uint8_t* buf = (uint8_t*)arg2;
-        uint32_t max_len = (uint32_t)arg3;
-        if (!is_valid_user_range((uint32_t)buf, max_len)) return (uint32_t)-1;
-        
-        int sock_idx = tasks[current_task].open_files[fd].offset;
-        extern socket_t sockets[];
-        
-        if (!sockets[sock_idx].rx_ready) return 0;
-        
-        int copy_len = sockets[sock_idx].rx_len < max_len ? sockets[sock_idx].rx_len : max_len;
-        for(int i=0; i<copy_len; i++) buf[i] = sockets[sock_idx].rx_buffer[i];
-        
-        /* Clear buffer after reading */
-        sockets[sock_idx].rx_len = 0;
-        sockets[sock_idx].rx_ready = 0;
-        return copy_len;
+        /* Syscall 16: int recv(int fd, void* buf, uint32_t max_len) -> thin wrapper over read */
+        return syscall_handler(4, arg1, arg2, arg3);
     }
     else if (syscall_num == 17) {
         /* Syscall 17: int close(int fd) */
         int fd = (int)arg1;
-        if (fd < 3 || fd >= MAX_OPEN_FILES || !tasks[current_task].open_files[fd].is_used) {
+        if (fd < 0 || fd >= MAX_OPEN_FILES || !tasks[current_task].open_files[fd].is_used) {
             return (uint32_t)-1;
         }
-        if (tasks[current_task].open_files[fd].type == TYPE_SOCKET) {
-            int sock_idx = tasks[current_task].open_files[fd].offset;
-            extern socket_t sockets[];
-            if (sock_idx >= 0 && sock_idx < MAX_SOCKETS) {
-                sockets[sock_idx].is_used = 0;
-                sockets[sock_idx].tcp_state = TCP_CLOSED;
-                sockets[sock_idx].rx_len = 0;
-                sockets[sock_idx].rx_ready = 0;
-            }
-        } else if (tasks[current_task].open_files[fd].type == TYPE_FILE) {
-            if (tasks[current_task].open_files[fd].node != NULL) {
-                vfs_close(tasks[current_task].open_files[fd].node);
-            }
+        if (tasks[current_task].open_files[fd].node != NULL) {
+            vfs_close(tasks[current_task].open_files[fd].node);
         }
         tasks[current_task].open_files[fd].is_used = 0;
         tasks[current_task].open_files[fd].type = TYPE_NONE;
@@ -607,6 +583,79 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
 
         tasks[current_task].open_files[fd].offset = (uint32_t)new_offset;
         return (uint32_t)new_offset;
+    }
+    else if (syscall_num == 20) {
+        /* Syscall 20: int pipe(int pipefd[2]) */
+        int* pipefd = (int*)arg1;
+        if (!is_valid_user_range((uint32_t)pipefd, 2 * sizeof(int))) {
+            return (uint32_t)-1;
+        }
+
+        int read_fd = -1;
+        int write_fd = -1;
+        for (int i = 3; i < MAX_OPEN_FILES; i++) {
+            if (!tasks[current_task].open_files[i].is_used) {
+                if (read_fd == -1) {
+                    read_fd = i;
+                } else {
+                    write_fd = i;
+                    break;
+                }
+            }
+        }
+        if (read_fd == -1 || write_fd == -1) {
+            return (uint32_t)-1;
+        }
+
+        vfs_node_t* r_node = NULL;
+        vfs_node_t* w_node = NULL;
+        if (vfs_create_pipe(&r_node, &w_node) < 0) {
+            return (uint32_t)-1;
+        }
+
+        tasks[current_task].open_files[read_fd].is_used = 1;
+        tasks[current_task].open_files[read_fd].type = TYPE_PIPE;
+        tasks[current_task].open_files[read_fd].flags = O_RDONLY;
+        tasks[current_task].open_files[read_fd].offset = 0;
+        tasks[current_task].open_files[read_fd].node = r_node;
+
+        tasks[current_task].open_files[write_fd].is_used = 1;
+        tasks[current_task].open_files[write_fd].type = TYPE_PIPE;
+        tasks[current_task].open_files[write_fd].flags = O_WRONLY;
+        tasks[current_task].open_files[write_fd].offset = 0;
+        tasks[current_task].open_files[write_fd].node = w_node;
+
+        pipefd[0] = read_fd;
+        pipefd[1] = write_fd;
+        return 0;
+    }
+    else if (syscall_num == 21) {
+        /* Syscall 21: int dup2(int oldfd, int newfd) */
+        int oldfd = (int)arg1;
+        int newfd = (int)arg2;
+
+        if (oldfd < 0 || oldfd >= MAX_OPEN_FILES || !tasks[current_task].open_files[oldfd].is_used) {
+            return (uint32_t)-1;
+        }
+        if (newfd < 0 || newfd >= MAX_OPEN_FILES) {
+            return (uint32_t)-1;
+        }
+        if (oldfd == newfd) {
+            return (uint32_t)newfd;
+        }
+
+        if (tasks[current_task].open_files[newfd].is_used) {
+            if (tasks[current_task].open_files[newfd].node != NULL) {
+                vfs_close(tasks[current_task].open_files[newfd].node);
+            }
+        }
+
+        tasks[current_task].open_files[newfd] = tasks[current_task].open_files[oldfd];
+        if (tasks[current_task].open_files[newfd].node != NULL &&
+            tasks[current_task].open_files[newfd].node != vfs_get_tty_node()) {
+            tasks[current_task].open_files[newfd].node->ref_count++;
+        }
+        return (uint32_t)newfd;
     }
     
     return (uint32_t)-1;

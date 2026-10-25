@@ -258,21 +258,10 @@ void cleanup_task_memory(int id) {
     }
     tasks[id].state = 0;
 
-    /* [FIX ADDITION] Close and release all open file descriptors / sockets */
+    /* [FIX ADDITION] Close and release all open file descriptors / sockets via VFS */
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (tasks[id].open_files[i].is_used) {
-            
-            /* If the descriptor was a socket, release it in the global network stack */
-            if (tasks[id].open_files[i].type == TYPE_SOCKET) {
-                int sock_idx = tasks[id].open_files[i].offset;
-                extern socket_t sockets[];
-                if (sock_idx >= 0 && sock_idx < MAX_SOCKETS) {
-                    sockets[sock_idx].is_used = 0;        /* Release socket slot */
-                    sockets[sock_idx].tcp_state = 0;      /* Force TCP_CLOSED */
-                    sockets[sock_idx].rx_len = 0;         /* Flush buffers */
-                    sockets[sock_idx].rx_ready = 0;
-                }
-            } else if (tasks[id].open_files[i].type == TYPE_FILE && tasks[id].open_files[i].node != NULL) {
+            if (tasks[id].open_files[i].node != NULL) {
                 vfs_close(tasks[id].open_files[i].node);
             }
             
@@ -952,7 +941,18 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
     tasks[id].state = 2; 
     tasks[id].is_background = 0;
 
-    init_task_fds(&tasks[id]); /* stdin/stdout/stderr Initalisation */
+    init_task_fds(&tasks[id]); /* stdin/stdout/stderr Initialisation */
+    if (current_task >= 0) {
+        for (int fd = 0; fd < 3; fd++) {
+            if (tasks[current_task].open_files[fd].is_used &&
+                tasks[current_task].open_files[fd].node != NULL) {
+                tasks[id].open_files[fd] = tasks[current_task].open_files[fd];
+                if (tasks[id].open_files[fd].node != vfs_get_tty_node()) {
+                    tasks[id].open_files[fd].node->ref_count++;
+                }
+            }
+        }
+    }
 
     return id; 
 }
@@ -1394,10 +1394,56 @@ void run_nano(const char* filename) {
     kbd_buf_clear();
     clear_terminal();
 
-    /* Load existing file if present */
+    /* Load from piped/redirected stdin if active, otherwise load file from disk */
     uint8_t* buf = NULL;
     uint32_t size = 0;
-    if (fs_load_file(filename, &buf, &size)) {
+    file_descriptor_t* stdin_fd = (current_task >= 0) ? &tasks[current_task].open_files[0] : NULL;
+    if (stdin_fd && stdin_fd->is_used && stdin_fd->node != NULL && stdin_fd->node != vfs_get_tty_node()) {
+        uint8_t* pipe_buf = (uint8_t*)kmalloc(4096);
+        if (pipe_buf) {
+            int l = 0, c = 0;
+            int r;
+            int total_read = 0;
+            while ((r = vfs_read(stdin_fd->node, stdin_fd->offset, 4096, pipe_buf)) > 0) {
+                if (stdin_fd->node->type == VFS_FILE) {
+                    stdin_fd->offset += (uint32_t)r;
+                }
+                total_read += r;
+                for (int i = 0; i < r && l < NANO_MAX_LINES; i++) {
+                    if (pipe_buf[i] == '\n') {
+                        edit_lines[l][c] = '\0';
+                        edit_lens[l] = c;
+                        l++;
+                        c = 0;
+                        if (l < NANO_MAX_LINES) {
+                            edit_lines[l][0] = '\0';
+                            edit_lens[l] = 0;
+                        }
+                    } else if (pipe_buf[i] == '\r') {
+                        /* Skip carriage returns */
+                    } else if (pipe_buf[i] == '\033') {
+                        while (i + 1 < r && pipe_buf[i] != 'm') i++;
+                    } else {
+                        if (c < NANO_MAX_COLS - 1) {
+                            edit_lines[l][c++] = (char)pipe_buf[i];
+                        }
+                    }
+                }
+            }
+            if (l < NANO_MAX_LINES) {
+                edit_lines[l][c] = '\0';
+                edit_lens[l] = c;
+                num_lines = (l > 0 && c == 0) ? l : (l + 1);
+            } else {
+                num_lines = NANO_MAX_LINES;
+            }
+            if (total_read > 0) {
+                is_modified = 1;
+            }
+            kfree(pipe_buf);
+            nano_set_status("  [ Read from pipe/stdin ]");
+        }
+    } else if (fs_load_file(filename, &buf, &size)) {
         int l = 0, c = 0;
         for (uint32_t i = 0; i < size && l < NANO_MAX_LINES; i++) {
             if (buf[i] == '\n') {
@@ -1948,35 +1994,19 @@ int http_get(const char* host, uint16_t port, const char* path, uint8_t** out_da
     return 1;
 }
 
-void execute_command() {
-    shell_input_enabled = 0; 
-
-    /* --- SECURITY AND '&' WILDCARD DETECTION --- */
-    int is_bg = 0;
-    int cmd_len = 0;
-    while (cmd_buffer[cmd_len]) cmd_len++;
-    
-    /* Remove spaces at the end of the buffer (Trim) */
-    int last_idx = cmd_len - 1;
-    while (last_idx >= 0 && cmd_buffer[last_idx] == ' ') {
-        last_idx--;
-    }
-    cmd_buffer[last_idx + 1] = '\0';
-
-    /* Check if the last character is a '&' */
-    cmd_len = last_idx + 1;
-    if (cmd_len > 0 && cmd_buffer[cmd_len - 1] == '&') {
-        is_bg = 1;
-        cmd_buffer[cmd_len - 1] = '\0'; /* Remove the '&' */
-        
-        /* Clean up again the potential spaces at the end */
-        last_idx = cmd_len - 2;
-        while (last_idx >= 0 && cmd_buffer[last_idx] == ' ') {
-            last_idx--;
+static int shell_dup_fd(int fd) {
+    for (int i = 3; i < MAX_OPEN_FILES; i++) {
+        if (!tasks[current_task].open_files[i].is_used) {
+            if ((int)syscall_handler(21, (uint32_t)fd, (uint32_t)i, 0) >= 0) {
+                return i;
+            }
+            return -1;
         }
-        cmd_buffer[last_idx + 1] = '\0';
     }
+    return -1;
+}
 
+static void execute_single_command(int is_bg) {
     /* Save of the parsed buffer */
     char raw_buf[256];
     custom_strcpy(raw_buf, cmd_buffer);
@@ -2076,8 +2106,28 @@ void execute_command() {
         }
     }
     else if (strcmp(cmd, "cat") == 0) {
-        if (arg1 != NULL) fs_cat(arg1);
-        else kprintf("Error: Specify a file (ex: cat root.txt)\n");
+        if (arg1 != NULL) {
+            fs_cat(arg1);
+        } else if (current_task >= 0 && tasks[current_task].open_files[0].is_used &&
+                   tasks[current_task].open_files[0].node != NULL &&
+                   tasks[current_task].open_files[0].node != vfs_get_tty_node()) {
+            file_descriptor_t* in_fd = &tasks[current_task].open_files[0];
+            uint8_t* buf = (uint8_t*)kmalloc(512);
+            if (buf) {
+                int r;
+                while ((r = vfs_read(in_fd->node, in_fd->offset, 512, buf)) > 0) {
+                    if (in_fd->node->type == VFS_FILE) {
+                        in_fd->offset += (uint32_t)r;
+                    }
+                    for (int j = 0; j < r; j++) {
+                        kputc((char)buf[j]);
+                    }
+                }
+                kfree(buf);
+            }
+        } else {
+            kprintf("Error: Specify a file (ex: cat root.txt)\n");
+        }
     }
     else if (strcmp(cmd, "loop") == 0) {
         create_task(background_loop);
@@ -2268,14 +2318,13 @@ void execute_command() {
                 while (raw_buf[i] && raw_buf[i] == ' ') i++; 
                 custom_strcpy(cmd_buffer, &raw_buf[i]);
                 
-                execute_command(); 
+                execute_single_command(is_bg); 
                     
                 /* [SECURITY FIX] Restore credentials only if the session has not been reset */
                 if (!session_reset) {
                     current_uid = old_uid; 
                     custom_strcpy(current_user, old_user);
                 }
-                shell_input_enabled = 1;
                 return;
             } else kprintf("sudo: 1 incorrect password attempt\n");
         }
@@ -2510,6 +2559,10 @@ void execute_command() {
             while (arg1[k] && k < (int)sizeof(nano_file) - 1) { nano_file[k] = arg1[k]; k++; }
             nano_file[k] = '\0';
             run_nano(nano_file);
+        } else if (current_task >= 0 && tasks[current_task].open_files[0].is_used &&
+                   tasks[current_task].open_files[0].node != NULL &&
+                   tasks[current_task].open_files[0].node != vfs_get_tty_node()) {
+            run_nano("piped.txt");
         } else {
             kprintf("Usage: nano <file>\n");
         }
@@ -2821,6 +2874,192 @@ void execute_command() {
     }
 
 end_prompt:
+    (void)0;
+}
+
+static void execute_command_with_redirection(char* stage_cmd, int is_bg) {
+    char clean_cmd[256];
+    char in_file[128] = {0};
+    char out_file[128] = {0};
+    int out_append = 0;
+    int ci = 0;
+    int i = 0;
+
+    while (stage_cmd[i] != '\0') {
+        if (stage_cmd[i] == '<') {
+            i++;
+            while (stage_cmd[i] == ' ') i++;
+            int fi = 0;
+            while (stage_cmd[i] != '\0' && stage_cmd[i] != ' ' && stage_cmd[i] != '>' && stage_cmd[i] != '<') {
+                if (fi < 127) in_file[fi++] = stage_cmd[i];
+                i++;
+            }
+            in_file[fi] = '\0';
+        } else if (stage_cmd[i] == '>') {
+            i++;
+            if (stage_cmd[i] == '>') {
+                out_append = 1;
+                i++;
+            } else {
+                out_append = 0;
+            }
+            while (stage_cmd[i] == ' ') i++;
+            int fi = 0;
+            while (stage_cmd[i] != '\0' && stage_cmd[i] != ' ' && stage_cmd[i] != '>' && stage_cmd[i] != '<') {
+                if (fi < 127) out_file[fi++] = stage_cmd[i];
+                i++;
+            }
+            out_file[fi] = '\0';
+        } else {
+            if (ci < 255) clean_cmd[ci++] = stage_cmd[i];
+            i++;
+        }
+    }
+    clean_cmd[ci] = '\0';
+
+    int saved_in = -1;
+    int saved_out = -1;
+
+    if (in_file[0] != '\0') {
+        int in_fd = (int)syscall_handler(18, (uint32_t)in_file, O_RDONLY, 0);
+        if (in_fd < 0) {
+            kprintf("Error: Cannot open input file '%s'.\n", in_file);
+            return;
+        }
+        saved_in = shell_dup_fd(0);
+        syscall_handler(21, (uint32_t)in_fd, 0, 0);
+        syscall_handler(17, (uint32_t)in_fd, 0, 0);
+    }
+
+    if (out_file[0] != '\0') {
+        uint32_t out_flags = O_WRONLY | O_CREAT | (out_append ? O_APPEND : O_TRUNC);
+        int out_fd = (int)syscall_handler(18, (uint32_t)out_file, out_flags, 0);
+        if (out_fd < 0) {
+            if (saved_in >= 0) {
+                syscall_handler(21, (uint32_t)saved_in, 0, 0);
+                syscall_handler(17, (uint32_t)saved_in, 0, 0);
+            }
+            kprintf("Error: Cannot open output file '%s'.\n", out_file);
+            return;
+        }
+        saved_out = shell_dup_fd(1);
+        syscall_handler(21, (uint32_t)out_fd, 1, 0);
+        syscall_handler(17, (uint32_t)out_fd, 0, 0);
+    }
+
+    custom_strcpy(cmd_buffer, clean_cmd);
+    execute_single_command(is_bg);
+
+    if (saved_out >= 0) {
+        syscall_handler(21, (uint32_t)saved_out, 1, 0);
+        syscall_handler(17, (uint32_t)saved_out, 0, 0);
+    }
+    if (saved_in >= 0) {
+        syscall_handler(21, (uint32_t)saved_in, 0, 0);
+        syscall_handler(17, (uint32_t)saved_in, 0, 0);
+    }
+}
+
+void execute_command() {
+    shell_input_enabled = 0;
+
+    /* --- SECURITY AND '&' WILDCARD DETECTION --- */
+    int is_bg = 0;
+    int cmd_len = 0;
+    while (cmd_buffer[cmd_len]) cmd_len++;
+
+    /* Remove spaces at the end of the buffer (Trim) */
+    int last_idx = cmd_len - 1;
+    while (last_idx >= 0 && cmd_buffer[last_idx] == ' ') {
+        last_idx--;
+    }
+    cmd_buffer[last_idx + 1] = '\0';
+
+    /* Check if the last character is a '&' */
+    cmd_len = last_idx + 1;
+    if (cmd_len > 0 && cmd_buffer[cmd_len - 1] == '&') {
+        is_bg = 1;
+        cmd_buffer[cmd_len - 1] = '\0';
+        last_idx = cmd_len - 2;
+        while (last_idx >= 0 && cmd_buffer[last_idx] == ' ') {
+            last_idx--;
+        }
+        cmd_buffer[last_idx + 1] = '\0';
+    }
+
+    char full_line[256];
+    custom_strcpy(full_line, cmd_buffer);
+
+    /* Split pipeline stages on '|' */
+    char* stages[8];
+    int num_stages = 0;
+    stages[num_stages++] = full_line;
+    for (int i = 0; full_line[i] != '\0' && num_stages < 8; i++) {
+        if (full_line[i] == '|') {
+            full_line[i] = '\0';
+            stages[num_stages++] = &full_line[i + 1];
+        }
+    }
+
+    if (num_stages == 1) {
+        execute_command_with_redirection(stages[0], is_bg);
+    } else {
+        int prev_pipe_read = -1;
+        for (int s = 0; s < num_stages; s++) {
+            int pipefd[2] = {-1, -1};
+            if (s < num_stages - 1) {
+                if ((int)syscall_handler(20, (uint32_t)pipefd, 0, 0) < 0) {
+                    if (prev_pipe_read >= 0) {
+                        syscall_handler(17, (uint32_t)prev_pipe_read, 0, 0);
+                    }
+                    kprintf("Error: Failed to create pipe.\n");
+                    break;
+                }
+            }
+
+            int saved_in = -1;
+            int saved_out = -1;
+
+            if (prev_pipe_read >= 0) {
+                saved_in = shell_dup_fd(0);
+                syscall_handler(21, (uint32_t)prev_pipe_read, 0, 0);
+                syscall_handler(17, (uint32_t)prev_pipe_read, 0, 0);
+                prev_pipe_read = -1;
+            }
+            if (pipefd[1] >= 0) {
+                saved_out = shell_dup_fd(1);
+                syscall_handler(21, (uint32_t)pipefd[1], 1, 0);
+                syscall_handler(17, (uint32_t)pipefd[1], 0, 0);
+            }
+
+            execute_command_with_redirection(stages[s], (s == num_stages - 1) ? is_bg : 0);
+
+            if (saved_out >= 0) {
+                syscall_handler(21, (uint32_t)saved_out, 1, 0);
+                syscall_handler(17, (uint32_t)saved_out, 0, 0);
+            }
+            if (saved_in >= 0) {
+                syscall_handler(21, (uint32_t)saved_in, 0, 0);
+                syscall_handler(17, (uint32_t)saved_in, 0, 0);
+            }
+
+            prev_pipe_read = pipefd[0];
+            if (session_reset) {
+                if (prev_pipe_read >= 0) {
+                    syscall_handler(17, (uint32_t)prev_pipe_read, 0, 0);
+                }
+                return;
+            }
+        }
+        if (prev_pipe_read >= 0) {
+            syscall_handler(17, (uint32_t)prev_pipe_read, 0, 0);
+        }
+    }
+
+    if (session_reset) {
+        return;
+    }
+
     kbd_buf_clear();
     cmd_idx = 0; 
     cmd_buffer[0] = '\0';

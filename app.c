@@ -35,7 +35,7 @@ void _start() {
 
     print("[4] Sending HTTP GET Request...\n");
     char request[] = "GET / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n";
-    send(sock, request, strlen(request));
+    write(sock, request, strlen(request));
 
     print("[5] Waiting for server response...\n\n");
     
@@ -43,13 +43,14 @@ void _start() {
     char* rx_buf = (char*)malloc(8192);
     if (!rx_buf) {
         print("[ERROR] Out of memory!\n");
+        close(sock);
         exit(1);
     }
     
     int attempts = 0;
     while (attempts < 100) { /* 100 * 50ms = 5 sec timeout */
         /* Note: we pass 8191 manually since sizeof(rx_buf) is now just the size of a pointer */
-        int len = recv(sock, rx_buf, 8191); 
+        int len = read(sock, rx_buf, 8191); 
         if (len > 0) {
             rx_buf[len] = '\0'; /* Null-terminate for safe printing */
             print("---------------- SERVER RESPONSE ----------------\n");
@@ -65,6 +66,7 @@ void _start() {
         print("[ERROR] Timeout waiting for HTTP response.\n");
     }
 
+    close(sock);
     print("\nDownload Complete.\n");
     exit(0);
 }

@@ -1,5 +1,6 @@
 #include "system.h"
 #include "vfs.h"
+#include "net.h"
 
 /* FAT32 Directory Entry structure & internals from fs.c */
 typedef struct {
@@ -209,6 +210,347 @@ static vfs_ops_t fat32_vfs_ops = {
     .finddir = fat32_vfs_finddir
 };
 
+/* --- Socket VFS Operations --- */
+
+extern socket_t sockets[MAX_SOCKETS];
+extern void net_send_tcp_raw(int sock_idx, uint8_t flags, uint8_t* payload, uint16_t len);
+
+static int socket_vfs_read(struct vfs_node* node, uint32_t offset, uint32_t size, uint8_t* buffer) {
+    (void)offset;
+    if (!node || node->type != VFS_SOCKET || !buffer) return -1;
+    if (size == 0) return 0;
+
+    int sock_idx = (int)(uintptr_t)node->private_data;
+    if (sock_idx < 0 || sock_idx >= MAX_SOCKETS || !sockets[sock_idx].is_used) return -1;
+
+    if (sockets[sock_idx].type == 1) {
+        return net_recv_udp(sock_idx, buffer, size);
+    } else if (sockets[sock_idx].type == 2) {
+        uint32_t eflags;
+        __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
+        if (!sockets[sock_idx].rx_ready || sockets[sock_idx].rx_len == 0) {
+            __asm__ volatile("push %0; popf" : : "r"(eflags));
+            return 0;
+        }
+
+        uint32_t old_len = sockets[sock_idx].rx_len;
+        uint32_t copy_len = (old_len < size) ? old_len : size;
+        for (uint32_t i = 0; i < copy_len; i++) {
+            buffer[i] = sockets[sock_idx].rx_buffer[i];
+        }
+
+        if (copy_len < old_len) {
+            uint32_t rem = old_len - copy_len;
+            for (uint32_t i = 0; i < rem; i++) {
+                sockets[sock_idx].rx_buffer[i] = sockets[sock_idx].rx_buffer[copy_len + i];
+            }
+            sockets[sock_idx].rx_len = rem;
+            sockets[sock_idx].rx_ready = 1;
+        } else {
+            sockets[sock_idx].rx_len = 0;
+            sockets[sock_idx].rx_ready = 0;
+        }
+
+        __asm__ volatile("push %0; popf" : : "r"(eflags));
+
+        if (old_len >= SOCK_BUF_SIZE - 4096 && sockets[sock_idx].tcp_state == TCP_ESTABLISHED) {
+            net_send_tcp_raw(sock_idx, 0x10, NULL, 0);
+        }
+
+        return (int)copy_len;
+    }
+
+    return -1;
+}
+
+static int socket_vfs_write(struct vfs_node* node, uint32_t offset, uint32_t size, const uint8_t* buffer) {
+    (void)offset;
+    if (!node || node->type != VFS_SOCKET || !buffer) return -1;
+    if (size == 0) return 0;
+
+    int sock_idx = (int)(uintptr_t)node->private_data;
+    if (sock_idx < 0 || sock_idx >= MAX_SOCKETS || !sockets[sock_idx].is_used) return -1;
+
+    if (sockets[sock_idx].type == 1) {
+        uint16_t send_len = (size > 1472) ? 1472 : (uint16_t)size;
+        net_send_udp(sock_idx, sockets[sock_idx].remote_ip, sockets[sock_idx].remote_port, (uint8_t*)buffer, send_len);
+        return (int)send_len;
+    } else if (sockets[sock_idx].type == 2) {
+        uint16_t send_len = (size > 1460) ? 1460 : (uint16_t)size;
+        net_send_tcp_raw(sock_idx, 0x18, (uint8_t*)buffer, send_len);
+        sockets[sock_idx].seq_num += send_len;
+        return (int)send_len;
+    }
+
+    return -1;
+}
+
+static int socket_vfs_close(struct vfs_node* node) {
+    if (!node || node->type != VFS_SOCKET) return -1;
+    if (node->ref_count > 0) return 0;
+
+    int sock_idx = (int)(uintptr_t)node->private_data;
+    if (sock_idx >= 0 && sock_idx < MAX_SOCKETS && sockets[sock_idx].is_used) {
+        if (sockets[sock_idx].type == 2 && sockets[sock_idx].tcp_state == TCP_ESTABLISHED) {
+            net_send_tcp_raw(sock_idx, 0x11, NULL, 0);
+        }
+        sockets[sock_idx].is_used = 0;
+        sockets[sock_idx].tcp_state = TCP_CLOSED;
+        sockets[sock_idx].rx_len = 0;
+        sockets[sock_idx].rx_ready = 0;
+    }
+    return 0;
+}
+
+static vfs_ops_t socket_vfs_ops = {
+    .read = socket_vfs_read,
+    .write = socket_vfs_write,
+    .open = NULL,
+    .close = socket_vfs_close,
+    .readdir = NULL,
+    .finddir = NULL
+};
+
+vfs_node_t* vfs_create_socket_node(int sock_idx) {
+    if (sock_idx < 0 || sock_idx >= MAX_SOCKETS) return NULL;
+    vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+    if (!node) return NULL;
+
+    for (int i = 0; i < 64; i++) node->name[i] = 0;
+    const char* sname = "socket";
+    for (int i = 0; sname[i]; i++) node->name[i] = sname[i];
+
+    node->type = VFS_SOCKET;
+    node->sec_byte = 0xF0;
+    node->size = 0;
+    node->inode = 0;
+    node->dir_sec = 0;
+    node->dir_idx = 0;
+    node->ref_count = 1;
+    node->ops = &socket_vfs_ops;
+    node->private_data = (void*)(uintptr_t)sock_idx;
+    return node;
+}
+
+/* --- Anonymous Pipe VFS Operations --- */
+
+typedef struct {
+    uint8_t buffer[PIPE_BUF_SIZE];
+    uint32_t read_pos;
+    uint32_t write_pos;
+    uint32_t count;
+    int readers;
+    int writers;
+} pipe_t;
+
+static vfs_ops_t pipe_read_ops;
+static vfs_ops_t pipe_write_ops;
+
+static int pipe_has_other_task_writer(pipe_t* pipe) {
+    for (int t = 0; t < MAX_TASKS; t++) {
+        if (t == current_task) continue;
+        if (tasks[t].state != 1 && tasks[t].state != 2) continue;
+        for (int f = 0; f < MAX_OPEN_FILES; f++) {
+            if (tasks[t].open_files[f].is_used &&
+                tasks[t].open_files[f].node != NULL &&
+                tasks[t].open_files[f].node->ops == &pipe_write_ops &&
+                tasks[t].open_files[f].node->private_data == (void*)pipe) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int pipe_has_other_task_reader(pipe_t* pipe) {
+    for (int t = 0; t < MAX_TASKS; t++) {
+        if (t == current_task) continue;
+        if (tasks[t].state != 1 && tasks[t].state != 2) continue;
+        for (int f = 0; f < MAX_OPEN_FILES; f++) {
+            if (tasks[t].open_files[f].is_used &&
+                tasks[t].open_files[f].node != NULL &&
+                tasks[t].open_files[f].node->ops == &pipe_read_ops &&
+                tasks[t].open_files[f].node->private_data == (void*)pipe) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int pipe_vfs_read(struct vfs_node* node, uint32_t offset, uint32_t size, uint8_t* buffer) {
+    (void)offset;
+    if (!node || !node->private_data || !buffer) return -1;
+    if (size == 0) return 0;
+
+    pipe_t* pipe = (pipe_t*)node->private_data;
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
+    while (pipe->count == 0) {
+        if (pipe->writers == 0 || !pipe_has_other_task_writer(pipe)) {
+            __asm__ volatile("push %0; popf" : : "r"(eflags));
+            return 0;
+        }
+        __asm__ volatile("sti; hlt; cli");
+    }
+
+    uint32_t bytes_to_read = (size < pipe->count) ? size : pipe->count;
+    for (uint32_t i = 0; i < bytes_to_read; i++) {
+        buffer[i] = pipe->buffer[pipe->read_pos];
+        pipe->read_pos = (pipe->read_pos + 1) % PIPE_BUF_SIZE;
+    }
+    pipe->count -= bytes_to_read;
+    node->size = pipe->count;
+
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    return (int)bytes_to_read;
+}
+
+static int pipe_vfs_write(struct vfs_node* node, uint32_t offset, uint32_t size, const uint8_t* buffer) {
+    (void)offset;
+    if (!node || !node->private_data || !buffer) return -1;
+    if (size == 0) return 0;
+
+    pipe_t* pipe = (pipe_t*)node->private_data;
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
+    if (pipe->readers == 0) {
+        __asm__ volatile("push %0; popf" : : "r"(eflags));
+        return -1;
+    }
+
+    uint32_t written = 0;
+    while (written < size) {
+        while (pipe->count == PIPE_BUF_SIZE) {
+            if (pipe->readers == 0) {
+                __asm__ volatile("push %0; popf" : : "r"(eflags));
+                return (written > 0) ? (int)written : -1;
+            }
+            if (!pipe_has_other_task_reader(pipe)) {
+                __asm__ volatile("push %0; popf" : : "r"(eflags));
+                return (int)written;
+            }
+            __asm__ volatile("sti; hlt; cli");
+        }
+        while (written < size && pipe->count < PIPE_BUF_SIZE) {
+            pipe->buffer[pipe->write_pos] = buffer[written++];
+            pipe->write_pos = (pipe->write_pos + 1) % PIPE_BUF_SIZE;
+            pipe->count++;
+        }
+    }
+    node->size = pipe->count;
+
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    return (int)written;
+}
+
+static int pipe_read_close(struct vfs_node* node) {
+    if (!node || !node->private_data) return -1;
+    if (node->ref_count > 0) return 0;
+
+    pipe_t* pipe = (pipe_t*)node->private_data;
+    pipe->readers = 0;
+    if (pipe->readers == 0 && pipe->writers == 0) {
+        kfree(pipe);
+    }
+    node->private_data = NULL;
+    return 0;
+}
+
+static int pipe_write_close(struct vfs_node* node) {
+    if (!node || !node->private_data) return -1;
+    if (node->ref_count > 0) return 0;
+
+    pipe_t* pipe = (pipe_t*)node->private_data;
+    pipe->writers = 0;
+    if (pipe->readers == 0 && pipe->writers == 0) {
+        kfree(pipe);
+    }
+    node->private_data = NULL;
+    return 0;
+}
+
+static vfs_ops_t pipe_read_ops = {
+    .read = pipe_vfs_read,
+    .write = NULL,
+    .open = NULL,
+    .close = pipe_read_close,
+    .readdir = NULL,
+    .finddir = NULL
+};
+
+static vfs_ops_t pipe_write_ops = {
+    .read = NULL,
+    .write = pipe_vfs_write,
+    .open = NULL,
+    .close = pipe_write_close,
+    .readdir = NULL,
+    .finddir = NULL
+};
+
+int vfs_create_pipe(vfs_node_t** out_read_node, vfs_node_t** out_write_node) {
+    if (!out_read_node || !out_write_node) return -1;
+
+    pipe_t* pipe = (pipe_t*)kmalloc(sizeof(pipe_t));
+    if (!pipe) return -1;
+
+    vfs_node_t* r_node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+    if (!r_node) {
+        kfree(pipe);
+        return -1;
+    }
+
+    vfs_node_t* w_node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+    if (!w_node) {
+        kfree(r_node);
+        kfree(pipe);
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < PIPE_BUF_SIZE; i++) pipe->buffer[i] = 0;
+    pipe->read_pos = 0;
+    pipe->write_pos = 0;
+    pipe->count = 0;
+    pipe->readers = 1;
+    pipe->writers = 1;
+
+    for (int i = 0; i < 64; i++) {
+        r_node->name[i] = 0;
+        w_node->name[i] = 0;
+    }
+    const char* rname = "pipe_r";
+    const char* wname = "pipe_w";
+    for (int i = 0; rname[i]; i++) r_node->name[i] = rname[i];
+    for (int i = 0; wname[i]; i++) w_node->name[i] = wname[i];
+
+    r_node->type = VFS_PIPE;
+    r_node->sec_byte = 0xF0;
+    r_node->size = 0;
+    r_node->inode = 0;
+    r_node->dir_sec = 0;
+    r_node->dir_idx = 0;
+    r_node->ref_count = 1;
+    r_node->ops = &pipe_read_ops;
+    r_node->private_data = (void*)pipe;
+
+    w_node->type = VFS_PIPE;
+    w_node->sec_byte = 0xF0;
+    w_node->size = 0;
+    w_node->inode = 0;
+    w_node->dir_sec = 0;
+    w_node->dir_idx = 0;
+    w_node->ref_count = 1;
+    w_node->ops = &pipe_write_ops;
+    w_node->private_data = (void*)pipe;
+
+    *out_read_node = r_node;
+    *out_write_node = w_node;
+    return 0;
+}
+
 /* --- Public VFS API --- */
 
 void init_vfs(void) {
@@ -390,14 +732,14 @@ int vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const uint8_t* b
 }
 
 void vfs_close(vfs_node_t* node) {
-    if (!node) return;
+    if (!node || node == vfs_get_tty_node()) return;
     if (node->ref_count > 0) {
         node->ref_count--;
     }
-    if (node->ops && node->ops->close) {
-        node->ops->close(node);
-    }
-    if (node->ref_count == 0 && node != vfs_get_tty_node()) {
+    if (node->ref_count == 0) {
+        if (node->ops && node->ops->close) {
+            node->ops->close(node);
+        }
         kfree(node);
     }
 }

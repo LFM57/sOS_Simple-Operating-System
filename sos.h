@@ -19,6 +19,8 @@ int write(int fd, const void* buf, unsigned int count);
 int read(int fd, void* buf, unsigned int count);
 int lseek(int fd, int offset, int whence);
 int close(int fd);
+int pipe(int pipefd[2]);
+int dup2(int oldfd, int newfd);
 
 /* Updated basic system calls */
 void print(const char* str);
