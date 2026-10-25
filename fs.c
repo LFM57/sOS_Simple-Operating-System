@@ -1272,7 +1272,11 @@ int fs_write(const char* filename, const char* text) {
 
     /* 1. Find the file or create it if it does not exist */
     if (!find_entry(target_fat, &entry, &dir_sec, &dir_idx)) {
+        current_dir_cluster = old_cluster;
+        current_dir_sector = old_sector;
         fs_touch(filename);
+        current_dir_cluster = parent_cluster;
+        current_dir_sector = parent_sector;
         if (!find_entry(target_fat, &entry, &dir_sec, &dir_idx)) {
             current_dir_cluster = old_cluster;
             current_dir_sector = old_sector;
@@ -1862,7 +1866,11 @@ int fs_write_bin(const char* filename, uint8_t* data, uint32_t size) {
 
     /* Find file or create it */
     if (!find_entry(target_fat, &entry, &dir_sec, &dir_idx)) {
+        current_dir_cluster = old_cluster;
+        current_dir_sector = old_sector;
         fs_touch(filename);
+        current_dir_cluster = parent_cluster;
+        current_dir_sector = parent_sector;
         if (!find_entry(target_fat, &entry, &dir_sec, &dir_idx)) {
             current_dir_cluster = old_cluster; current_dir_sector = old_sector;
             return 0;
