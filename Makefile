@@ -60,7 +60,9 @@ drive.img: app.sos kernel.bin
 sos.iso:
 	@echo "Preparing GRUB Bootloader ISO..."
 	mkdir -p isodir/boot/grub
-	@echo 'menuentry "sOS - Simple Operating System" {' > isodir/boot/grub/grub.cfg
+	@echo 'set default=0' > isodir/boot/grub/grub.cfg
+	@echo 'set timeout=0' >> isodir/boot/grub/grub.cfg
+	@echo 'menuentry "sOS - Simple Operating System" {' >> isodir/boot/grub/grub.cfg
 	@echo '    search --file /kernel.bin --set root' >> isodir/boot/grub/grub.cfg
 	@echo '    multiboot /kernel.bin' >> isodir/boot/grub/grub.cfg
 	@echo '    boot' >> isodir/boot/grub/grub.cfg

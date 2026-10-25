@@ -1070,7 +1070,6 @@ void fs_rm(const char* arg1, const char* arg2) {
             }
         }
         kfree(sector);
-        kprintf("All matched files deleted.\n");
         return;
     }
 
@@ -1159,7 +1158,6 @@ void fs_rm(const char* arg1, const char* arg2) {
     dir[dir_idx].name[0] = (char)0xE5;
     ata_write_sector(dir_sec, dir_sector);
     
-    kprintf("'%s' has been deleted.\n", filename);
     kfree(dir_sector);
 }
 
@@ -1210,8 +1208,6 @@ void fs_touch(const char* filename) {
 
     ata_write_sector(target_sec, dir_sector);
     kfree(dir_sector);
-    
-    kprintf("File '%s' created.\n", filename);
 }
 
 /* Write text to a file via VFS (replaces the content) */
@@ -1350,7 +1346,6 @@ int fs_cp(const char* src_name, const char* dest_name) {
 
     vfs_close(src_node);
     vfs_close(dest_node);
-    kprintf("File copied successfully (%d bytes).\n", total_size);
     return 1;
 }
 
