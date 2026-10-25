@@ -354,6 +354,21 @@ void init_pic() {
     outb(0x21, 0xEC); outb(0xA1, 0xFF); 
 }
 
+void irq7_handler() {
+    outb(0x20, 0x0B); /* Read Master PIC In-Service Register (ISR) */
+    if (inb(0x20) & 0x80) {
+        outb(0x20, 0x20); /* Real IRQ 7: send EOI to Master PIC */
+    }
+}
+
+void irq15_handler() {
+    outb(0xA0, 0x0B); /* Read Slave PIC In-Service Register (ISR) */
+    if (inb(0xA0) & 0x80) {
+        outb(0xA0, 0x20); /* Real IRQ 15: send EOI to Slave PIC */
+    }
+    outb(0x20, 0x20); /* Always send EOI to Master PIC for cascade line (IRQ 2) */
+}
+
 volatile uint32_t timer_ticks = 0;
 void init_pit() {
     uint32_t divisor = 1193180 / 100;

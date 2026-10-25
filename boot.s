@@ -200,6 +200,56 @@ irq4:
     popa
     iret
 
+/* IRQ7 - Master PIC Spurious Interrupt Handler */
+.global irq7
+.type irq7, @function
+irq7:
+    pusha
+    push %ds
+    push %es
+    push %fs
+    push %gs
+
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+
+    call irq7_handler
+
+    pop %gs
+    pop %fs
+    pop %es
+    pop %ds
+    popa
+    iret
+
+/* IRQ15 - Slave PIC Spurious Interrupt Handler */
+.global irq15
+.type irq15, @function
+irq15:
+    pusha
+    push %ds
+    push %es
+    push %fs
+    push %gs
+
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+
+    call irq15_handler
+
+    pop %gs
+    pop %fs
+    pop %es
+    pop %ds
+    popa
+    iret
+
 /* Interrupt 0x80 (128) - Syscalls */
 .global isr128
 .type isr128, @function
