@@ -587,17 +587,20 @@ int net_gethostbyname(const char* hostname, uint8_t* out_ip) {
                 if (ans_count > 0) {
                     int offset = 12;
                     for (int q = 0; q < qdcount; q++) {
-                        while (rx_buf[offset] != 0) offset++;
+                        while (offset < rx_len && rx_buf[offset] != 0) offset++;
                         offset += 5; 
+                        if (offset > rx_len) break;
                     }
                     for (int a = 0; a < ans_count; a++) {
                         if (offset >= rx_len) break;
                         if ((rx_buf[offset] & 0xC0) == 0xC0) offset += 2;
-                        else { while (rx_buf[offset] != 0) offset++; offset++; }
+                        else { while (offset < rx_len && rx_buf[offset] != 0) offset++; offset++; }
+                        if (offset + 10 > rx_len) break;
                         int type = (rx_buf[offset] << 8) | rx_buf[offset+1];
                         offset += 8; 
                         int data_len = (rx_buf[offset] << 8) | rx_buf[offset+1];
                         offset += 2;
+                        if (data_len < 0 || offset + data_len > rx_len) break;
                         if (type == 1 && data_len == 4) { 
                             for(int k=0; k<4; k++) out_ip[k] = rx_buf[offset+k];
                             sockets[sock].is_used = 0;

@@ -280,8 +280,9 @@ int gethostbyname(const char* hostname, unsigned char* out_ip) {
                 int offset = 12;
                 /* Skip the Question Section */
                 for (int q = 0; q < qdcount; q++) {
-                    while (rx_buf[offset] != 0) offset++;
+                    while (offset < rx_len && rx_buf[offset] != 0) offset++;
                     offset += 5; /* Skip Null byte + QTYPE + QCLASS */
+                    if (offset > rx_len) break;
                 }
                 
                 /* Parse Answer Records */
@@ -290,8 +291,9 @@ int gethostbyname(const char* hostname, unsigned char* out_ip) {
                     
                     /* Skip Name (could be a pointer 0xC0... or a string) */
                     if ((rx_buf[offset] & 0xC0) == 0xC0) offset += 2;
-                    else { while (rx_buf[offset] != 0) offset++; offset++; }
+                    else { while (offset < rx_len && rx_buf[offset] != 0) offset++; offset++; }
                     
+                    if (offset + 10 > rx_len) break;
                     int type = (rx_buf[offset] << 8) | rx_buf[offset+1];
                     offset += 2; /* Type */
                     offset += 2; /* Class */
@@ -299,6 +301,7 @@ int gethostbyname(const char* hostname, unsigned char* out_ip) {
                     int data_len = (rx_buf[offset] << 8) | rx_buf[offset+1];
                     offset += 2;
                     
+                    if (data_len < 0 || offset + data_len > rx_len) break;
                     /* If it's an A Record, we hit the jackpot */
                     if (type == 1 && data_len == 4) { 
                         out_ip[0] = rx_buf[offset];
