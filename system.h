@@ -81,6 +81,7 @@ void cleanup_task_memory(int id);
 /* --- Hardware (kernel.c) --- */
 extern volatile uint32_t timer_ticks;
 void init_pic();
+void init_serial();
 void init_pit();
 uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uint32_t arg3);
 
