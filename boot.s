@@ -129,7 +129,23 @@ irq0:
 .type irq1, @function
 irq1:
     pusha
+    push %ds
+    push %es
+    push %fs
+    push %gs
+
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+
     call keyboard_handler
+
+    pop %gs
+    pop %fs
+    pop %es
+    pop %ds
     popa
     iret
 
@@ -138,7 +154,23 @@ irq1:
 .type irq_nic, @function
 irq_nic:
     pusha
+    push %ds
+    push %es
+    push %fs
+    push %gs
+
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+
     call e1000_handler
+
+    pop %gs
+    pop %fs
+    pop %es
+    pop %ds
     popa
     iret
 
@@ -148,7 +180,23 @@ irq_nic:
 .type irq4, @function
 irq4:
     pusha
+    push %ds
+    push %es
+    push %fs
+    push %gs
+
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+
     call serial_handler
+
+    pop %gs
+    pop %fs
+    pop %es
+    pop %ds
     popa
     iret
 
