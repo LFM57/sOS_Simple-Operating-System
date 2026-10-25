@@ -147,6 +147,7 @@ On boot, sOS presents a login prompt. The system image is pre-configured with th
 | **`mkdir`** | `mkdir <dir>` | Creates a new directory. |
 | **`touch`** | `touch <file>` | Creates an empty file. |
 | **`write`** | `write <file> <text>` | Writes a line of text to a file. |
+| **`echo`** | `echo [-n] [text]` | Prints text to terminal or stream (supports redirection). |
 | **`cp`** | `cp <src> <dest>` | Copies a file (destination can be a file or a folder). |
 | **`mv`** | `mv <src> <dest>` | Moves or renames a file. |
 | **`rm`** | `rm [-r] <file/dir>` | Removes files or directories (supports recursive `-r` and `*`). |

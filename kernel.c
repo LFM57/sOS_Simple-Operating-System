@@ -76,11 +76,11 @@ volatile int cursor_pos = 0;      /* Current cursor position in cmd_buffer (inde
 /* --- BASIC SYSTEM COMMANDS --- */
 const char* system_commands[] = {
     "help", "clear", "uptime", "ram", "ls", "cd", 
-    "mkdir", "rm", "touch", "write", "cat", "loop", 
-    "run", "ps", "kill", "df", "about", "shutdown",
-    "whoami", "chown", "chmod", "su", "sudo", "userlist",
-    "nano", "passwd", "cp", "mv", "hex", "ifconfig", "wget",
-    "update"
+    "mkdir", "rm", "touch", "write", "cat", "echo",
+    "loop", "run", "ps", "kill", "df", "about",
+    "shutdown", "whoami", "chown", "chmod", "su", "sudo",
+    "userlist", "nano", "passwd", "cp", "mv", "hex",
+    "ifconfig", "wget", "update", "lock", "crash"
 };
 unsigned int num_system_commands = sizeof(system_commands) / sizeof(system_commands[0]);
 
@@ -2464,8 +2464,22 @@ static void execute_single_command(int is_bg) {
     if (cmd == NULL) goto end_prompt;
 
     if (strcmp(cmd, "help") == 0) {
-        /* This line is ugly and non dynamic: it will be modified later on */
-        kprintf("Available commands:\n  help      clear    uptime\n  ram       ls       cd\n  cat       mkdir    rm\n  touch     write    loop\n  run       df       ps\n  kill      about    shutdown\n  whoami    chown    chmod\n  su        sudo     userlist\n  nano      passwd   cp\n  mv        hex      ifconfig\n  wget      update\n");
+        kprintf("Available commands:\n");
+        for (unsigned int i = 0; i < num_system_commands; i++) {
+            if (i % 3 == 0) {
+                kprintf("  ");
+            }
+            kprintf("%s", system_commands[i]);
+            if ((i + 1) % 3 == 0 || i + 1 == num_system_commands) {
+                kprintf("\n");
+            } else {
+                int len = 0;
+                while (system_commands[i][len]) len++;
+                for (int s = len; s < 10; s++) {
+                    kputc(' ');
+                }
+            }
+        }
     }
     else if (strcmp(cmd, "ifconfig") == 0) {
         if (!e1000_installed) {
@@ -2529,6 +2543,37 @@ static void execute_single_command(int is_bg) {
             }
         } else {
             kprintf("Usage: write <filename> <text to write>\n");
+        }
+    }
+    else if (strcmp(cmd, "echo") == 0) {
+        int i = 0;
+        while (raw_buf[i] == ' ') i++;
+        while (raw_buf[i] && raw_buf[i] != ' ') i++;
+        while (raw_buf[i] == ' ') i++;
+
+        int newline = 1;
+        if (raw_buf[i] == '-' && raw_buf[i + 1] == 'n' && (raw_buf[i + 2] == ' ' || raw_buf[i + 2] == '\0')) {
+            newline = 0;
+            i += 2;
+            while (raw_buf[i] == ' ') i++;
+        }
+
+        char* text = &raw_buf[i];
+        int len = 0;
+        while (text[len]) len++;
+        if (len >= 2 && ((text[0] == '"' && text[len - 1] == '"') || (text[0] == '\'' && text[len - 1] == '\''))) {
+            text[len - 1] = '\0';
+            text++;
+        } else {
+            while (len > 0 && text[len - 1] == ' ') {
+                text[--len] = '\0';
+            }
+        }
+
+        if (newline) {
+            kprintf("%s\n", text);
+        } else {
+            kprintf("%s", text);
         }
     }
     else if (strcmp(cmd, "cat") == 0) {
