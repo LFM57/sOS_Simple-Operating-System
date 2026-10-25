@@ -1898,18 +1898,27 @@ int http_get(const char* host, uint16_t port, const char* path, uint8_t** out_da
     start = timer_ticks;
     
     while(timer_ticks < start + 500 && !conn_closed) {
+        __asm__ volatile("cli");
         if (sockets[sock_idx].rx_ready) {
-            __asm__ volatile("cli");
+            uint32_t old_len = sockets[sock_idx].rx_len;
             for(uint32_t j=0; j<sockets[sock_idx].rx_len; j++) {
                 if(http_len < MAX_DL_SIZE) http_data[http_len++] = sockets[sock_idx].rx_buffer[j];
             }
             sockets[sock_idx].rx_len = 0;
             sockets[sock_idx].rx_ready = 0;
-            __asm__ volatile("sti");
+            
+            /* If the receive window got tight, send a Window Update ACK */
+            if (old_len >= SOCK_BUF_SIZE - 4096 && sockets[sock_idx].tcp_state == 2) {
+                net_send_tcp_raw(sock_idx, 0x10, NULL, 0);
+            }
             start = timer_ticks;
         }
-        if (sockets[sock_idx].tcp_state == 0) conn_closed = 1;
-        else __asm__ volatile("hlt");
+        if (sockets[sock_idx].tcp_state == 0 && !sockets[sock_idx].rx_ready) {
+            conn_closed = 1;
+            __asm__ volatile("sti");
+        } else {
+            __asm__ volatile("sti; hlt");
+        }
     }
     sockets[sock_idx].is_used = 0;
     

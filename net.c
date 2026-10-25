@@ -535,6 +535,13 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
                         
                         /* State 3: Disconnect Request (FIN) */
                         else if (sockets[i].tcp_state == TCP_ESTABLISHED && (flags & 0x01)) {
+                            uint32_t seq = ntohl(tcp->seq);
+                            if (seq != sockets[i].ack_num) {
+                                /* Out-of-order FIN: earlier data packets are still missing!
+                                   Send a duplicate ACK to request retransmission. */
+                                net_send_tcp_raw(i, 0x10, NULL, 0);
+                                break;
+                            }
                             sockets[i].ack_num++;
                             sockets[i].tcp_state = TCP_CLOSED;
                             net_send_tcp_raw(i, 0x11, NULL, 0); /* Send FIN+ACK */
