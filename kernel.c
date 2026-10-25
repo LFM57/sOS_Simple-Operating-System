@@ -1025,8 +1025,10 @@ void hash_password_salted(const char* password, const char* salt, char* out_hash
     
     /* Key stretching (10,000 iterations) */
     uint32_t hash = fnv1a_hash(buffer);
+    char temp_str[9];
     for (int it = 0; it < 10000; it++) {
-        hash ^= fnv1a_hash((char*)&hash);
+        hash_to_str(hash, temp_str);
+        hash ^= fnv1a_hash(temp_str);
     }
     hash_to_str(hash, out_hash_str);
 }
