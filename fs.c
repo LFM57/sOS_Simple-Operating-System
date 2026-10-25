@@ -63,6 +63,7 @@ uint32_t root_cluster;
 uint32_t sectors_per_fat;
 uint32_t total_clusters;
 uint8_t  sectors_per_cluster;
+uint8_t  fat_count = 2;
 
 uint32_t current_dir_sector;
 uint32_t current_dir_cluster = 2; /* In FAT32, root starts at root_cluster (typically 2) */
@@ -455,6 +456,7 @@ void init_fs() {
     fat_start = bpb->reserved_sectors;
     sectors_per_fat = bpb->sectors_per_fat_32;
     sectors_per_cluster = bpb->sectors_per_cluster;
+    fat_count = bpb->fat_count ? bpb->fat_count : 2;
     root_cluster = bpb->root_cluster;
     
     /* In FAT32, data_start begins immediately after the reserved sectors and all FAT copies */
@@ -495,7 +497,9 @@ void write_fat_entry(uint32_t cluster, uint32_t value) {
     ata_read_sector(sector_lba, sector);
     uint32_t old_entry = ((uint32_t*)sector)[offset];
     ((uint32_t*)sector)[offset] = (old_entry & 0xF0000000) | (value & 0x0FFFFFFF);
-    ata_write_sector(sector_lba, sector);
+    for (uint8_t f = 0; f < fat_count; f++) {
+        ata_write_sector(sector_lba + (f * sectors_per_fat), sector);
+    }
     kfree(sector);
 }
 
