@@ -6,6 +6,9 @@
  * buffer: The buffer where we will store the 512 read bytes
 */
 void ata_read_sector(uint32_t lba, uint8_t *buffer) {
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
     /* 1. Tell the controller we want to use the Master drive (0xE0) and send the 4 most significant bits of the LBA */
     outb(0x1F6, 0xE0 | ((lba >> 24) & 0x0F));
     
@@ -31,11 +34,13 @@ void ata_read_sector(uint32_t lba, uint8_t *buffer) {
         status = inb(0x1F7);
         if (status == 0xFF || --timeout == 0) {
             for (int i = 0; i < 512; i++) buffer[i] = 0;
+            __asm__ volatile("push %0; popf" : : "r"(eflags));
             return;
         }
         if (status & 0x80) continue; /* BSY */
         if (status & (0x01 | 0x20)) { /* ERR or DF */
             for (int i = 0; i < 512; i++) buffer[i] = 0;
+            __asm__ volatile("push %0; popf" : : "r"(eflags));
             return;
         }
         if (status & 0x08) break; /* DRQ ready */
@@ -46,10 +51,15 @@ void ata_read_sector(uint32_t lba, uint8_t *buffer) {
     for (int i = 0; i < 256; i++) {
         ptr[i] = inw(0x1F0);
     }
+
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
 }
 
 /* Write ONE sector (512 bytes) to the hard drive */
 void ata_write_sector(uint32_t lba, uint8_t *buffer) {
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
     outb(0x1F6, 0xE0 | ((lba >> 24) & 0x0F));
     outb(0x1F2, 1);
     outb(0x1F3, (uint8_t) lba);
@@ -62,9 +72,15 @@ void ata_write_sector(uint32_t lba, uint8_t *buffer) {
     uint32_t timeout = 1000000;
     while (1) {
         status = inb(0x1F7);
-        if (status == 0xFF || --timeout == 0) return;
+        if (status == 0xFF || --timeout == 0) {
+            __asm__ volatile("push %0; popf" : : "r"(eflags));
+            return;
+        }
         if (status & 0x80) continue; /* BSY */
-        if (status & (0x01 | 0x20)) return; /* ERR or DF */
+        if (status & (0x01 | 0x20)) { /* ERR or DF */
+            __asm__ volatile("push %0; popf" : : "r"(eflags));
+            return;
+        }
         if (status & 0x08) break; /* DRQ ready */
     }
     
@@ -77,4 +93,6 @@ void ata_write_sector(uint32_t lba, uint8_t *buffer) {
     outb(0x1F7, 0xEA); 
     timeout = 1000000;
     while ((inb(0x1F7) & 0x80) && --timeout > 0);
+
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
 }

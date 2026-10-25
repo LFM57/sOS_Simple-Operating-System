@@ -90,7 +90,7 @@ void sha256_final(sha256_ctx *ctx, uint8_t *hash) {
 
 void hmac_sha256(const uint8_t *key, size_t keylen, const uint8_t *data, size_t datalen, uint8_t *mac) {
     uint8_t k_ipad[64], k_opad[64], tk[32];
-    int i;
+    size_t i;
     if (keylen > 64) {
         sha256_ctx ctx;
         sha256_init(&ctx);

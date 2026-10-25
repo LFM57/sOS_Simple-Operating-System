@@ -1,5 +1,11 @@
 #include "sos.h"
 
+int open(const char* pathname, int flags) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(18), "b"(pathname), "c"(flags) : "memory");
+    return ret;
+}
+
 /* Write 'count' bytes from the buffer to descriptor 'fd' */
 int write(int fd, const void* buf, unsigned int count) {
     int ret;
@@ -13,6 +19,12 @@ int read(int fd, void* buf, unsigned int count) {
     int ret;
     /* Assembly x86 : eax = syscall (4), ebx = fd, ecx = buf, edx = count */
     __asm__ volatile("int $0x80" : "=a"(ret) : "a"(4), "b"(fd), "c"(buf), "d"(count) : "memory");
+    return ret;
+}
+
+int lseek(int fd, int offset, int whence) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(19), "b"(fd), "c"(offset), "d"(whence));
     return ret;
 }
 

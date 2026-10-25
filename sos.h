@@ -1,9 +1,23 @@
 #ifndef SOS_H
 #define SOS_H
 
+/* --- Open flags and seek whence values --- */
+#define O_RDONLY 0x00
+#define O_WRONLY 0x01
+#define O_RDWR   0x02
+#define O_CREAT  0x04
+#define O_TRUNC  0x08
+#define O_APPEND 0x10
+
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
 /* --- New descriptor-based I/O system calls --- */
+int open(const char* pathname, int flags);
 int write(int fd, const void* buf, unsigned int count);
 int read(int fd, void* buf, unsigned int count);
+int lseek(int fd, int offset, int whence);
 int close(int fd);
 
 /* Updated basic system calls */

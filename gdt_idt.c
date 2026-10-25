@@ -225,8 +225,7 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
             if (current_task > 0 && tasks[current_task].is_background) {
                 char log_name[32] = "/task_0.log";
                 log_name[6] = '0' + tasks[current_task].id; 
-                extern void fs_append(const char* filename, const char* text);
-                fs_append(log_name, buf);
+                fs_append_bytes(log_name, (const uint8_t*)buf, count);
             } else {
                 /* Direct writing of bytes to the VGA screen */
                 for (uint32_t i = 0; i < count; i++) {
@@ -234,6 +233,26 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
                 }
             }
             return count; /* Number of bytes actually written */
+        }
+
+        /* Write to a VFS file */
+        if (tasks[current_task].open_files[fd].type == TYPE_FILE) {
+            file_descriptor_t* fd_entry = &tasks[current_task].open_files[fd];
+            uint32_t acc = fd_entry->flags & 0x03;
+            if (acc != O_WRONLY && acc != O_RDWR) {
+                return (uint32_t)-1;
+            }
+            if (!fd_entry->node) {
+                return (uint32_t)-1;
+            }
+            if (fd_entry->flags & O_APPEND) {
+                fd_entry->offset = fd_entry->node->size;
+            }
+            int bytes = vfs_write(fd_entry->node, fd_entry->offset, count, (const uint8_t*)buf);
+            if (bytes > 0) {
+                fd_entry->offset += (uint32_t)bytes;
+            }
+            return (uint32_t)bytes;
         }
         
         return (uint32_t)-1;
@@ -276,6 +295,23 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
             /* For now, we read a single character (raw terminal mode behavior) */
             buf[0] = wait_key(); 
             return 1; /* Returns 1 byte read */
+        }
+
+        /* Read from a VFS file */
+        if (tasks[current_task].open_files[fd].type == TYPE_FILE) {
+            file_descriptor_t* fd_entry = &tasks[current_task].open_files[fd];
+            uint32_t acc = fd_entry->flags & 0x03;
+            if (acc != O_RDONLY && acc != O_RDWR) {
+                return (uint32_t)-1;
+            }
+            if (!fd_entry->node) {
+                return (uint32_t)-1;
+            }
+            int bytes = vfs_read(fd_entry->node, fd_entry->offset, count, (uint8_t*)buf);
+            if (bytes > 0) {
+                fd_entry->offset += (uint32_t)bytes;
+            }
+            return (uint32_t)bytes;
         }
         
         return (uint32_t)-1;
@@ -357,7 +393,9 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
                 
                 tasks[current_task].open_files[i].is_used = 1;
                 tasks[current_task].open_files[i].type = TYPE_SOCKET;
+                tasks[current_task].open_files[i].flags = O_RDWR;
                 tasks[current_task].open_files[i].offset = sock_idx; /* Store socket ID in offset */
+                tasks[current_task].open_files[i].node = NULL;
                 return i;
             }
         }
@@ -422,7 +460,9 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
                 
                 tasks[current_task].open_files[i].is_used = 1;
                 tasks[current_task].open_files[i].type = TYPE_SOCKET;
+                tasks[current_task].open_files[i].flags = O_RDWR;
                 tasks[current_task].open_files[i].offset = sock_idx;
+                tasks[current_task].open_files[i].node = NULL;
                 return i;
             }
         }
@@ -519,11 +559,80 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
                 sockets[sock_idx].rx_len = 0;
                 sockets[sock_idx].rx_ready = 0;
             }
+        } else if (tasks[current_task].open_files[fd].type == TYPE_FILE) {
+            if (tasks[current_task].open_files[fd].node != NULL) {
+                vfs_close(tasks[current_task].open_files[fd].node);
+            }
         }
         tasks[current_task].open_files[fd].is_used = 0;
         tasks[current_task].open_files[fd].type = TYPE_NONE;
+        tasks[current_task].open_files[fd].flags = 0;
         tasks[current_task].open_files[fd].offset = 0;
+        tasks[current_task].open_files[fd].node = NULL;
         return 0;
+    }
+    else if (syscall_num == 18) {
+        /* Syscall 18: int open(const char* pathname, int flags) */
+        const char* pathname = (const char*)arg1;
+        uint32_t flags = (uint32_t)arg2;
+
+        if (!is_valid_user_string(pathname)) {
+            return (uint32_t)-1;
+        }
+
+        int fd = -1;
+        for (int i = 3; i < MAX_OPEN_FILES; i++) {
+            if (!tasks[current_task].open_files[i].is_used) {
+                fd = i;
+                break;
+            }
+        }
+        if (fd == -1) {
+            return (uint32_t)-1;
+        }
+
+        vfs_node_t* node = vfs_open(pathname, flags);
+        if (!node) {
+            return (uint32_t)-1;
+        }
+
+        tasks[current_task].open_files[fd].is_used = 1;
+        tasks[current_task].open_files[fd].type = TYPE_FILE;
+        tasks[current_task].open_files[fd].flags = flags;
+        tasks[current_task].open_files[fd].offset = (flags & O_APPEND) ? node->size : 0;
+        tasks[current_task].open_files[fd].node = node;
+        return (uint32_t)fd;
+    }
+    else if (syscall_num == 19) {
+        /* Syscall 19: int lseek(int fd, int offset, int whence) */
+        int fd = (int)arg1;
+        int32_t offset = (int32_t)arg2;
+        int whence = (int)arg3;
+
+        if (fd < 0 || fd >= MAX_OPEN_FILES || !tasks[current_task].open_files[fd].is_used) {
+            return (uint32_t)-1;
+        }
+        if (tasks[current_task].open_files[fd].type != TYPE_FILE || !tasks[current_task].open_files[fd].node) {
+            return (uint32_t)-1;
+        }
+
+        int32_t new_offset = 0;
+        if (whence == SEEK_SET) {
+            new_offset = offset;
+        } else if (whence == SEEK_CUR) {
+            new_offset = (int32_t)tasks[current_task].open_files[fd].offset + offset;
+        } else if (whence == SEEK_END) {
+            new_offset = (int32_t)tasks[current_task].open_files[fd].node->size + offset;
+        } else {
+            return (uint32_t)-1;
+        }
+
+        if (new_offset < 0) {
+            return (uint32_t)-1;
+        }
+
+        tasks[current_task].open_files[fd].offset = (uint32_t)new_offset;
+        return (uint32_t)new_offset;
     }
     
     return (uint32_t)-1;

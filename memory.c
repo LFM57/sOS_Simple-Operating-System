@@ -65,25 +65,28 @@ void init_paging() {
     __asm__ volatile("mov %0, %%cr0":: "r"(cr0));
 }
 
-void map_page_pd(uint32_t* pd, uint32_t virt, uint32_t phys) {
+void map_page_pd(uint32_t* pd, uint32_t virt, uint32_t phys, uint32_t flags) {
     uint32_t pdi = virt >> 22;               
     uint32_t pti = (virt >> 12) & 0x03FF;    
+    uint32_t pt_flags = (flags & 0xFFF) | 0x01;
 
     if (!(pd[pdi] & 0x01)) { 
         uint32_t* new_table = (uint32_t*)pmm_alloc_page();
         for (int i = 0; i < 1024; i++) new_table[i] = 0;
         /* Intermediate user tables must carry the 0x07 flag */
-        pd[pdi] = ((uint32_t)new_table) | 0x07;
+        pd[pdi] = ((uint32_t)new_table) | pt_flags;
+    } else if (pt_flags & 0x04) {
+        pd[pdi] |= 0x04;
     }
 
     uint32_t* table = (uint32_t*)(pd[pdi] & 0xFFFFF000);
-    table[pti] = (phys & 0xFFFFF000) | 0x07;
+    table[pti] = (phys & 0xFFFFF000) | pt_flags;
 
     __asm__ volatile("invlpg (%0)" ::"r" (virt) : "memory");
 }
 
 void map_page(uint32_t virt, uint32_t phys) {
-    map_page_pd(kernel_page_directory, virt, phys);
+    map_page_pd(kernel_page_directory, virt, phys, 0x03);
 }
 
 /* --- HEAP --- */
@@ -162,15 +165,24 @@ void kfree(void* ptr) {
     }
 
     block->is_free = 1;
-    if (block->next) {
-        if (block->next->magic != HEAP_MAGIC) {
-            kprintf("\n[KERNEL PANIC] Heap corruption detected during merge! Block at %x has bad magic %x\n", block->next, block->next->magic);
+    heap_block_t *curr = heap_head;
+    while (curr != NULL) {
+        if (curr->magic != HEAP_MAGIC) {
+            kprintf("\n[KERNEL PANIC] Heap corruption detected during merge! Block at %x has bad magic %x\n", curr, curr->magic);
             while(1) { __asm__ volatile("cli; hlt"); }
         }
-        if (block->next->is_free) {
-            block->size += sizeof(heap_block_t) + block->next->size;
-            block->next = block->next->next;
+        if (curr->is_free && curr->next != NULL) {
+            if (curr->next->magic != HEAP_MAGIC) {
+                kprintf("\n[KERNEL PANIC] Heap corruption detected during merge! Block at %x has bad magic %x\n", curr->next, curr->next->magic);
+                while(1) { __asm__ volatile("cli; hlt"); }
+            }
+            if (curr->next->is_free) {
+                curr->size += sizeof(heap_block_t) + curr->next->size;
+                curr->next = curr->next->next;
+                continue;
+            }
         }
+        curr = curr->next;
     }
     __asm__ volatile("sti"); /* Re-enable interrupts when done */
 }

@@ -280,7 +280,7 @@ int net_recv_udp(int sock_idx, uint8_t* buf, uint32_t max_len) {
 
 void net_dhcp_discover() {
     uint8_t payload[sizeof(dhcp_t)];
-    for(int i=0; i<sizeof(dhcp_t); i++) payload[i] = 0;
+    for(size_t i=0; i<sizeof(dhcp_t); i++) payload[i] = 0;
     
     dhcp_t* dhcp = (dhcp_t*)payload;
     dhcp->op = 1;        /* Boot Request */
@@ -432,7 +432,7 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
                         if (msg_type == 2) { 
                             /* Removed the "Offered IP" print here to stay silent until confirmed */
                             uint8_t req_payload[sizeof(dhcp_t)];
-                            for(int i=0; i<sizeof(dhcp_t); i++) req_payload[i] = 0;
+                            for(size_t i=0; i<sizeof(dhcp_t); i++) req_payload[i] = 0;
                             dhcp_t* req = (dhcp_t*)req_payload;
                             req->op = 1; req->htype = 1; req->hlen = 6; req->xid = dhcp_xid;
                             req->flags = htons(0x8000);

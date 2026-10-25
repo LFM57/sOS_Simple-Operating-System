@@ -64,6 +64,8 @@ void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
     *(uint32_t*)((uint8_t*)lfb_mem + offset) = color; 
 }
 
+void update_software_cursor(void);
+
 void swap_buffers(void) {
     if (!is_graphics_mode) return;
     uint32_t total_dwords = (g_height * g_pitch) / 4;

@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdarg.h>
+#include "vfs.h"
 
 /* --- I/O Functions (Hardware) --- */
 static inline void outb(uint16_t port, uint8_t val) {
@@ -59,6 +60,7 @@ void draw_test_logo(uint32_t start_x, uint32_t start_y);
 /* --- Descriptors (gdt_idt.c) --- */
 void init_gdt();
 void init_idt();
+void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags);
 void set_kernel_stack(uint32_t stack);
 
 /* --- Memory --- */
@@ -71,7 +73,7 @@ void init_paging();
 void init_heap();
 void* kmalloc(size_t size);
 void kfree(void* ptr);
-void map_page_pd(uint32_t* pd, uint32_t virt, uint32_t phys);
+void map_page_pd(uint32_t* pd, uint32_t virt, uint32_t phys, uint32_t flags);
 void map_page(uint32_t virt, uint32_t phys);
 int is_valid_user_ptr(uint32_t ptr);
 int is_valid_user_range(uint32_t ptr, uint32_t size);
@@ -105,6 +107,9 @@ int fs_complete(const char* prefix, char* out_match, int* out_match_count, int p
 int fs_cp(const char* src_name, const char* dest_name);
 void fs_mv(const char* src_name, const char* dest_name);
 void fs_append(const char* filename, const char* text);
+void fs_append_bytes(const char* filename, const uint8_t* data, uint32_t len);
+int fat32_read_at(uint32_t first_cluster, uint32_t file_size, uint32_t offset, uint32_t count, uint8_t* buffer);
+int fat32_write_at(uint32_t dir_sec, int dir_idx, uint32_t offset, uint32_t count, const uint8_t* buffer);
 
 /* --- User System (Auth & Permissions) --- */
 extern uint8_t current_uid;
@@ -141,8 +146,10 @@ typedef struct {
 
 typedef struct {
     int is_used;
-    int type;
-    uint32_t offset;
+    int type;           /* TYPE_NONE, TYPE_TTY, TYPE_FILE, TYPE_SOCKET */
+    uint32_t flags;     /* Open flags (O_RDONLY, O_WRONLY, O_RDWR, O_APPEND, etc.) */
+    uint32_t offset;    /* Current byte offset for TYPE_FILE (or sock_idx for TYPE_SOCKET) */
+    struct vfs_node* node;
 } file_descriptor_t;
 
 typedef struct {

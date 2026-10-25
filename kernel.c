@@ -90,21 +90,29 @@ void init_task_fds(task_t* task) {
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         task->open_files[i].is_used = 0;
         task->open_files[i].type = TYPE_NONE;
+        task->open_files[i].flags = 0;
         task->open_files[i].offset = 0;
+        task->open_files[i].node = NULL;
     }
     
     /* Step 2: Configure standard streams (stdin, stdout, stderr) to the Terminal */
     // FD 0: stdin (Standard Input)
     task->open_files[0].is_used = 1;
     task->open_files[0].type = TYPE_TTY;
+    task->open_files[0].flags = O_RDONLY;
+    task->open_files[0].node = vfs_get_tty_node();
 
     // FD 1: stdout (Standard Output)
     task->open_files[1].is_used = 1;
     task->open_files[1].type = TYPE_TTY;
+    task->open_files[1].flags = O_WRONLY;
+    task->open_files[1].node = vfs_get_tty_node();
 
     // FD 2: stderr (Standard Error)
     task->open_files[2].is_used = 1;
     task->open_files[2].type = TYPE_TTY;
+    task->open_files[2].flags = O_WRONLY;
+    task->open_files[2].node = vfs_get_tty_node();
 }
 
 /* Add a validated command to the history (5-element FIFO method) */
@@ -265,12 +273,16 @@ void cleanup_task_memory(int id) {
                     sockets[sock_idx].rx_len = 0;         /* Flush buffers */
                     sockets[sock_idx].rx_ready = 0;
                 }
+            } else if (tasks[id].open_files[i].type == TYPE_FILE && tasks[id].open_files[i].node != NULL) {
+                vfs_close(tasks[id].open_files[i].node);
             }
             
             /* Mark task file descriptor as closed */
             tasks[id].open_files[i].is_used = 0;
             tasks[id].open_files[i].type = TYPE_NONE;
+            tasks[id].open_files[i].flags = 0;
             tasks[id].open_files[i].offset = 0;
+            tasks[id].open_files[i].node = NULL;
         }
     }
 
@@ -880,7 +892,7 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
                 }
                 /* Initialize the new page to zero */
                 for (int k = 0; k < 1024; k++) ((uint32_t*)phys)[k] = 0;
-                map_page_pd(pd, page, (uint32_t)phys);
+                map_page_pd(pd, page, (uint32_t)phys, 0x07);
             }
 
             /*
@@ -916,7 +928,7 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
 
     /* 6. Map the user stack */
     uint32_t ustack_virt = 0x7FF0000;
-    map_page_pd(pd, ustack_virt, (uint32_t)ustack);
+    map_page_pd(pd, ustack_virt, (uint32_t)ustack, 0x07);
 
     /* 7. Prepare the kernel stack (starting context for IRET) */
     uint32_t* top = (uint32_t*)((uint32_t)kstack + 4096);
@@ -967,7 +979,7 @@ uint32_t sys_sbrk(int increment) {
     for (uint32_t i = start_page; i <= end_page; i++) {
         void* phys = pmm_alloc_page();
         if (!phys) return (uint32_t)-1;
-        map_page_pd(tasks[current_task].page_directory, i * 4096, (uint32_t)phys);
+        map_page_pd(tasks[current_task].page_directory, i * 4096, (uint32_t)phys, 0x07);
     }
     
     tasks[current_task].prog_break = new_break;
@@ -1702,6 +1714,7 @@ int update_user_password(const char* target_user, const char* new_hash_str) {
         uint32_t line_end = offset;
         
         if (ui == 0) continue;
+        (void)p;
         
         if (strcmp(u, target_user) == 0) {
             found = 1;
@@ -2890,6 +2903,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
 
     init_heap(); kprintf("[INFO] Heap (kmalloc) OK\n");
     init_fs();
+    init_vfs();
     init_pit();  kprintf("[INFO] PIT (100 Hz) OK\n");
     init_e1000();
     
