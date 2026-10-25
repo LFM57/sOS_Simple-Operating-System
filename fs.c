@@ -744,7 +744,7 @@ void fs_df() {
     }
     kfree(sector);
     
-    uint32_t free_kb = (free_clusters * sectors_per_cluster * 512) / 1024;
+    uint32_t free_kb = (uint32_t)(((uint64_t)free_clusters * sectors_per_cluster) >> 1);
     kprintf("Free storage space: %d KB (%d.%d MB)\n", 
             free_kb, 
             free_kb / 1024, 
