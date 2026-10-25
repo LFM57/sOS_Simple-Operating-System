@@ -1023,7 +1023,7 @@ void fs_rm(const char* arg1, const char* arg2) {
                 /* -------------------------------------- */
 
                 if (dir[i].attributes & 0x10) {
-                    uint32_t sub_cluster = dir[i].first_cluster_low;
+                    uint32_t sub_cluster = get_cluster(dir[i]);
                     uint32_t target_sector = data_start + ((sub_cluster - 2) * sectors_per_cluster);
                     uint8_t* sub_sector = (uint8_t*)kmalloc(512);
                     ata_read_sector(target_sector, sub_sector);
@@ -1168,7 +1168,7 @@ void fs_rm(const char* arg1, const char* arg2) {
             for(int j = 0; j < 16; j++) {
                 if (sub_dir[j].name[0] == 0x00) break;
                 if (sub_dir[j].name[0] == (char)0xE5 || sub_dir[j].name[0] == '.') continue;
-                free_fat_chain(sub_dir[j].first_cluster_low);
+                free_fat_chain(get_cluster(sub_dir[j]));
             }
         }
         kfree(sub_sector);
