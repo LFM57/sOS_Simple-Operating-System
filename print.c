@@ -303,7 +303,14 @@ void kprintf(const char* format, ...) {
         if (format[i] == '%' && format[i + 1] != '\0') {
             i++;
             switch (format[i]) {
-                case 's': kprintf(va_arg(args, const char*)); break;
+                case 's': {
+                    const char* str = va_arg(args, const char*);
+                    if (!str) str = "(null)";
+                    while (*str) {
+                        kputc(*str++);
+                    }
+                    break;
+                }
                 case 'd': {
                     int num = va_arg(args, int);
                     if (num < 0) { kputc('-'); num = -num; }
