@@ -778,14 +778,42 @@ void background_loop() {
 }
 
 int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
-    (void)elf_size;
-
     /* 1. ELF Header Validation */
+    if (!elf_buffer || elf_size < sizeof(Elf32_Ehdr)) {
+        kprintf("Error: Invalid ELF size!\n");
+        return -1;
+    }
+
     Elf32_Ehdr* header = (Elf32_Ehdr*)elf_buffer;
     if (header->e_ident[0] != 0x7F || header->e_ident[1] != 'E' ||
         header->e_ident[2] != 'L' || header->e_ident[3] != 'F') {
         kprintf("Error: Invalid ELF magic!\n");
         return -1;
+    }
+
+    uint32_t ph_table_size = (uint32_t)header->e_phnum * sizeof(Elf32_Phdr);
+    if (header->e_phoff > elf_size || ph_table_size > elf_size - header->e_phoff) {
+        kprintf("Error: Corrupt ELF program header table!\n");
+        return -1;
+    }
+
+    Elf32_Phdr* phdr = (Elf32_Phdr*)(elf_buffer + header->e_phoff);
+    for (int i = 0; i < header->e_phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD) {
+            uint32_t vaddr = phdr[i].p_vaddr;
+            uint32_t memsz = phdr[i].p_memsz;
+            uint32_t filesz = phdr[i].p_filesz;
+            uint32_t offset = phdr[i].p_offset;
+
+            if (filesz > memsz || offset > elf_size || filesz > elf_size - offset) {
+                kprintf("Error: ELF segment exceeds file bounds or memsz!\n");
+                return -1;
+            }
+            if (vaddr < 0x08000000 || vaddr >= 0x10000000 || memsz > 0x10000000 - vaddr) {
+                kprintf("Error: ELF segment out of bounds or overlaps kernel space.\n");
+                return -1;
+            }
+        }
     }
 
     /* 2. Search for a free task slot */
@@ -801,6 +829,13 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
     
     /* 4. Creation and initialization of the task's page directory */
     uint32_t* pd = (uint32_t*)pmm_alloc_page();
+    if (!kstack || !ustack || !pd) {
+        if (kstack) pmm_free_page(kstack);
+        if (ustack) pmm_free_page(ustack);
+        if (pd) pmm_free_page(pd);
+        kprintf("Error: Out of physical memory.\n");
+        return -1;
+    }
     for(int i = 0; i < 1024; i++) pd[i] = kernel_page_directory[i];
 
     tasks[id].page_directory = pd;
@@ -808,7 +843,6 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
     tasks[id].kernel_stack = (void*)kstack;
 
     /* 5. Load PT_LOAD segments */
-    Elf32_Phdr* phdr = (Elf32_Phdr*)(elf_buffer + header->e_phoff);
     uint32_t max_vaddr = 0;
 
     for (int i = 0; i < header->e_phnum; i++) {
@@ -818,15 +852,6 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
             uint32_t filesz = phdr[i].p_filesz;
             uint32_t offset = phdr[i].p_offset;
 
-            /* [FIX ADDITION] Prevent ELF segments from mapping into kernel space */
-            if (vaddr >= 0x10000000 || vaddr + memsz > 0x10000000 || vaddr + memsz < vaddr) {
-                kprintf("Error: ELF segment out of bounds or overlaps kernel space.\n");
-                pmm_free_page(pd);
-                pmm_free_page(ustack);
-                pmm_free_page(kstack);
-                return -1;
-            }
-
             /* Calculate page alignment to map for this segment */
             uint32_t start_page = vaddr & 0xFFFFF000;
             uint32_t end_page = (vaddr + memsz + 4095) & 0xFFFFF000;
@@ -834,6 +859,14 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
             /* Physical allocation and virtual mapping */
             for (uint32_t page = start_page; page < end_page; page += 4096) {
                 void* phys = pmm_alloc_page();
+                if (!phys) {
+                    kprintf("Error: Out of physical memory while loading ELF segment.\n");
+                    pmm_free_page(ustack);
+                    tasks[id].user_stack = NULL;
+                    tasks[id].state = 3;
+                    cleanup_task_memory(id);
+                    return -1;
+                }
                 /* Initialize the new page to zero */
                 for (int k = 0; k < 1024; k++) ((uint32_t*)phys)[k] = 0;
                 map_page_pd(pd, page, (uint32_t)phys);
