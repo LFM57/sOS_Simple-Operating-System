@@ -21,6 +21,9 @@ int lseek(int fd, int offset, int whence);
 int close(int fd);
 int pipe(int pipefd[2]);
 int dup2(int oldfd, int newfd);
+int fork(void);
+int execve(const char* path, char* const argv[], char* const envp[]);
+int waitpid(int pid, int* status, int options);
 
 /* Updated basic system calls */
 void print(const char* str);

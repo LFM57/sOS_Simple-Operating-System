@@ -85,7 +85,28 @@ extern volatile uint32_t timer_ticks;
 void init_pic();
 void init_serial();
 void init_pit();
-uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uint32_t arg3);
+typedef struct {
+    uint32_t gs;
+    uint32_t fs;
+    uint32_t es;
+    uint32_t ds;
+    uint32_t ebp;
+    uint32_t edi;
+    uint32_t esi;
+    uint32_t edx;
+    uint32_t ecx;
+    uint32_t ebx;
+    uint32_t eip;
+    uint32_t cs;
+    uint32_t eflags;
+    uint32_t esp;
+    uint32_t ss;
+} __attribute__((packed)) syscall_frame_t;
+
+uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uint32_t arg3, syscall_frame_t* frame);
+int sys_fork(syscall_frame_t* frame);
+int sys_execve(const char* path, char* const argv[], char* const envp[]);
+int sys_waitpid(int pid, int* status, int options);
 
 /* --- Disk & File System (disk.c / fs.c) --- */
 void ata_read_sector(uint32_t lba, uint8_t *buffer);
@@ -153,6 +174,7 @@ void sleep_on(wait_queue_t* queue);
 void wake_up(wait_queue_t* queue);
 void yield(void);
 extern wait_queue_t console_queue;
+extern wait_queue_t exit_queue;
 
 typedef struct {
     uint8_t dest_ip[4];

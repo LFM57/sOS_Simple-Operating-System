@@ -190,6 +190,7 @@ struct multiboot_info {
 task_t tasks[MAX_TASKS];
 int current_task = -1;
 wait_queue_t console_queue = {0};
+wait_queue_t exit_queue = {0};
 
 static void remove_wait_node(wait_queue_t* queue, wait_node_t* node) {
     if (!queue || !node) return;
@@ -302,9 +303,9 @@ void init_multitasking() {
 uint32_t schedule(uint32_t current_esp) {
     if (current_task == -1) return current_esp;
 
-    /* Clean up any zombie task while running safely in another task's context */
+    /* Clean up background zombie tasks while running safely in another task's context */
     for (int i = 1; i < IDLE_TASK_ID; i++) {
-        if (tasks[i].state == 3 && i != current_task) {
+        if (tasks[i].state == 3 && i != current_task && tasks[i].is_background) {
             cleanup_task_memory(i);
         }
     }
@@ -405,10 +406,11 @@ void cleanup_task_memory(int id) {
 void kill_current_task() {
     __asm__ volatile("cli");
     if (current_task > 0) {
-        tasks[current_task].state = 3; /* Mark as ZOMBIE; deferred cleanup */
+        tasks[current_task].state = 3; /* Mark as ZOMBIE */
+        wake_up(&exit_queue);
     }
     while(1) {
-        __asm__ volatile("sti; hlt");
+        yield();
     }
 }
 
@@ -1147,6 +1149,321 @@ int is_valid_user_string(const char* str) {
 
 int is_valid_user_ptr(uint32_t ptr) {
     return is_valid_user_range(ptr, 1);
+}
+
+int sys_fork(syscall_frame_t* frame) {
+    if (current_task < 0 || current_task == IDLE_TASK_ID) return -1;
+
+    int child_id = -1;
+    for (int i = 1; i < IDLE_TASK_ID; i++) {
+        if (tasks[i].state == 0) { child_id = i; break; }
+    }
+    if (child_id == -1) return -1;
+
+    task_t* parent = &tasks[current_task];
+    task_t* child = &tasks[child_id];
+
+    uint32_t* kstack = (uint32_t*)pmm_alloc_page();
+    if (!kstack) return -1;
+    child->kernel_stack = (void*)kstack;
+    child->kernel_esp = (uint32_t)kstack + 4096;
+
+    uint32_t* child_pd = (uint32_t*)pmm_alloc_page();
+    if (!child_pd) {
+        pmm_free_page(kstack);
+        child->kernel_stack = NULL;
+        return -1;
+    }
+    for (int i = 0; i < 1024; i++) child_pd[i] = kernel_page_directory[i];
+    child->page_directory = child_pd;
+
+    /* Deep copy parent user-space pages */
+    if (parent->page_directory != kernel_page_directory && parent->page_directory != NULL) {
+        uint32_t* parent_pd = parent->page_directory;
+        for (int pdi = 31; pdi < 64; pdi++) {
+            if (parent_pd[pdi] & 0x01) {
+                uint32_t* parent_pt = (uint32_t*)(parent_pd[pdi] & 0xFFFFF000);
+                for (int pti = 0; pti < 1024; pti++) {
+                    if (parent_pt[pti] & 0x01) {
+                        uint32_t virt = (pdi << 22) | (pti << 12);
+                        void* child_phys = pmm_alloc_page();
+                        if (!child_phys) {
+                            cleanup_task_memory(child_id);
+                            return -1;
+                        }
+                        uint32_t* src = (uint32_t*)virt;
+                        uint32_t* dst = (uint32_t*)child_phys;
+                        for (int k = 0; k < 1024; k++) dst[k] = src[k];
+                        map_page_pd(child_pd, virt, (uint32_t)child_phys, parent_pt[pti] & 0xFFF);
+                    }
+                }
+            }
+        }
+    }
+
+    /* Clone open file descriptors */
+    for (int f = 0; f < MAX_OPEN_FILES; f++) {
+        child->open_files[f] = parent->open_files[f];
+        if (child->open_files[f].is_used && child->open_files[f].node != NULL) {
+            if (child->open_files[f].node != vfs_get_tty_node()) {
+                child->open_files[f].node->ref_count++;
+            }
+            if (child->open_files[f].type == TYPE_PIPE && child->open_files[f].node->private_data) {
+                uint8_t* pdata = (uint8_t*)child->open_files[f].node->private_data;
+                int* readers = (int*)(pdata + 4108);
+                int* writers = (int*)(pdata + 4112);
+                if ((child->open_files[f].flags & 0x03) == O_RDONLY) {
+                    (*readers)++;
+                } else if ((child->open_files[f].flags & 0x03) == O_WRONLY) {
+                    (*writers)++;
+                }
+            }
+        }
+    }
+
+    child->id = child_id;
+    child->uid = parent->uid;
+    child->is_background = parent->is_background;
+    child->prog_break = parent->prog_break;
+    child->user_stack = parent->user_stack;
+    child->code_page = NULL;
+
+    uint32_t* top = (uint32_t*)child->kernel_esp;
+
+    if (frame && frame->cs == 0x1B) {
+        *(--top) = frame->ss;
+        *(--top) = frame->esp;
+        *(--top) = frame->eflags | 0x200;
+        *(--top) = frame->cs;
+        *(--top) = frame->eip;
+
+        *(--top) = frame->edi;
+        *(--top) = frame->esi;
+        *(--top) = frame->ebp;
+        *(--top) = 0;
+        *(--top) = frame->ebx;
+        *(--top) = frame->edx;
+        *(--top) = frame->ecx;
+        *(--top) = 0;
+
+        *(--top) = frame->ds;
+        *(--top) = frame->es;
+        *(--top) = frame->fs;
+        *(--top) = frame->gs;
+    } else {
+        uint32_t caller_eip = frame ? frame->eip : (uint32_t)__builtin_return_address(0);
+        uint32_t caller_ebp = frame ? frame->ebp : (uint32_t)__builtin_frame_address(0);
+
+        *(--top) = 0x202;
+        *(--top) = 0x08;
+        *(--top) = caller_eip;
+
+        *(--top) = frame ? frame->edi : 0;
+        *(--top) = frame ? frame->esi : 0;
+        *(--top) = caller_ebp;
+        *(--top) = 0;
+        *(--top) = frame ? frame->ebx : 0;
+        *(--top) = frame ? frame->edx : 0;
+        *(--top) = frame ? frame->ecx : 0;
+        *(--top) = 0;
+
+        *(--top) = 0x10;
+        *(--top) = 0x10;
+        *(--top) = 0x10;
+        *(--top) = 0x10;
+    }
+
+    child->esp = (uint32_t)top;
+    child->state = 2; /* READY */
+
+    return child_id;
+}
+
+int sys_waitpid(int pid, int* status, int options) {
+    (void)options;
+    if (pid == -1) {
+        while (1) {
+            int has_children = 0;
+            for (int i = 1; i < IDLE_TASK_ID; i++) {
+                if (tasks[i].state == 3) {
+                    cleanup_task_memory(i);
+                    if (status) *status = 0;
+                    return i;
+                }
+                if (tasks[i].state != 0) {
+                    has_children = 1;
+                }
+            }
+            if (!has_children) return -1;
+            sleep_on(&exit_queue);
+        }
+    }
+
+    if (pid <= 0 || pid >= MAX_TASKS) return -1;
+
+    while (tasks[pid].state != 0 && tasks[pid].state != 3) {
+        sleep_on(&exit_queue);
+    }
+
+    if (tasks[pid].state == 3) {
+        cleanup_task_memory(pid);
+    }
+    if (status) {
+        *status = 0;
+    }
+    return pid;
+}
+
+int sys_execve(const char* path, char* const argv[], char* const envp[]) {
+    (void)argv;
+    (void)envp;
+    if (!path) return -1;
+    if (current_task < 0 || current_task == IDLE_TASK_ID) return -1;
+
+    uint8_t* elf_buf = NULL;
+    uint32_t elf_size = 0;
+
+    char resolved_path[128];
+    int pi = 0;
+    while (path[pi] && pi < 127) { resolved_path[pi] = path[pi]; pi++; }
+    resolved_path[pi] = '\0';
+
+    if (!fs_load_file(resolved_path, &elf_buf, &elf_size)) {
+        char with_ext[132];
+        int k = 0;
+        while (resolved_path[k] && k < 127) { with_ext[k] = resolved_path[k]; k++; }
+        with_ext[k++] = '.'; with_ext[k++] = 's'; with_ext[k++] = 'o'; with_ext[k++] = 's'; with_ext[k] = '\0';
+        if (!fs_load_file(with_ext, &elf_buf, &elf_size)) {
+            char bin_path[140] = "/bin/";
+            int bi = 5;
+            for (int j = 0; resolved_path[j] && bi < 135; j++) bin_path[bi++] = resolved_path[j];
+            bin_path[bi] = '\0';
+            if (!fs_load_file(bin_path, &elf_buf, &elf_size)) {
+                return -1;
+            }
+        }
+    }
+
+    if (elf_size < sizeof(Elf32_Ehdr)) {
+        kfree(elf_buf);
+        return -1;
+    }
+    Elf32_Ehdr* header = (Elf32_Ehdr*)elf_buf;
+    if (header->e_ident[0] != 0x7F || header->e_ident[1] != 'E' ||
+        header->e_ident[2] != 'L' || header->e_ident[3] != 'F') {
+        kfree(elf_buf);
+        return -1;
+    }
+
+    uint32_t ph_table_size = (uint32_t)header->e_phnum * sizeof(Elf32_Phdr);
+    if (header->e_phoff > elf_size || ph_table_size > elf_size - header->e_phoff) {
+        kfree(elf_buf);
+        return -1;
+    }
+
+    Elf32_Phdr* phdr = (Elf32_Phdr*)(elf_buf + header->e_phoff);
+    for (int i = 0; i < header->e_phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD) {
+            uint32_t vaddr = phdr[i].p_vaddr;
+            uint32_t memsz = phdr[i].p_memsz;
+            uint32_t filesz = phdr[i].p_filesz;
+            uint32_t offset = phdr[i].p_offset;
+
+            if (filesz > memsz || offset > elf_size || filesz > elf_size - offset) {
+                kfree(elf_buf);
+                return -1;
+            }
+            if (vaddr < 0x08000000 || vaddr >= 0x10000000 || memsz > 0x10000000 - vaddr) {
+                kfree(elf_buf);
+                return -1;
+            }
+        }
+    }
+
+    task_t* cur = &tasks[current_task];
+    uint32_t* pd = cur->page_directory;
+
+    if (pd != kernel_page_directory && pd != NULL) {
+        for (int pdi = 31; pdi < 64; pdi++) {
+            if (pd[pdi] & 0x01) {
+                uint32_t* pt = (uint32_t*)(pd[pdi] & 0xFFFFF000);
+                for (int pti = 0; pti < 1024; pti++) {
+                    if (pt[pti] & 0x01) {
+                        pmm_free_page((void*)(pt[pti] & 0xFFFFF000));
+                    }
+                }
+                pmm_free_page((void*)pt);
+                pd[pdi] = 0x02;
+            }
+        }
+    } else {
+        pd = (uint32_t*)pmm_alloc_page();
+        if (!pd) {
+            kfree(elf_buf);
+            return -1;
+        }
+        for (int i = 0; i < 1024; i++) pd[i] = kernel_page_directory[i];
+        cur->page_directory = pd;
+    }
+
+    uint32_t max_vaddr = 0;
+    for (int i = 0; i < header->e_phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD) {
+            uint32_t vaddr = phdr[i].p_vaddr;
+            uint32_t memsz = phdr[i].p_memsz;
+            uint32_t filesz = phdr[i].p_filesz;
+            uint32_t offset = phdr[i].p_offset;
+
+            uint32_t start_page = vaddr & 0xFFFFF000;
+            uint32_t end_page = (vaddr + memsz + 4095) & 0xFFFFF000;
+
+            for (uint32_t page = start_page; page < end_page; page += 4096) {
+                void* phys = pmm_alloc_page();
+                if (!phys) {
+                    kfree(elf_buf);
+                    return -1;
+                }
+                for (int k = 0; k < 1024; k++) ((uint32_t*)phys)[k] = 0;
+                map_page_pd(pd, page, (uint32_t)phys, 0x07);
+            }
+
+            uint32_t old_cr3;
+            __asm__ volatile("mov %%cr3, %0" : "=r"(old_cr3));
+            __asm__ volatile("mov %0, %%cr3" :: "r"(pd));
+
+            uint8_t* dest = (uint8_t*)vaddr;
+            uint8_t* src = elf_buf + offset;
+            for (uint32_t j = 0; j < filesz; j++) dest[j] = src[j];
+            for (uint32_t j = filesz; j < memsz; j++) dest[j] = 0;
+
+            __asm__ volatile("mov %0, %%cr3" :: "r"(old_cr3));
+
+            if (vaddr + memsz > max_vaddr) max_vaddr = vaddr + memsz;
+        }
+    }
+
+    uint32_t ustack_virt = 0x7FF0000;
+    uint32_t* ustack = (uint32_t*)pmm_alloc_page();
+    if (!ustack) {
+        kfree(elf_buf);
+        return -1;
+    }
+    for (int k = 0; k < 1024; k++) ustack[k] = 0;
+    map_page_pd(pd, ustack_virt, (uint32_t)ustack, 0x07);
+    cur->user_stack = (void*)ustack;
+    cur->prog_break = (max_vaddr + 4095) & 0xFFFFF000;
+
+    __asm__ volatile("mov %0, %%cr3" :: "r"(pd));
+
+    uint32_t entry = header->e_entry;
+    kfree(elf_buf);
+
+    set_kernel_stack(cur->kernel_esp);
+
+    extern void switch_to_user_mode(uint32_t entry_point, uint32_t stack_top);
+    switch_to_user_mode(entry, ustack_virt + 4096);
+
+    return 0;
 }
 
 int edit_distance_is_one(const char* s1, const char* s2) {
@@ -2106,7 +2423,7 @@ int http_get(const char* host, uint16_t port, const char* path, uint8_t** out_da
 static int shell_dup_fd(int fd) {
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
         if (!tasks[current_task].open_files[i].is_used) {
-            if ((int)syscall_handler(21, (uint32_t)fd, (uint32_t)i, 0) >= 0) {
+            if ((int)syscall_handler(21, (uint32_t)fd, (uint32_t)i, 0, NULL) >= 0) {
                 return i;
             }
             return -1;
@@ -2255,40 +2572,40 @@ static void execute_single_command(int is_bg) {
     }
     else if (strcmp(cmd, "run") == 0) {
         if (arg1 != NULL) {
-            uint8_t* file_buf;
-            uint32_t file_size;
-            if (fs_load_file(arg1, &file_buf, &file_size)) {
-                int task_id = create_user_task(file_buf, file_size);
-                kfree(file_buf);
-                if (task_id != -1) {
-                    /* Associate the background status with the task */
-                    tasks[task_id].is_background = is_bg; 
-                    
-                    if (is_bg) {
-                        kprintf("[Process %d launched in background]\n", task_id);
-                        /* Prompt is given back instantly to the user */
-                    } else {
-                        /* Classic blocking synchronous mode */
-                        fg_task = task_id;
-                        while(tasks[task_id].state != 0) {
-                            if (tasks[task_id].state == 3) {
-                                cleanup_task_memory(task_id);
-                                break;
-                            }
-                            __asm__ volatile("sti; hlt");
-                        }
-                        fg_task = -1;
-                    }
-                }
+            if (current_task != 0) {
+                sys_execve(arg1, NULL, NULL);
+                kprintf("Error: Failed to exec '%s'.\n", arg1);
+                kill_current_task();
             } else {
-                if (fs_error == FS_ERR_PERMISSION) {
-                    kprintf("Error: Permission denied (Read access required).\n");
+                uint8_t* file_buf;
+                uint32_t file_size;
+                if (fs_load_file(arg1, &file_buf, &file_size)) {
+                    int task_id = create_user_task(file_buf, file_size);
+                    kfree(file_buf);
+                    if (task_id != -1) {
+                        /* Associate the background status with the task */
+                        tasks[task_id].is_background = is_bg; 
+                        
+                        if (is_bg) {
+                            kprintf("[Process %d launched in background]\n", task_id);
+                            /* Prompt is given back instantly to the user */
+                        } else {
+                            /* Classic blocking synchronous mode */
+                            fg_task = task_id;
+                            sys_waitpid(task_id, NULL, 0);
+                            fg_task = -1;
+                        }
+                    }
                 } else {
-                    kprintf("Error: '%s': No such file\n", arg1);
-                    char file_suggest[13];
-                    extern int fs_suggest_file(const char*, char*);
-                    if (fs_suggest_file(arg1, file_suggest)) {
-                        kprintf("Did you mean '%s'?\n", file_suggest);
+                    if (fs_error == FS_ERR_PERMISSION) {
+                        kprintf("Error: Permission denied (Read access required).\n");
+                    } else {
+                        kprintf("Error: '%s': No such file\n", arg1);
+                        char file_suggest[13];
+                        extern int fs_suggest_file(const char*, char*);
+                        if (fs_suggest_file(arg1, file_suggest)) {
+                            kprintf("Did you mean '%s'?\n", file_suggest);
+                        }
                     }
                 }
             }
@@ -2968,17 +3285,58 @@ static void execute_single_command(int is_bg) {
         *trap = 0xDEAD; 
     }
     else {
-        kprintf("Unknown command: '%s'\n", cmd);
-        const char* suggest_cmd = NULL;
-        /* Usage of global variable system_commands */
-        for (unsigned int i = 0; i < num_system_commands; i++) {
-            if (edit_distance_is_one(cmd, system_commands[i])) {
-                suggest_cmd = system_commands[i];
-                break;
-            }
+        /* Check if cmd is an executable ELF binary */
+        uint8_t* test_buf = NULL;
+        uint32_t test_size = 0;
+        char possible_file[128];
+        int ci = 0;
+        while (cmd[ci] && ci < 120) { possible_file[ci] = cmd[ci]; ci++; }
+        possible_file[ci] = '\0';
+
+        int found = fs_load_file(possible_file, &test_buf, &test_size);
+        if (!found) {
+            possible_file[ci++] = '.'; possible_file[ci++] = 's';
+            possible_file[ci++] = 'o'; possible_file[ci++] = 's';
+            possible_file[ci] = '\0';
+            found = fs_load_file(possible_file, &test_buf, &test_size);
         }
-        if (suggest_cmd != NULL) {
-            kprintf("Did you mean '%s'?\n", suggest_cmd);
+
+        if (found) {
+            kfree(test_buf);
+            if (current_task != 0) {
+                sys_execve(possible_file, NULL, NULL);
+                kprintf("Error: Failed to exec '%s'.\n", possible_file);
+                kill_current_task();
+            } else {
+                int child_pid = sys_fork(NULL);
+                if (child_pid == 0) {
+                    sys_execve(possible_file, NULL, NULL);
+                    kprintf("Error: Failed to exec '%s'.\n", possible_file);
+                    kill_current_task();
+                } else if (child_pid > 0) {
+                    tasks[child_pid].is_background = is_bg;
+                    if (is_bg) {
+                        kprintf("[Process %d launched in background]\n", child_pid);
+                    } else {
+                        fg_task = child_pid;
+                        sys_waitpid(child_pid, NULL, 0);
+                        fg_task = -1;
+                    }
+                }
+            }
+        } else {
+            kprintf("Unknown command: '%s'\n", cmd);
+            const char* suggest_cmd = NULL;
+            /* Usage of global variable system_commands */
+            for (unsigned int i = 0; i < num_system_commands; i++) {
+                if (edit_distance_is_one(cmd, system_commands[i])) {
+                    suggest_cmd = system_commands[i];
+                    break;
+                }
+            }
+            if (suggest_cmd != NULL) {
+                kprintf("Did you mean '%s'?\n", suggest_cmd);
+            }
         }
     }
 
@@ -3030,42 +3388,107 @@ static void execute_command_with_redirection(char* stage_cmd, int is_bg) {
     int saved_out = -1;
 
     if (in_file[0] != '\0') {
-        int in_fd = (int)syscall_handler(18, (uint32_t)in_file, O_RDONLY, 0);
+        int in_fd = (int)syscall_handler(18, (uint32_t)in_file, O_RDONLY, 0, NULL);
         if (in_fd < 0) {
             kprintf("Error: Cannot open input file '%s'.\n", in_file);
             return;
         }
         saved_in = shell_dup_fd(0);
-        syscall_handler(21, (uint32_t)in_fd, 0, 0);
-        syscall_handler(17, (uint32_t)in_fd, 0, 0);
+        syscall_handler(21, (uint32_t)in_fd, 0, 0, NULL);
+        syscall_handler(17, (uint32_t)in_fd, 0, 0, NULL);
     }
 
     if (out_file[0] != '\0') {
         uint32_t out_flags = O_WRONLY | O_CREAT | (out_append ? O_APPEND : O_TRUNC);
-        int out_fd = (int)syscall_handler(18, (uint32_t)out_file, out_flags, 0);
+        int out_fd = (int)syscall_handler(18, (uint32_t)out_file, out_flags, 0, NULL);
         if (out_fd < 0) {
             if (saved_in >= 0) {
-                syscall_handler(21, (uint32_t)saved_in, 0, 0);
-                syscall_handler(17, (uint32_t)saved_in, 0, 0);
+                syscall_handler(21, (uint32_t)saved_in, 0, 0, NULL);
+                syscall_handler(17, (uint32_t)saved_in, 0, 0, NULL);
             }
             kprintf("Error: Cannot open output file '%s'.\n", out_file);
             return;
         }
         saved_out = shell_dup_fd(1);
-        syscall_handler(21, (uint32_t)out_fd, 1, 0);
-        syscall_handler(17, (uint32_t)out_fd, 0, 0);
+        syscall_handler(21, (uint32_t)out_fd, 1, 0, NULL);
+        syscall_handler(17, (uint32_t)out_fd, 0, 0, NULL);
     }
 
     custom_strcpy(cmd_buffer, clean_cmd);
     execute_single_command(is_bg);
 
     if (saved_out >= 0) {
-        syscall_handler(21, (uint32_t)saved_out, 1, 0);
-        syscall_handler(17, (uint32_t)saved_out, 0, 0);
+        syscall_handler(21, (uint32_t)saved_out, 1, 0, NULL);
+        syscall_handler(17, (uint32_t)saved_out, 0, 0, NULL);
     }
     if (saved_in >= 0) {
-        syscall_handler(21, (uint32_t)saved_in, 0, 0);
-        syscall_handler(17, (uint32_t)saved_in, 0, 0);
+        syscall_handler(21, (uint32_t)saved_in, 0, 0, NULL);
+        syscall_handler(17, (uint32_t)saved_in, 0, 0, NULL);
+    }
+}
+
+static void execute_pipeline(char** stages, int num_stages, int is_bg) {
+    int pipes[7][2];
+    int num_pipes = num_stages - 1;
+    int pipe_ok = 1;
+
+    for (int i = 0; i < num_pipes; i++) {
+        pipes[i][0] = -1;
+        pipes[i][1] = -1;
+        if ((int)syscall_handler(20, (uint32_t)pipes[i], 0, 0, NULL) < 0) {
+            kprintf("Error: Failed to create pipe.\n");
+            for (int j = 0; j < i; j++) {
+                syscall_handler(17, (uint32_t)pipes[j][0], 0, 0, NULL);
+                syscall_handler(17, (uint32_t)pipes[j][1], 0, 0, NULL);
+            }
+            pipe_ok = 0;
+            break;
+        }
+    }
+
+    if (!pipe_ok) return;
+
+    int pids[8];
+    for (int s = 0; s < num_stages; s++) {
+        int pid = sys_fork(NULL);
+        if (pid < 0) {
+            kprintf("Error: Failed to fork pipeline stage %d.\n", s);
+            pids[s] = -1;
+            continue;
+        }
+        if (pid == 0) {
+            /* Child process s */
+            if (s > 0) {
+                syscall_handler(21, (uint32_t)pipes[s - 1][0], 0, 0, NULL);
+            }
+            if (s < num_stages - 1) {
+                syscall_handler(21, (uint32_t)pipes[s][1], 1, 0, NULL);
+            }
+            for (int i = 0; i < num_pipes; i++) {
+                syscall_handler(17, (uint32_t)pipes[i][0], 0, 0, NULL);
+                syscall_handler(17, (uint32_t)pipes[i][1], 0, 0, NULL);
+            }
+
+            execute_command_with_redirection(stages[s], 0);
+
+            kill_current_task();
+        }
+        pids[s] = pid;
+    }
+
+    /* Parent closes all pipe ends */
+    for (int i = 0; i < num_pipes; i++) {
+        syscall_handler(17, (uint32_t)pipes[i][0], 0, 0, NULL);
+        syscall_handler(17, (uint32_t)pipes[i][1], 0, 0, NULL);
+    }
+
+    /* Parent waits for all children if foreground */
+    if (!is_bg) {
+        for (int s = 0; s < num_stages; s++) {
+            if (pids[s] > 0) {
+                sys_waitpid(pids[s], NULL, 0);
+            }
+        }
     }
 }
 
@@ -3113,56 +3536,7 @@ void execute_command() {
     if (num_stages == 1) {
         execute_command_with_redirection(stages[0], is_bg);
     } else {
-        int prev_pipe_read = -1;
-        for (int s = 0; s < num_stages; s++) {
-            int pipefd[2] = {-1, -1};
-            if (s < num_stages - 1) {
-                if ((int)syscall_handler(20, (uint32_t)pipefd, 0, 0) < 0) {
-                    if (prev_pipe_read >= 0) {
-                        syscall_handler(17, (uint32_t)prev_pipe_read, 0, 0);
-                    }
-                    kprintf("Error: Failed to create pipe.\n");
-                    break;
-                }
-            }
-
-            int saved_in = -1;
-            int saved_out = -1;
-
-            if (prev_pipe_read >= 0) {
-                saved_in = shell_dup_fd(0);
-                syscall_handler(21, (uint32_t)prev_pipe_read, 0, 0);
-                syscall_handler(17, (uint32_t)prev_pipe_read, 0, 0);
-                prev_pipe_read = -1;
-            }
-            if (pipefd[1] >= 0) {
-                saved_out = shell_dup_fd(1);
-                syscall_handler(21, (uint32_t)pipefd[1], 1, 0);
-                syscall_handler(17, (uint32_t)pipefd[1], 0, 0);
-            }
-
-            execute_command_with_redirection(stages[s], (s == num_stages - 1) ? is_bg : 0);
-
-            if (saved_out >= 0) {
-                syscall_handler(21, (uint32_t)saved_out, 1, 0);
-                syscall_handler(17, (uint32_t)saved_out, 0, 0);
-            }
-            if (saved_in >= 0) {
-                syscall_handler(21, (uint32_t)saved_in, 0, 0);
-                syscall_handler(17, (uint32_t)saved_in, 0, 0);
-            }
-
-            prev_pipe_read = pipefd[0];
-            if (session_reset) {
-                if (prev_pipe_read >= 0) {
-                    syscall_handler(17, (uint32_t)prev_pipe_read, 0, 0);
-                }
-                return;
-            }
-        }
-        if (prev_pipe_read >= 0) {
-            syscall_handler(17, (uint32_t)prev_pipe_read, 0, 0);
-        }
+        execute_pipeline(stages, num_stages, is_bg);
     }
 
     if (session_reset) {

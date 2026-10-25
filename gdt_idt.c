@@ -197,7 +197,7 @@ void fault_handler(registers_t *regs) {
     }
 }
 
-uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
+uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uint32_t arg3, syscall_frame_t* frame) {
     (void)arg2; (void)arg3;
 
     if (syscall_num == 1) {
@@ -499,11 +499,11 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
     }
     else if (syscall_num == 15) {
         /* Syscall 15: int send(int fd, void* buf, uint32_t len) -> thin wrapper over write */
-        return syscall_handler(1, arg1, arg2, arg3);
+        return syscall_handler(1, arg1, arg2, arg3, frame);
     }
     else if (syscall_num == 16) {
         /* Syscall 16: int recv(int fd, void* buf, uint32_t max_len) -> thin wrapper over read */
-        return syscall_handler(4, arg1, arg2, arg3);
+        return syscall_handler(4, arg1, arg2, arg3, frame);
     }
     else if (syscall_num == 17) {
         /* Syscall 17: int close(int fd) */
@@ -656,6 +656,26 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
             tasks[current_task].open_files[newfd].node->ref_count++;
         }
         return (uint32_t)newfd;
+    }
+    else if (syscall_num == 22) {
+        /* Syscall 22: int fork() */
+        return (uint32_t)sys_fork(frame);
+    }
+    else if (syscall_num == 23) {
+        /* Syscall 23: int execve(const char* path, char* const argv[], char* const envp[]) */
+        const char* path = (const char*)arg1;
+        char* const* argv = (char* const*)arg2;
+        char* const* envp = (char* const*)arg3;
+        if (!is_valid_user_string(path)) return (uint32_t)-1;
+        return (uint32_t)sys_execve(path, argv, envp);
+    }
+    else if (syscall_num == 24) {
+        /* Syscall 24: int waitpid(int pid, int* status, int options) */
+        int pid = (int)arg1;
+        int* status = (int*)arg2;
+        int options = (int)arg3;
+        if (status && !is_valid_user_range((uint32_t)status, sizeof(int))) return (uint32_t)-1;
+        return (uint32_t)sys_waitpid(pid, status, options);
     }
     
     return (uint32_t)-1;

@@ -46,6 +46,24 @@ int dup2(int oldfd, int newfd) {
     return ret;
 }
 
+int fork(void) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(22));
+    return ret;
+}
+
+int execve(const char* path, char* const argv[], char* const envp[]) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(23), "b"(path), "c"(argv), "d"(envp));
+    return ret;
+}
+
+int waitpid(int pid, int* status, int options) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(24), "b"(pid), "c"(status), "d"(options));
+    return ret;
+}
+
 /* The print() function uses standard write to stdout (FD 1) */
 void print(const char* str) {
     write(1, str, strlen(str));

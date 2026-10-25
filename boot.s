@@ -306,13 +306,14 @@ isr128:
     mov %bx, %gs
     
     /* Push arguments for C */
+    push %esp  /* Pointer to saved frame */
     push %edx  /* arg3 */
     push %ecx  /* arg2 */
     push %ebx  /* arg1 */
     push %eax  /* syscall_num */
     
     call syscall_handler
-    add $16, %esp
+    add $20, %esp
     
     pop %gs
     pop %fs

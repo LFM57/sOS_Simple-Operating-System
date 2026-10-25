@@ -446,9 +446,9 @@ static int pipe_read_close(struct vfs_node* node) {
     if (node->ref_count > 0) return 0;
 
     pipe_t* pipe = (pipe_t*)node->private_data;
-    pipe->readers = 0;
+    if (pipe->readers > 0) pipe->readers--;
     wake_up(&pipe->write_queue);
-    if (pipe->readers == 0 && pipe->writers == 0) {
+    if (pipe->readers <= 0 && pipe->writers <= 0) {
         kfree(pipe);
     }
     node->private_data = NULL;
@@ -460,9 +460,9 @@ static int pipe_write_close(struct vfs_node* node) {
     if (node->ref_count > 0) return 0;
 
     pipe_t* pipe = (pipe_t*)node->private_data;
-    pipe->writers = 0;
+    if (pipe->writers > 0) pipe->writers--;
     wake_up(&pipe->read_queue);
-    if (pipe->readers == 0 && pipe->writers == 0) {
+    if (pipe->readers <= 0 && pipe->writers <= 0) {
         kfree(pipe);
     }
     node->private_data = NULL;
