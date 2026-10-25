@@ -4,7 +4,7 @@
 
 #define PORT_COM1 0x3f8
 
-/* --- NEW GRAPHICS ENGINE --- */
+/* --- GRAPHICS ENGINE --- */
 int is_graphics_mode = 0;
 int show_cursor = 1; /* Global flag to toggle the software cursor */
 uint32_t* lfb_mem = (uint32_t*)0xE0000000;    /* Physical Video RAM mapped here */
@@ -13,6 +13,28 @@ uint32_t g_width = 0, g_height = 0, g_pitch = 0, g_bpp = 0;
 
 uint32_t term_fg_color = 0x00FFFFFF; /* Default: White */
 uint32_t term_bg_color = 0x00000000; /* Default: Black */
+
+/* Fast 32-bit block copy using x86 string instructions (burst hardware speed) */
+static inline void fast_memcpy(void* dest, const void* src, uint32_t dwords) {
+    __asm__ volatile (
+        "cld\n\t"
+        "rep movsl"
+        : "+D"(dest), "+S"(src), "+c"(dwords)
+        :
+        : "memory"
+    );
+}
+
+/* Fast 32-bit block fill using x86 string instructions */
+static inline void fast_memset(void* dest, uint32_t val, uint32_t dwords) {
+    __asm__ volatile (
+        "cld\n\t"
+        "rep stosl"
+        : "+D"(dest), "+c"(dwords)
+        : "a"(val)
+        : "memory"
+    );
+}
 
 void init_graphics(uint32_t phys_addr, uint32_t width, uint32_t height, uint32_t pitch, uint8_t bpp) {
     if (!phys_addr) return; /* Bootloader failed to set graphical mode */
@@ -27,8 +49,7 @@ void init_graphics(uint32_t phys_addr, uint32_t width, uint32_t height, uint32_t
         map_page(0xE0000000 + i, phys_addr + i);
     }
 
-    /* 2. Allocate Backbuffer directly from Physical Memory Manager 
-       (Bypasses kmalloc because a 1024x768x32 screen is 3MB, which would exhaust your 4MB heap!) */
+    /* 2. Allocate Backbuffer directly from Physical Memory Manager */
     for (uint32_t i = 0; i < fb_size; i += 4096) {
         void* page = pmm_alloc_page();
         map_page(0xE1000000 + i, (uint32_t)page);
@@ -39,55 +60,49 @@ void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
     if (!is_graphics_mode || x >= g_width || y >= g_height) return;
     
     uint32_t offset = (y * g_pitch) + (x * (g_bpp / 8));
-    /* Draw to the backbuffer for memory retention (needed for scrolling) */
     *(uint32_t*)((uint8_t*)backbuffer + offset) = color;
-    /* Draw directly to the video card for instant text display without lagging */
     *(uint32_t*)((uint8_t*)lfb_mem + offset) = color; 
 }
 
-void swap_buffers() {
+void swap_buffers(void) {
     if (!is_graphics_mode) return;
-    uint32_t total_bytes = g_height * g_pitch;
+    uint32_t total_dwords = (g_height * g_pitch) / 4;
     
-    /* Fast block copy from RAM backbuffer to Video memory */
-    uint32_t* dest = lfb_mem;
-    uint32_t* src = backbuffer;
-    for (uint32_t i = 0; i < total_bytes / 4; i++) {
-        dest[i] = src[i];
-    }
+    /* Fast block copy from RAM backbuffer to Video memory (completes in ~1 ms) */
+    fast_memcpy(lfb_mem, backbuffer, total_dwords);
 
     update_software_cursor(); 
 }
 
+/* Optimized glyph rendering: writes scanlines directly without per-pixel call overhead */
 void draw_char(char c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color) {
-    if (!is_graphics_mode) return;
+    if (!is_graphics_mode || x + 8 > g_width || y + 16 > g_height) return;
 
-    /* The compiler automatically strides by 16 bytes using array index notation */
     const unsigned char* glyph = font8x16[(unsigned char)c];
+    uint32_t bytes_per_pixel = g_bpp / 8;
+    uint32_t row_offset = (y * g_pitch) + (x * bytes_per_pixel);
 
     for (uint32_t cy = 0; cy < 16; cy++) {
+        uint32_t* bb_row = (uint32_t*)((uint8_t*)backbuffer + row_offset);
+        uint32_t* lfb_row = (uint32_t*)((uint8_t*)lfb_mem + row_offset);
         unsigned char row_bits = glyph[cy];
+
         for (uint32_t cx = 0; cx < 8; cx++) {
-            /* We check each bit from left to right (0x80 is 10000000 in binary) */
-            if (row_bits & (0x80 >> cx)) {
-                put_pixel(x + cx, y + cy, fg_color);
-            } else {
-                /* If bg_color is a specific transparent mask (like 0xFFFFFFFF), you could skip this. 
-                   But for a terminal, we must draw the background to erase old letters. */
-                put_pixel(x + cx, y + cy, bg_color);
-            }
+            uint32_t color = (row_bits & (0x80 >> cx)) ? fg_color : bg_color;
+            bb_row[cx] = color;
+            lfb_row[cx] = color;
         }
+        row_offset += g_pitch;
     }
 }
 
-/* Helper function to test rendering an entire string */
 void draw_string(const char* str, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color) {
     if (!is_graphics_mode) return;
     
     uint32_t current_x = x;
     while (*str) {
         draw_char(*str, current_x, y, fg_color, bg_color);
-        current_x += 8; /* Move 8 pixels to the right for the next character */
+        current_x += 8;
         str++;
     }
 }
@@ -101,11 +116,9 @@ static int ansi_state = 0;
 static int ansi_val = 0;
 static uint16_t vga_attribute = 0x0F00; /* White on black by default */
 
-void scroll(); 
+void scroll(void); 
 
-/* Function to update the hardware cursor */
 void update_cursor(int x, int y) {
-    /* Hardware VGA cursors don't exist in graphics mode, so we bypass it. */
     if (is_graphics_mode) return; 
 
     uint16_t pos = y * 80 + x;
@@ -115,41 +128,33 @@ void update_cursor(int x, int y) {
     outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
 }
 
-/* --- ADD THIS TO print.c (ABOVE write_vga) --- */
-void update_software_cursor() {
+void update_software_cursor(void) {
     if (!is_graphics_mode) return;
     static uint32_t last_cx = 0, last_cy = 0;
+    uint32_t bytes_per_pixel = g_bpp / 8;
 
-    /* 1. RESTORE: Copy the clean text pixels from the backbuffer to erase the old cursor */
-    for (int cy = 0; cy < 16; cy++) {
-        for (int cx = 0; cx < 8; cx++) {
-            uint32_t offset = ((last_cy * 16 + cy) * g_pitch) + ((last_cx * 8 + cx) * (g_bpp / 8));
-            if (offset < g_height * g_pitch) { /* Safety bounds check */
-                uint32_t clean_pixel = *(uint32_t*)((uint8_t*)backbuffer + offset);
-                *(uint32_t*)((uint8_t*)lfb_mem + offset) = clean_pixel;
-            }
+    /* 1. RESTORE: Restore previous cursor glyph area from clean backbuffer */
+    for (int cy = 13; cy < 15; cy++) {
+        uint32_t offset = ((last_cy * 16 + cy) * g_pitch) + (last_cx * 8 * bytes_per_pixel);
+        if (offset + (8 * bytes_per_pixel) <= g_height * g_pitch) {
+            fast_memcpy((uint8_t*)lfb_mem + offset, (uint8_t*)backbuffer + offset, 8);
         }
     }
 
-    /* FIX: If the cursor has been disabled, do not draw the new one */
     if (!show_cursor) return;
 
-    /* 2. DRAW: Draw the new cursor (a 2-pixel underline) directly to the screen (LFB), NOT the backbuffer */
+    /* 2. DRAW: Draw underline cursor (scanlines 13-14) directly into LFB */
     for (int cy = 13; cy < 15; cy++) {
-        for (int cx = 0; cx < 8; cx++) {
-            uint32_t offset = ((cursor_y * 16 + cy) * g_pitch) + ((cursor_x * 8 + cx) * (g_bpp / 8));
-            if (offset < g_height * g_pitch) {
-                *(uint32_t*)((uint8_t*)lfb_mem + offset) = term_fg_color;
-            }
+        uint32_t offset = ((cursor_y * 16 + cy) * g_pitch) + (cursor_x * 8 * bytes_per_pixel);
+        if (offset + (8 * bytes_per_pixel) <= g_height * g_pitch) {
+            fast_memset((uint8_t*)lfb_mem + offset, term_fg_color, 8);
         }
     }
 
-    /* 3. Save current position for the next update */
     last_cx = cursor_x;
     last_cy = cursor_y;
 }
 
-/* Write a character to the VGA screen */
 void write_vga(char c) {
     if (ansi_state == 0) {
         if (c == '\033') {
@@ -163,7 +168,6 @@ void write_vga(char c) {
                 cursor_x = 0;
                 cursor_y++;
             } else if (c == '\b') {
-                /* BUG FIX: Just move the cursor back. Do NOT draw a space here! */
                 if (cursor_x > 0) {
                     cursor_x--;
                 } else if (cursor_y > 0) {
@@ -178,8 +182,6 @@ void write_vga(char c) {
                 if (cursor_x >= term_cols) { cursor_x = 0; cursor_y++; }
             }
             scroll();
-            
-            /* ADD THIS LINE: Update the cursor position visually! */
             update_software_cursor(); 
             return;
         }
@@ -209,15 +211,14 @@ void write_vga(char c) {
         } else if (c == ';') {
             ansi_val = 0; 
         } else if (c == 'm') {
-            /* Apply the requested ANSI color to BOTH VGA and Graphics mode! */
-            if (ansi_val == 0)       { vga_attribute = 0x0F00; term_fg_color = 0x00FFFFFF; } /* Reset */
-            else if (ansi_val == 31) { vga_attribute = 0x0C00; term_fg_color = 0x00FF5555; } /* Red */
-            else if (ansi_val == 32) { vga_attribute = 0x0A00; term_fg_color = 0x0055FF55; } /* Green */
-            else if (ansi_val == 33) { vga_attribute = 0x0E00; term_fg_color = 0x00FFFF55; } /* Yellow */
-            else if (ansi_val == 34) { vga_attribute = 0x0900; term_fg_color = 0x005555FF; } /* Blue */
-            else if (ansi_val == 35) { vga_attribute = 0x0D00; term_fg_color = 0x00FF55FF; } /* Magenta */
-            else if (ansi_val == 36) { vga_attribute = 0x0B00; term_fg_color = 0x0055FFFF; } /* Cyan */
-            else if (ansi_val == 37) { vga_attribute = 0x0700; term_fg_color = 0x00AAAAAA; } /* Gray */
+            if (ansi_val == 0)       { vga_attribute = 0x0F00; term_fg_color = 0x00FFFFFF; }
+            else if (ansi_val == 31) { vga_attribute = 0x0C00; term_fg_color = 0x00FF5555; }
+            else if (ansi_val == 32) { vga_attribute = 0x0A00; term_fg_color = 0x0055FF55; }
+            else if (ansi_val == 33) { vga_attribute = 0x0E00; term_fg_color = 0x00FFFF55; }
+            else if (ansi_val == 34) { vga_attribute = 0x0900; term_fg_color = 0x005555FF; }
+            else if (ansi_val == 35) { vga_attribute = 0x0D00; term_fg_color = 0x00FF55FF; }
+            else if (ansi_val == 36) { vga_attribute = 0x0B00; term_fg_color = 0x0055FFFF; }
+            else if (ansi_val == 37) { vga_attribute = 0x0700; term_fg_color = 0x00AAAAAA; }
             ansi_state = 0;
             ansi_val = 0;
         } else {
@@ -227,34 +228,29 @@ void write_vga(char c) {
     }
 }
 
-/* Scrolling function */
-void scroll() {
+/* Instantaneous Scrolling Engine */
+void scroll(void) {
     if (is_graphics_mode) {
         int term_rows = g_height / 16;
-        
-        if (cursor_y >= term_rows) {
-            uint32_t row_bytes = 16 * g_pitch;
-            uint32_t total_shift_bytes = (term_rows - 1) * row_bytes;
-            
-            /* Shift the backbuffer up by one text row (16 pixels) using 32-bit dwords */
-            uint32_t total_dwords = total_shift_bytes / 4;
-            uint32_t* dst = backbuffer;
-            uint32_t* src = backbuffer + (row_bytes / 4);
-            for (uint32_t i = 0; i < total_dwords; i++) {
-                dst[i] = src[i];
-            }
-            
-            /* Clear the very last text row with the background color */
-            uint32_t* last_line = dst + total_dwords;
-            uint32_t pixels_to_clear = row_bytes / 4;
-            for (uint32_t i = 0; i < pixels_to_clear; i++) {
-                last_line[i] = term_bg_color;
-            }
-            
+        if (cursor_y < term_rows) return;
+
+        uint32_t row_bytes = 16 * g_pitch;
+        uint32_t lines = cursor_y - term_rows + 1;
+
+        if (lines >= (uint32_t)term_rows) {
+            fast_memset(backbuffer, term_bg_color, (g_height * g_pitch) / 4);
+            cursor_y = 0;
+        } else {
+            uint32_t shift_bytes = (term_rows - lines) * row_bytes;
+            /* Shift the backbuffer up in RAM */
+            fast_memcpy(backbuffer, (uint8_t*)backbuffer + (lines * row_bytes), shift_bytes / 4);
+            /* Clear the bottom rows with background color */
+            fast_memset((uint8_t*)backbuffer + shift_bytes, term_bg_color, (lines * row_bytes) / 4);
             cursor_y = term_rows - 1;
-            /* Push the newly shifted backbuffer to the actual screen */
-            swap_buffers(); 
         }
+
+        /* Fast single-pass flush to VRAM */
+        swap_buffers(); 
         return;
     }
 
@@ -274,22 +270,16 @@ void kputc(char c) {
     write_vga(c);
 }
 
-void clear_terminal() {
+void clear_terminal(void) {
     if (is_graphics_mode) {
         uint32_t total_pixels = (g_height * g_pitch) / 4;
-        for (uint32_t i = 0; i < total_pixels; i++) {
-            backbuffer[i] = term_bg_color;
-        }
-
-        // PoC ; not useful on production
-        // draw_test_logo(g_width - 40, 8);
-        
+        fast_memset(backbuffer, term_bg_color, total_pixels);
+        cursor_x = 0; 
+        cursor_y = 0;
         swap_buffers();
-        cursor_x = 0; cursor_y = 0;
         return;
     }
 
-    /* Fallback to legacy VGA text mode */
     for (int i = 0; i < 25 * 80; i++) {
         video_memory[i] = 0x0F20; 
     }
@@ -339,20 +329,15 @@ void draw_sprite(const uint32_t* sprite, uint32_t width, uint32_t height, uint32
             if (x + sx >= g_width || y + sy >= g_height) continue;
 
             uint32_t src_color = sprite[sy * width + sx];
-            uint32_t a = (src_color >> 24) & 0xFF; /* Extract Alpha channel */
+            uint32_t a = (src_color >> 24) & 0xFF;
 
             if (a == 255) {
-                /* Fully opaque, write directly */
                 put_pixel(x + sx, y + sy, src_color);
             } 
             else if (a > 0) {
-                /* Semi-transparent: We must blend with the background */
-                
-                /* 1. Grab the existing pixel from the backbuffer */
                 uint32_t offset = ((y + sy) * g_pitch) + ((x + sx) * (g_bpp / 8));
                 uint32_t bg_color = *(uint32_t*)((uint8_t*)backbuffer + offset);
 
-                /* 2. Separate into Red, Green, Blue */
                 uint32_t br = (bg_color >> 16) & 0xFF;
                 uint32_t bg = (bg_color >> 8) & 0xFF;
                 uint32_t bb = bg_color & 0xFF;
@@ -361,12 +346,10 @@ void draw_sprite(const uint32_t* sprite, uint32_t width, uint32_t height, uint32
                 uint32_t sg = (src_color >> 8) & 0xFF;
                 uint32_t sb = src_color & 0xFF;
 
-                /* 3. Alpha Blending Formula */
                 uint32_t new_r = (sr * a + br * (255 - a)) / 255;
                 uint32_t new_g = (sg * a + bg * (255 - a)) / 255;
                 uint32_t new_b = (sb * a + bb * (255 - a)) / 255;
 
-                /* 4. Reconstruct the blended 32-bit pixel and draw it */
                 uint32_t final_color = (new_r << 16) | (new_g << 8) | new_b;
                 put_pixel(x + sx, y + sy, final_color);
             }
@@ -374,7 +357,6 @@ void draw_sprite(const uint32_t* sprite, uint32_t width, uint32_t height, uint32
     }
 }
 
-/* A small algorithmic sprite to prove alpha blending works without pasting huge arrays */
 void draw_test_logo(uint32_t start_x, uint32_t start_y) {
     uint32_t sprite[32 * 32];
     for (int y = 0; y < 32; y++) {
@@ -384,14 +366,11 @@ void draw_test_logo(uint32_t start_x, uint32_t start_y) {
             int dist_squared = (dx * dx + dy * dy);
             
             if (dist_squared < 256) {
-                /* Create a smooth alpha fade out to the edges */
                 uint32_t alpha = 255 - dist_squared; 
                 if (alpha > 255) alpha = 0;
-                
-                /* Orange core, fading to transparency */
                 sprite[y * 32 + x] = (alpha << 24) | 0x00FF8800; 
             } else {
-                sprite[y * 32 + x] = 0x00000000; /* Fully transparent */
+                sprite[y * 32 + x] = 0x00000000;
             }
         }
     }
