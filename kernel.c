@@ -2423,8 +2423,10 @@ void execute_command() {
     }
     else if (strcmp(cmd, "nano") == 0) {
         if (arg1 != NULL) {
-            char nano_file[64];
-            custom_strcpy(nano_file, arg1);
+            char nano_file[256];
+            int k = 0;
+            while (arg1[k] && k < (int)sizeof(nano_file) - 1) { nano_file[k] = arg1[k]; k++; }
+            nano_file[k] = '\0';
             run_nano(nano_file);
         } else {
             kprintf("Usage: nano <file>\n");
@@ -2432,8 +2434,10 @@ void execute_command() {
     }
     else if (strcmp(cmd, "hex") == 0) {
         if (arg1 != NULL) {
-            char hex_file[64];
-            custom_strcpy(hex_file, arg1);
+            char hex_file[256];
+            int k = 0;
+            while (arg1[k] && k < (int)sizeof(hex_file) - 1) { hex_file[k] = arg1[k]; k++; }
+            hex_file[k] = '\0';
             run_hexdump(hex_file);
         } else {
             kprintf("Usage: hex <filename>\n");
