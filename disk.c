@@ -26,8 +26,19 @@ void ata_read_sector(uint32_t lba, uint8_t *buffer) {
        We also wait for the DRQ bit (Data Request - 0x08) to become 1.
     */
     uint8_t status;
-    while (((status = inb(0x1F7)) & 0x80) || !(status & 0x08)) {
-        /* Do nothing, loop until the drive is ready */
+    uint32_t timeout = 1000000;
+    while (1) {
+        status = inb(0x1F7);
+        if (status == 0xFF || --timeout == 0) {
+            for (int i = 0; i < 512; i++) buffer[i] = 0;
+            return;
+        }
+        if (status & 0x80) continue; /* BSY */
+        if (status & (0x01 | 0x20)) { /* ERR or DF */
+            for (int i = 0; i < 512; i++) buffer[i] = 0;
+            return;
+        }
+        if (status & 0x08) break; /* DRQ ready */
     }
     
     /* 6. The drive is ready. We will read 256 16-bit words (which equals 512 bytes) */
@@ -48,8 +59,13 @@ void ata_write_sector(uint32_t lba, uint8_t *buffer) {
     outb(0x1F7, 0x30); /* WRITE SECTORS command */
     
     uint8_t status;
-    while (((status = inb(0x1F7)) & 0x80) || !(status & 0x08)) {
-        /* Wait for the drive to be ready to receive */
+    uint32_t timeout = 1000000;
+    while (1) {
+        status = inb(0x1F7);
+        if (status == 0xFF || --timeout == 0) return;
+        if (status & 0x80) continue; /* BSY */
+        if (status & (0x01 | 0x20)) return; /* ERR or DF */
+        if (status & 0x08) break; /* DRQ ready */
     }
     
     uint16_t *ptr = (uint16_t *)buffer;
@@ -59,5 +75,6 @@ void ata_write_sector(uint32_t lba, uint8_t *buffer) {
     
     /* Flush the disk cache to force an immediate write */
     outb(0x1F7, 0xEA); 
-    while (inb(0x1F7) & 0x80);
+    timeout = 1000000;
+    while ((inb(0x1F7) & 0x80) && --timeout > 0);
 }
