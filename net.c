@@ -503,7 +503,13 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
                                 }
                                 sockets[i].rx_ready = 1;
                                 sockets[i].ack_num += payload_len;
-                                net_send_tcp_raw(i, 0x10, NULL, 0); /* Send ACK for successful receipt */
+                                if (flags & 0x01) {
+                                    sockets[i].ack_num++;
+                                    sockets[i].tcp_state = TCP_CLOSED;
+                                    net_send_tcp_raw(i, 0x11, NULL, 0); /* Send FIN+ACK */
+                                } else {
+                                    net_send_tcp_raw(i, 0x10, NULL, 0); /* Send ACK for successful receipt */
+                                }
                             } else {
                                 /* Buffer Full! Drop packet and send duplicate ACK to throttle server */
                                 net_send_tcp_raw(i, 0x10, NULL, 0);
