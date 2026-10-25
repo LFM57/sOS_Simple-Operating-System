@@ -2656,11 +2656,23 @@ void execute_command() {
     }
     else if (strcmp(cmd, "update") == 0) {
         if (current_uid != 0) {
-            kprintf("Error: Root privileges required. Use 'sudo update <server_ip:port>'\n");
+            kprintf("Error: Root privileges required. Use 'sudo update [-f|--force] <server_ip:port>'\n");
             goto end_prompt;
         }
-        if (!arg1) {
-            kprintf("Usage: sudo update <server_ip:port>\n");
+
+        int force_update = 0;
+        char* server_arg = arg1;
+
+        if (arg1 && (strcmp(arg1, "-f") == 0 || strcmp(arg1, "--force") == 0)) {
+            force_update = 1;
+            server_arg = arg2;
+        } else if (arg2 && (strcmp(arg2, "-f") == 0 || strcmp(arg2, "--force") == 0)) {
+            force_update = 1;
+            server_arg = arg1;
+        }
+
+        if (!server_arg) {
+            kprintf("Usage: sudo update [-f|--force] <server_ip:port>\n");
             kprintf("Example: sudo update 10.0.2.2:8080\n");
             goto end_prompt;
         }
@@ -2669,20 +2681,20 @@ void execute_command() {
         kprintf("       sOS Over-The-Air Update          \n");
         kprintf("========================================\n");
 
-        /* Parse host and optional port from arg1 (e.g. 10.0.2.2:8080) */
+        /* Parse host and optional port from server_arg (e.g. 10.0.2.2:8080) */
         char host[64];
         uint16_t port = 80;
         int idx = 0;
-        while (arg1[idx] && arg1[idx] != ':' && idx < 63) {
-            host[idx] = arg1[idx];
+        while (server_arg[idx] && server_arg[idx] != ':' && server_arg[idx] != ' ' && idx < 63) {
+            host[idx] = server_arg[idx];
             idx++;
         }
         host[idx] = '\0';
-        if (arg1[idx] == ':') {
+        if (server_arg[idx] == ':') {
             idx++;
             port = 0;
-            while (arg1[idx] >= '0' && arg1[idx] <= '9') {
-                port = port * 10 + (arg1[idx] - '0');
+            while (server_arg[idx] >= '0' && server_arg[idx] <= '9') {
+                port = port * 10 + (server_arg[idx] - '0');
                 idx++;
             }
         }
@@ -2736,10 +2748,13 @@ void execute_command() {
         }
         
         if (!match) {
-            kprintf("\n\033[31mCRITICAL ERROR: Signature mismatch! Update rejected.\033[0m\n");
-            kprintf("The file is corrupt, unsigned, or has been tampered with.\n");
-            kfree(sig_data); kfree(bin_data);
-            goto end_prompt;
+            if (!force_update) {
+                kprintf("\n\033[31mCRITICAL ERROR: Signature mismatch! Update rejected.\033[0m\n");
+                kprintf("The file is corrupt, unsigned, or has been tampered with.\n");
+                kfree(sig_data); kfree(bin_data);
+                goto end_prompt;
+            }
+            kprintf("\n\033[33m[WARNING] Signature mismatch! Proceeding anyway (--force).\033[0m\n");
         }
 
         kprintf("[+] Checking current version against update...\n\n");
@@ -2752,9 +2767,12 @@ void execute_command() {
                     if (cur_bin[j] != bin_data[j]) { is_diff = 1; break; }
                 }
                 if (!is_diff) {
-                    kprintf("\033[32mYour system is already up to date\033[0m\n");
-                    kfree(cur_bin); kfree(sig_data); kfree(bin_data);
-                    goto end_prompt;
+                    if (!force_update) {
+                        kprintf("\033[32mYour system is already up to date\033[0m\n");
+                        kfree(cur_bin); kfree(sig_data); kfree(bin_data);
+                        goto end_prompt;
+                    }
+                    kprintf("\033[33m[WARNING] System is already up to date. Forcing update (--force)...\033[0m\n\n");
                 }
             }
             kfree(cur_bin);
