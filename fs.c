@@ -315,12 +315,25 @@ void fs_chown(const char* filename, uint8_t new_uid) {
     }
 
     /* Standard processing of a single file */
-    char fat_name[11]; to_fat_name(filename, fat_name);
-    fat_dir_entry_t entry; uint32_t dir_sec; int dir_idx;
-    
-    if (!find_entry(fat_name, &entry, &dir_sec, &dir_idx)) {
+    uint32_t parent_cluster, parent_sector;
+    char fat_name[11];
+    if (!resolve_path(filename, &parent_cluster, &parent_sector, fat_name) || fat_name[0] == '\0') {
         kprintf("Error: '%s' not found.\n", filename); return;
     }
+
+    uint32_t old_cluster = current_dir_cluster;
+    uint32_t old_sector = current_dir_sector;
+    current_dir_cluster = parent_cluster;
+    current_dir_sector = parent_sector;
+
+    fat_dir_entry_t entry; uint32_t dir_sec; int dir_idx;
+    if (!find_entry(fat_name, &entry, &dir_sec, &dir_idx)) {
+        current_dir_cluster = old_cluster;
+        current_dir_sector = old_sector;
+        kprintf("Error: '%s' not found.\n", filename); return;
+    }
+    current_dir_cluster = old_cluster;
+    current_dir_sector = old_sector;
     uint8_t active_uid = get_active_uid();
     if (active_uid != 0 && (entry.sec_byte & 0x0F) != active_uid) {
         kprintf("Error: Operation not permitted.\n"); return;
@@ -417,10 +430,25 @@ void fs_chmod(const char* filename, uint8_t new_perms) {
     }
 
     /* Standard processing of a single file */
-    char fat_name[11]; to_fat_name(filename, fat_name);
+    uint32_t parent_cluster, parent_sector;
+    char fat_name[11];
+    if (!resolve_path(filename, &parent_cluster, &parent_sector, fat_name) || fat_name[0] == '\0') {
+        kprintf("Error: '%s' not found.\n", filename); return;
+    }
+
+    uint32_t old_cluster = current_dir_cluster;
+    uint32_t old_sector = current_dir_sector;
+    current_dir_cluster = parent_cluster;
+    current_dir_sector = parent_sector;
+
     fat_dir_entry_t entry; uint32_t dir_sec; int dir_idx;
-    
-    if (!find_entry(fat_name, &entry, &dir_sec, &dir_idx)) { kprintf("Error: '%s' not found.\n", filename); return; }
+    if (!find_entry(fat_name, &entry, &dir_sec, &dir_idx)) {
+        current_dir_cluster = old_cluster;
+        current_dir_sector = old_sector;
+        kprintf("Error: '%s' not found.\n", filename); return;
+    }
+    current_dir_cluster = old_cluster;
+    current_dir_sector = old_sector;
     uint8_t active_uid = get_active_uid();
     if (active_uid != 0 && (entry.sec_byte & 0x0F) != active_uid) {
         kprintf("Error: Operation not permitted.\n"); return;
@@ -825,15 +853,38 @@ void fs_cd(const char* path) {
 }
 
 void fs_mkdir(const char* dirname) {
-    int len = 0; while(dirname[len] != '\0') len++;
-    if (len > 8) { kprintf("Error: Directory name too long.\n"); return; }
+    uint32_t parent_cluster, parent_sector;
+    char fat_name[11];
+    if (!resolve_path(dirname, &parent_cluster, &parent_sector, fat_name) || fat_name[0] == '\0' || fat_name[0] == '.') {
+        kprintf("Error: Invalid path '%s'.\n", dirname);
+        return;
+    }
 
-    char fat_name[11]; to_fat_name(dirname, fat_name);
-    if (find_entry(fat_name, NULL, NULL, NULL)) { kprintf("Error: '%s' already exists.\n", dirname); return; }
+    int end = 0;
+    while (dirname[end] != '\0') end++;
+    while (end > 0 && dirname[end - 1] == '/') end--;
+    int start = end;
+    while (start > 0 && dirname[start - 1] != '/') start--;
+    int len = end - start;
+    if (len == 0 || len > 8) { kprintf("Error: Directory name too long.\n"); return; }
+
+    uint32_t old_cluster = current_dir_cluster;
+    uint32_t old_sector = current_dir_sector;
+    current_dir_cluster = parent_cluster;
+    current_dir_sector = parent_sector;
+
+    if (find_entry(fat_name, NULL, NULL, NULL)) {
+        kprintf("Error: '%s' already exists.\n", dirname);
+        current_dir_cluster = old_cluster;
+        current_dir_sector = old_sector;
+        return;
+    }
 
     /* [SECURITY] Check if the user has permission to write to the current directory */
     if (!check_current_dir_permission(1)) {
         kprintf("Error: Permission denied (Write access required).\n");
+        current_dir_cluster = old_cluster;
+        current_dir_sector = old_sector;
         return;
     }
 
@@ -846,13 +897,21 @@ void fs_mkdir(const char* dirname) {
             break;
         }
     }
-    if (!free_cluster) { kprintf("Error: No space left on device.\n"); return; }
+    if (!free_cluster) {
+        kprintf("Error: No space left on device.\n");
+        current_dir_cluster = old_cluster;
+        current_dir_sector = old_sector;
+        return;
+    }
 
     /* 2. Save the directory name in the current directory */
     uint32_t target_sec;
     int free_entry;
     if (!find_free_entry(&target_sec, &free_entry)) {
+        write_fat_entry(free_cluster, 0x00000000);
         kprintf("Error: No space left in parent folder.\n");
+        current_dir_cluster = old_cluster;
+        current_dir_sector = old_sector;
         return;
     }
 
@@ -886,13 +945,16 @@ void fs_mkdir(const char* dirname) {
     for(int i=0; i<11; i++) new_dir[1].name[i] = ' ';
     new_dir[1].name[0] = '.'; new_dir[1].name[1] = '.';
     new_dir[1].attributes = 0x10;
-    uint32_t parent_cluster = (current_dir_cluster == root_cluster) ? 0 : current_dir_cluster;
-    set_cluster(new_dir[1], parent_cluster);
+    uint32_t dotdot_cluster = (current_dir_cluster == root_cluster) ? 0 : current_dir_cluster;
+    set_cluster(new_dir[1], dotdot_cluster);
 
     /* Save this new directory to its new disk space */
     uint32_t new_sec_lba = data_start + ((free_cluster - 2) * sectors_per_cluster);
     ata_write_sector(new_sec_lba, new_dir_sec);
     kfree(new_dir_sec);
+
+    current_dir_cluster = old_cluster;
+    current_dir_sector = old_sector;
 }
 
 void fs_cat(const char* filename) {
