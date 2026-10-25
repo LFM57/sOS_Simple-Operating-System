@@ -2066,14 +2066,14 @@ void execute_command() {
             while (*p >= '0' && *p <= '9') { pid = pid * 10 + (*p - '0'); p++; }
             if (pid == 0) {
                 kprintf("Error: Cannot kill the system Shell.\n");
-            } else if (pid >= MAX_TASKS || tasks[pid].state == 0) {
+            } else if (pid >= MAX_TASKS || tasks[pid].state == 0 || tasks[pid].state == 3) {
                 kprintf("Error: No active process with PID %d.\n", pid);
             } else {
                 /* SECURITY: Only the creator (or root UID 0) can kill the task */
                 if (current_uid != 0 && tasks[pid].uid != current_uid) {
                     kprintf("Error: Operation not permitted (You do not own this process).\n");
                 } else {
-                    cleanup_task_memory(pid);
+                    tasks[pid].state = 3;
                     kprintf("Process %d terminated and memory freed.\n", pid);
                 }
             }
