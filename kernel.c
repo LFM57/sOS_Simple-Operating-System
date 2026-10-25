@@ -1811,6 +1811,10 @@ int http_get(const char* host, uint16_t port, const char* path, uint8_t** out_da
     
     uint32_t MAX_DL_SIZE = 1024 * 1024; /* 1 MB limit */
     uint8_t* http_data = (uint8_t*)kmalloc(MAX_DL_SIZE); 
+    if (!http_data) {
+        sockets[sock_idx].is_used = 0;
+        return 0;
+    }
     uint32_t http_len = 0;
     int conn_closed = 0;
     start = timer_ticks;
@@ -1848,7 +1852,11 @@ int http_get(const char* host, uint16_t port, const char* path, uint8_t** out_da
     
     uint32_t file_size = http_len - payload_start;
     /* Allocate exact size, copy payload, and free the massive buffer! */
-    uint8_t* clean_buf = (uint8_t*)kmalloc(file_size);
+    uint8_t* clean_buf = (uint8_t*)kmalloc(file_size ? file_size : 1);
+    if (!clean_buf) {
+        kfree(http_data);
+        return 0;
+    }
     for(uint32_t i=0; i<file_size; i++) clean_buf[i] = http_data[payload_start + i];
     
     kfree(http_data);
