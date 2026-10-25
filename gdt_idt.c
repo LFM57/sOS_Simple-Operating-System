@@ -493,7 +493,7 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         uint32_t start = timer_ticks;
         while(sockets[sock_idx].tcp_state != TCP_ESTABLISHED) {
             if (timer_ticks > start + 500) return (uint32_t)-1; 
-            __asm__ volatile ("hlt");
+            sleep_on(&sockets[sock_idx].wait_queue);
         }
         return 0;
     }

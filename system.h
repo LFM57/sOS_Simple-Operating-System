@@ -138,6 +138,22 @@ extern int fs_error;
 #define TYPE_SOCKET 3
 #define TYPE_PIPE   4
 
+typedef struct task task_t;
+
+typedef struct wait_node {
+    task_t* task;
+    struct wait_node* next;
+} wait_node_t;
+
+typedef struct {
+    wait_node_t* head;
+} wait_queue_t;
+
+void sleep_on(wait_queue_t* queue);
+void wake_up(wait_queue_t* queue);
+void yield(void);
+extern wait_queue_t console_queue;
+
 typedef struct {
     uint8_t dest_ip[4];
     uint16_t dest_port;
@@ -153,7 +169,7 @@ typedef struct {
     struct vfs_node* node;
 } file_descriptor_t;
 
-typedef struct {
+struct task {
     uint32_t esp;
     uint32_t kernel_esp;
     uint32_t id;
@@ -167,6 +183,6 @@ typedef struct {
     void* kernel_stack;
     uint32_t prog_break;
     file_descriptor_t open_files[MAX_OPEN_FILES];
-} task_t;
+};
 
 #endif

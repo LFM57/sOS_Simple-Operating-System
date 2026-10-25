@@ -2,6 +2,7 @@
 #define NET_H
 
 #include <stdint.h>
+#include "system.h"
 
 #define htons(x) (uint16_t)( (((uint16_t)(x)) << 8) | (((uint16_t)(x)) >> 8) )
 #define ntohs(x) htons(x)
@@ -108,6 +109,7 @@ typedef struct {
     uint8_t rx_buffer[SOCK_BUF_SIZE];
     uint32_t rx_len; /* Changed to 32-bit to handle larger files */
     int rx_ready;
+    wait_queue_t wait_queue;
 } socket_t;
 
 int net_alloc_socket(int type);

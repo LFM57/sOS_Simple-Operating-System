@@ -342,6 +342,8 @@ typedef struct {
     uint32_t count;
     int readers;
     int writers;
+    wait_queue_t read_queue;
+    wait_queue_t write_queue;
 } pipe_t;
 
 static vfs_ops_t pipe_read_ops;
@@ -350,7 +352,7 @@ static vfs_ops_t pipe_write_ops;
 static int pipe_has_other_task_writer(pipe_t* pipe) {
     for (int t = 0; t < MAX_TASKS; t++) {
         if (t == current_task) continue;
-        if (tasks[t].state != 1 && tasks[t].state != 2) continue;
+        if (tasks[t].state == 0 || tasks[t].state == 3) continue;
         for (int f = 0; f < MAX_OPEN_FILES; f++) {
             if (tasks[t].open_files[f].is_used &&
                 tasks[t].open_files[f].node != NULL &&
@@ -366,7 +368,7 @@ static int pipe_has_other_task_writer(pipe_t* pipe) {
 static int pipe_has_other_task_reader(pipe_t* pipe) {
     for (int t = 0; t < MAX_TASKS; t++) {
         if (t == current_task) continue;
-        if (tasks[t].state != 1 && tasks[t].state != 2) continue;
+        if (tasks[t].state == 0 || tasks[t].state == 3) continue;
         for (int f = 0; f < MAX_OPEN_FILES; f++) {
             if (tasks[t].open_files[f].is_used &&
                 tasks[t].open_files[f].node != NULL &&
@@ -385,15 +387,12 @@ static int pipe_vfs_read(struct vfs_node* node, uint32_t offset, uint32_t size, 
     if (size == 0) return 0;
 
     pipe_t* pipe = (pipe_t*)node->private_data;
-    uint32_t eflags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
 
     while (pipe->count == 0) {
         if (pipe->writers == 0 || !pipe_has_other_task_writer(pipe)) {
-            __asm__ volatile("push %0; popf" : : "r"(eflags));
             return 0;
         }
-        __asm__ volatile("sti; hlt; cli");
+        sleep_on(&pipe->read_queue);
     }
 
     uint32_t bytes_to_read = (size < pipe->count) ? size : pipe->count;
@@ -404,7 +403,7 @@ static int pipe_vfs_read(struct vfs_node* node, uint32_t offset, uint32_t size, 
     pipe->count -= bytes_to_read;
     node->size = pipe->count;
 
-    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    wake_up(&pipe->write_queue);
     return (int)bytes_to_read;
 }
 
@@ -414,11 +413,8 @@ static int pipe_vfs_write(struct vfs_node* node, uint32_t offset, uint32_t size,
     if (size == 0) return 0;
 
     pipe_t* pipe = (pipe_t*)node->private_data;
-    uint32_t eflags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
 
     if (pipe->readers == 0) {
-        __asm__ volatile("push %0; popf" : : "r"(eflags));
         return -1;
     }
 
@@ -426,24 +422,22 @@ static int pipe_vfs_write(struct vfs_node* node, uint32_t offset, uint32_t size,
     while (written < size) {
         while (pipe->count == PIPE_BUF_SIZE) {
             if (pipe->readers == 0) {
-                __asm__ volatile("push %0; popf" : : "r"(eflags));
                 return (written > 0) ? (int)written : -1;
             }
             if (!pipe_has_other_task_reader(pipe)) {
-                __asm__ volatile("push %0; popf" : : "r"(eflags));
                 return (int)written;
             }
-            __asm__ volatile("sti; hlt; cli");
+            sleep_on(&pipe->write_queue);
         }
         while (written < size && pipe->count < PIPE_BUF_SIZE) {
             pipe->buffer[pipe->write_pos] = buffer[written++];
             pipe->write_pos = (pipe->write_pos + 1) % PIPE_BUF_SIZE;
             pipe->count++;
         }
+        wake_up(&pipe->read_queue);
     }
     node->size = pipe->count;
 
-    __asm__ volatile("push %0; popf" : : "r"(eflags));
     return (int)written;
 }
 
@@ -453,6 +447,7 @@ static int pipe_read_close(struct vfs_node* node) {
 
     pipe_t* pipe = (pipe_t*)node->private_data;
     pipe->readers = 0;
+    wake_up(&pipe->write_queue);
     if (pipe->readers == 0 && pipe->writers == 0) {
         kfree(pipe);
     }
@@ -466,6 +461,7 @@ static int pipe_write_close(struct vfs_node* node) {
 
     pipe_t* pipe = (pipe_t*)node->private_data;
     pipe->writers = 0;
+    wake_up(&pipe->read_queue);
     if (pipe->readers == 0 && pipe->writers == 0) {
         kfree(pipe);
     }
@@ -516,6 +512,8 @@ int vfs_create_pipe(vfs_node_t** out_read_node, vfs_node_t** out_write_node) {
     pipe->count = 0;
     pipe->readers = 1;
     pipe->writers = 1;
+    pipe->read_queue.head = NULL;
+    pipe->write_queue.head = NULL;
 
     for (int i = 0; i < 64; i++) {
         r_node->name[i] = 0;

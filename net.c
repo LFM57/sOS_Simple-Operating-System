@@ -207,6 +207,7 @@ int net_alloc_socket(int type) {
             sockets[i].type = type; /* 1 = UDP, 2 = TCP */
             sockets[i].tcp_state = TCP_CLOSED;
             sockets[i].rx_len = 0;
+            sockets[i].wait_queue.head = NULL;
             return i;
         }
     }
@@ -500,6 +501,7 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
                             sockets[i].seq_num++; /* SYN consumes 1 seq */
                             sockets[i].tcp_state = TCP_ESTABLISHED;
                             net_send_tcp_raw(i, 0x10, NULL, 0); /* Send ACK */
+                            wake_up(&sockets[i].wait_queue);
                         }
                         
                         /* State 2: Established & Receiving Data (PSH or just data) */
@@ -529,6 +531,7 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
                                 } else {
                                     net_send_tcp_raw(i, 0x10, NULL, 0); /* Send ACK for successful receipt */
                                 }
+                                wake_up(&sockets[i].wait_queue);
                             } else {
                                 /* Buffer Full! Drop packet and send duplicate ACK to throttle server */
                                 net_send_tcp_raw(i, 0x10, NULL, 0);
@@ -547,6 +550,7 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
                             sockets[i].ack_num++;
                             sockets[i].tcp_state = TCP_CLOSED;
                             net_send_tcp_raw(i, 0x11, NULL, 0); /* Send FIN+ACK */
+                            wake_up(&sockets[i].wait_queue);
                         }
                         break;
                     }

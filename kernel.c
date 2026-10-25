@@ -186,8 +186,96 @@ struct multiboot_info {
 } __attribute__((packed));
 
 /* --- MULTITASKING (Context Switching) --- */
+#define IDLE_TASK_ID (MAX_TASKS - 1)
 task_t tasks[MAX_TASKS];
 int current_task = -1;
+wait_queue_t console_queue = {0};
+
+static void remove_wait_node(wait_queue_t* queue, wait_node_t* node) {
+    if (!queue || !node) return;
+    if (queue->head == node) {
+        queue->head = node->next;
+        return;
+    }
+    wait_node_t* prev = queue->head;
+    while (prev && prev->next != node) {
+        prev = prev->next;
+    }
+    if (prev) {
+        prev->next = node->next;
+    }
+}
+
+void sleep_on(wait_queue_t* queue) {
+    if (!queue || current_task < 0 || current_task == IDLE_TASK_ID) return;
+
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
+    wait_node_t node;
+    node.task = &tasks[current_task];
+    node.next = queue->head;
+    queue->head = &node;
+
+    tasks[current_task].state = 4; /* BLOCKED */
+
+    yield();
+
+    remove_wait_node(queue, &node);
+
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
+}
+
+void wake_up(wait_queue_t* queue) {
+    if (!queue) return;
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
+    wait_node_t* curr = queue->head;
+    while (curr) {
+        if (curr->task && curr->task->state == 4) {
+            curr->task->state = 2; /* READY */
+        }
+        curr = curr->next;
+    }
+    queue->head = NULL;
+
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
+}
+
+static void idle_task_entry(void) {
+    while (1) {
+        __asm__ volatile("sti; hlt");
+    }
+}
+
+static void create_idle_task(void) {
+    int id = IDLE_TASK_ID;
+    uint32_t* stack = (uint32_t*)pmm_alloc_page();
+    if (!stack) return;
+    uint32_t* top = (uint32_t*)((uint32_t)stack + 4096);
+
+    *(--top) = 0x202;                /* EFLAGS (IF=1) */
+    *(--top) = 0x08;                 /* CS (Kernel Code) */
+    *(--top) = (uint32_t)idle_task_entry;
+
+    *(--top) = 0; *(--top) = 0; *(--top) = 0; *(--top) = 0;
+    *(--top) = 0; *(--top) = 0; *(--top) = 0; *(--top) = 0;
+
+    *(--top) = 0x10; *(--top) = 0x10; *(--top) = 0x10; *(--top) = 0x10;
+
+    tasks[id].esp = (uint32_t)top;
+    tasks[id].kernel_esp = (uint32_t)stack + 4096;
+    tasks[id].kernel_stack = (void*)stack;
+    tasks[id].user_stack = NULL;
+    tasks[id].code_page = NULL;
+    tasks[id].id = id;
+    tasks[id].uid = 0;
+    tasks[id].page_directory = kernel_page_directory;
+    init_task_fds(&tasks[id]);
+    tasks[id].state = 2; /* Always READY */
+    tasks[id].is_background = 1;
+}
 
 uint8_t get_active_uid() {
     if (current_task == -1) return current_uid; /* Security fallback on startup */
@@ -208,27 +296,36 @@ void init_multitasking() {
     current_task = 0;
 
     init_task_fds(&tasks[0]);
+    create_idle_task();
 }
 
 uint32_t schedule(uint32_t current_esp) {
     if (current_task == -1) return current_esp;
 
     /* Clean up any zombie task while running safely in another task's context */
-    for (int i = 1; i < MAX_TASKS; i++) {
+    for (int i = 1; i < IDLE_TASK_ID; i++) {
         if (tasks[i].state == 3 && i != current_task) {
             cleanup_task_memory(i);
         }
     }
 
     if (tasks[current_task].state == 1) {
-        tasks[current_task].esp = current_esp;
         tasks[current_task].state = 2; 
     }
+    tasks[current_task].esp = current_esp;
 
-    int next_task = current_task;
-    do {
-        next_task = (next_task + 1) % MAX_TASKS;
-    } while (tasks[next_task].state != 2);
+    int next_task = -1;
+    for (int i = 0; i < IDLE_TASK_ID; i++) {
+        int idx = (current_task + 1 + i) % IDLE_TASK_ID;
+        if (tasks[idx].state == 2) {
+            next_task = idx;
+            break;
+        }
+    }
+
+    if (next_task == -1) {
+        next_task = IDLE_TASK_ID;
+    }
 
     if (current_task != next_task) {
         current_task = next_task;
@@ -249,6 +346,8 @@ uint32_t schedule(uint32_t current_esp) {
 }
 
 void cleanup_task_memory(int id) {
+    if (id == IDLE_TASK_ID) return;
+
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
 
@@ -315,7 +414,7 @@ void kill_current_task() {
 
 void create_task(void (*entry_point)()) {
     int id = -1;
-    for(int i = 1; i < MAX_TASKS; i++) {
+    for(int i = 1; i < IDLE_TASK_ID; i++) {
         if (tasks[i].state == 0) { id = i; break; }
     }
     if (id == -1) { kprintf("Error: Max threads reached.\n"); return; }
@@ -380,6 +479,14 @@ void init_pit() {
 uint32_t timer_handler(uint32_t esp) {
     timer_ticks++;
     outb(0x20, 0x20); 
+    if (timer_ticks % 50 == 0) {
+        extern socket_t sockets[];
+        for (int s = 0; s < MAX_SOCKETS; s++) {
+            if (sockets[s].is_used && sockets[s].type == 2 && sockets[s].tcp_state == TCP_SYN_SENT) {
+                wake_up(&sockets[s].wait_queue);
+            }
+        }
+    }
     return schedule(esp);
 }
 
@@ -408,7 +515,7 @@ void kernel_gets(char* buffer, int max_len, int hidden, int allow_empty) {
     int i = 0;
     is_kernel_gets_active = 1;
     while (i < max_len - 1) {
-        while (!kbd_buf_has_char()) { __asm__ volatile("sti; hlt"); }
+        while (!kbd_buf_has_char()) { sleep_on(&console_queue); }
         char c = kbd_buf_get();
         
         if (c == 3) { /* Ctrl+C pressed */
@@ -703,6 +810,7 @@ void keyboard_handler() {
             else if (shell_input_enabled) {
                 handle_input_char(ascii);
             }
+            wake_up(&console_queue);
         }
     }
     outb(0x20, 0x20); 
@@ -752,6 +860,7 @@ void serial_handler() {
         } else if (shell_input_enabled) {
             handle_input_char(c);
         }
+        wake_up(&console_queue);
     }
     outb(0x20, 0x20);
 }
@@ -759,7 +868,7 @@ void serial_handler() {
 char wait_key(void) {
     is_kernel_gets_active = 1;
     while (!kbd_buf_has_char()) {
-        __asm__ volatile("sti; hlt");
+        sleep_on(&console_queue);
     }
     char c = kbd_buf_get();
     is_kernel_gets_active = 0;
@@ -826,7 +935,7 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
 
     /* 2. Search for a free task slot */
     int id = -1;
-    for(int i = 1; i < MAX_TASKS; i++) {
+    for(int i = 1; i < IDLE_TASK_ID; i++) {
         if (tasks[i].state == 0) { id = i; break; }
     }
     if (id == -1) { kprintf("Error: Max threads reached.\n"); return -1; }
@@ -2192,8 +2301,8 @@ static void execute_single_command(int is_bg) {
         kprintf("-------------------------\n");
         for(int i = 0; i < MAX_TASKS; i++) {
             if (tasks[i].state != 0) {
-                const char* type = (i == 0) ? "Shell" : (tasks[i].code_page == NULL ? "SysTask" : "UserApp");
-                const char* state = (tasks[i].state == 1) ? "RUNNING" : ((tasks[i].state == 3) ? "ZOMBIE" : "READY");
+                const char* type = (i == 0) ? "Shell" : ((i == IDLE_TASK_ID) ? "Idle" : (tasks[i].code_page == NULL ? "SysTask" : "UserApp"));
+                const char* state = (tasks[i].state == 1) ? "RUNNING" : ((tasks[i].state == 3) ? "ZOMBIE" : ((tasks[i].state == 4) ? "BLOCKED" : "READY"));
                 kprintf(" %d  | %s", i, type);
                 int len = 0; while(type[len]) len++;
                 for(int s = len; s < 10; s++) kprintf(" ");
@@ -3218,11 +3327,11 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
     logout_and_login(NULL);
 
     while(1) {
-        if (cmd_ready) {
-            session_reset = 0;
-            execute_command();
-            cmd_ready = 0;
+        while (!cmd_ready) {
+            sleep_on(&console_queue);
         }
-        __asm__ volatile ("hlt");
+        session_reset = 0;
+        execute_command();
+        cmd_ready = 0;
     }
 }

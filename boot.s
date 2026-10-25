@@ -124,6 +124,38 @@ irq0:
     popa
     iret
 
+/* Voluntary context switch (yield) */
+.global yield
+.type yield, @function
+yield:
+    pushf
+    push %cs
+    push $1f
+    pusha
+    push %ds
+    push %es
+    push %fs
+    push %gs
+
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+
+    push %esp
+    call schedule
+    mov %eax, %esp
+
+    pop %gs
+    pop %fs
+    pop %es
+    pop %ds
+    popa
+    iret
+1:
+    ret
+
 /* Old IRQ1 (PS/2 Keyboard) */
 .global irq1
 .type irq1, @function
