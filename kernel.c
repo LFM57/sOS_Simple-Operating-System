@@ -25,7 +25,6 @@ uint8_t current_uid = 0;
 char current_user[32] = "root";
 
 volatile int is_kernel_gets_active = 0;
-volatile char kernel_gets_char = 0;
 volatile int cmd_ready = 0;
 volatile int ctrl_active = 0;
 volatile int is_logging_out = 0;
@@ -420,9 +419,8 @@ void kernel_gets(char* buffer, int max_len, int hidden, int allow_empty) {
     int i = 0;
     is_kernel_gets_active = 1;
     while (i < max_len - 1) {
-        kernel_gets_char = 0;
-        while (kernel_gets_char == 0) { __asm__ volatile("hlt"); }
-        char c = kernel_gets_char;
+        while (!kbd_buf_has_char()) { __asm__ volatile("sti; hlt"); }
+        char c = kbd_buf_get();
         
         if (c == 3) { /* Ctrl+C pressed */
             buffer[0] = '\0';
@@ -711,7 +709,6 @@ void keyboard_handler() {
             /* Scenario 2: Active prompt or application (nano, wait_key, kernel_gets) */
             else if (!shell_input_enabled || is_kernel_gets_active) {
                 kbd_buf_put(ascii);
-                kernel_gets_char = ascii;
             } 
             /* Scenario 3: Shell command line */
             else if (shell_input_enabled) {
@@ -763,7 +760,6 @@ void serial_handler() {
         
         if (!shell_input_enabled || is_kernel_gets_active) {
             kbd_buf_put(c);
-            kernel_gets_char = c;
         } else if (shell_input_enabled) {
             handle_input_char(c);
         }
@@ -2825,6 +2821,7 @@ void execute_command() {
     }
 
 end_prompt:
+    kbd_buf_clear();
     cmd_idx = 0; 
     cmd_buffer[0] = '\0';
     cursor_pos = 0;       /* Cleans up cursor position */
@@ -2834,6 +2831,8 @@ end_prompt:
 }
 
 void logout_and_login(const char* message) {
+    shell_input_enabled = 0;
+    kbd_buf_clear();
     session_reset = 1;   /* Invalidate current session */
     is_logging_out = 1; /* Activate logout flag */
     
