@@ -124,6 +124,8 @@ int arp_resolve(uint8_t* dest_ip, uint8_t* out_mac) {
 /* --- TCP KERNEL STACK --- */
 
 void net_send_tcp_raw(int sock_idx, uint8_t flags, uint8_t* payload, uint16_t len) {
+    if (len > 1460) len = 1460;
+
     uint8_t dest_mac[6];
     if (!arp_resolve(sockets[sock_idx].remote_ip, dest_mac)) {
         kprintf("[TCP] Target Unreachable (ARP Timeout)\n");
@@ -168,7 +170,7 @@ void net_send_tcp_raw(int sock_idx, uint8_t flags, uint8_t* payload, uint16_t le
     for(int i=0; i<len; i++) data[i] = payload[i];
 
     /* 5. Calculate TCP Checksum (requires pseudo header) */
-    uint8_t chksum_buf[2048];
+    static uint8_t chksum_buf[2048];
     tcp_pseudo_hdr_t* p_hdr = (tcp_pseudo_hdr_t*)chksum_buf;
     for(int i=0; i<4; i++) { p_hdr->src_ip[i] = sOS_ip[i]; p_hdr->dst_ip[i] = sockets[sock_idx].remote_ip[i]; }
     p_hdr->zeros = 0; p_hdr->proto = 6; p_hdr->tcp_len = htons(tcp_total_len);

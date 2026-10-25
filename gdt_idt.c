@@ -468,13 +468,15 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         uint8_t* buf = (uint8_t*)arg2;
         uint32_t len = (uint32_t)arg3;
         if (!is_valid_user_range((uint32_t)buf, len)) return (uint32_t)-1;
+        if (fd < 0 || fd >= MAX_OPEN_FILES || tasks[current_task].open_files[fd].type != TYPE_SOCKET) return (uint32_t)-1;
+        if (len > 1460) len = 1460;
         int sock_idx = tasks[current_task].open_files[fd].offset;
         
         extern void net_send_tcp_raw(int, uint8_t, uint8_t*, uint16_t);
         extern socket_t sockets[];
         
         /* Send data with PSH + ACK flag (0x18) */
-        net_send_tcp_raw(sock_idx, 0x18, buf, len);
+        net_send_tcp_raw(sock_idx, 0x18, buf, (uint16_t)len);
         sockets[sock_idx].seq_num += len;
         return len;
     }
