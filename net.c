@@ -549,6 +549,7 @@ int net_gethostbyname(const char* hostname, uint8_t* out_ip) {
     }
 
     int sock = net_alloc_socket(1);
+    if (sock == -1) return 0;
     sockets[sock].local_port = 45678;
 
     uint8_t buf[512];
