@@ -4,6 +4,7 @@
 /* --- New descriptor-based I/O system calls --- */
 int write(int fd, const void* buf, unsigned int count);
 int read(int fd, void* buf, unsigned int count);
+int close(int fd);
 
 /* Updated basic system calls */
 void print(const char* str);

@@ -16,6 +16,12 @@ int read(int fd, void* buf, unsigned int count) {
     return ret;
 }
 
+int close(int fd) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(17), "b"(fd));
+    return ret;
+}
+
 /* The print() function uses standard write to stdout (FD 1) */
 void print(const char* str) {
     write(1, str, strlen(str));
@@ -233,6 +239,7 @@ int gethostbyname(const char* hostname, unsigned char* out_ip) {
     }
 
     int sock = socket();
+    if (sock < 0) return 0;
     bind(sock, 45678); /* Ephemeral port */
 
     unsigned char buf[512];
@@ -308,6 +315,7 @@ int gethostbyname(const char* hostname, unsigned char* out_ip) {
                         out_ip[1] = rx_buf[offset+1];
                         out_ip[2] = rx_buf[offset+2];
                         out_ip[3] = rx_buf[offset+3];
+                        close(sock);
                         return 1;
                     }
                     /* Not an A record (e.g. CNAME), skip its data chunk */
@@ -319,6 +327,7 @@ int gethostbyname(const char* hostname, unsigned char* out_ip) {
         sleep(50);
         attempts++;
     }
+    close(sock);
     return 0; /* Failed / Timeout */
 }
 

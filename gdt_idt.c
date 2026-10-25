@@ -500,6 +500,27 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         sockets[sock_idx].rx_ready = 0;
         return copy_len;
     }
+    else if (syscall_num == 17) {
+        /* Syscall 17: int close(int fd) */
+        int fd = (int)arg1;
+        if (fd < 3 || fd >= MAX_OPEN_FILES || !tasks[current_task].open_files[fd].is_used) {
+            return (uint32_t)-1;
+        }
+        if (tasks[current_task].open_files[fd].type == TYPE_SOCKET) {
+            int sock_idx = tasks[current_task].open_files[fd].offset;
+            extern socket_t sockets[];
+            if (sock_idx >= 0 && sock_idx < MAX_SOCKETS) {
+                sockets[sock_idx].is_used = 0;
+                sockets[sock_idx].tcp_state = TCP_CLOSED;
+                sockets[sock_idx].rx_len = 0;
+                sockets[sock_idx].rx_ready = 0;
+            }
+        }
+        tasks[current_task].open_files[fd].is_used = 0;
+        tasks[current_task].open_files[fd].type = TYPE_NONE;
+        tasks[current_task].open_files[fd].offset = 0;
+        return 0;
+    }
     
     return (uint32_t)-1;
 }
