@@ -242,6 +242,15 @@ uint32_t schedule(uint32_t current_esp) {
 }
 
 void cleanup_task_memory(int id) {
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
+    if (tasks[id].state == 0) {
+        __asm__ volatile("push %0; popf" :: "r"(eflags));
+        return;
+    }
+    tasks[id].state = 0;
+
     /* [FIX ADDITION] Close and release all open file descriptors / sockets */
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (tasks[id].open_files[i].is_used) {
@@ -286,8 +295,12 @@ void cleanup_task_memory(int id) {
     }
     if (tasks[id].kernel_stack) pmm_free_page(tasks[id].kernel_stack);
     
+    tasks[id].code_page = NULL;
+    tasks[id].user_stack = NULL;
+    tasks[id].kernel_stack = NULL;
     tasks[id].page_directory = NULL;
-    tasks[id].state = 0;
+
+    __asm__ volatile("push %0; popf" :: "r"(eflags));
 }
 
 void kill_current_task() {
