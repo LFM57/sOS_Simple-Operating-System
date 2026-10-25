@@ -1297,40 +1297,61 @@ int fs_write(const char* filename, const char* text) {
     current_dir_cluster = old_cluster;
     current_dir_sector = old_sector;
 
-    /* 2. Allocate a cluster if it does not have one yet */
-    uint32_t cluster = get_cluster(entry);
-    if (cluster == 0) {
-        for (uint32_t i = 2; i < total_clusters + 2; i++) {
-            if (read_fat_entry(i) == 0x00000000) {
-                cluster = i;
-                write_fat_entry(i, 0x0FFFFFFF);
-                break;
-            }
-        }
-        if (cluster == 0) { return 0; }
+    /* 2. Free previous clusters if overwriting */
+    uint32_t prev_cluster = get_cluster(entry);
+    if (prev_cluster != 0) {
+        free_fat_chain(prev_cluster);
     }
 
-    /* 3. Prepare the data to be written */
-    int text_len = 0; 
+    /* 3. Prepare and write the data across sectors/clusters */
+    uint32_t text_len = 0; 
     while(text[text_len]) text_len++;
-    if (text_len > 512) text_len = 512;
 
-    uint32_t data_sec = data_start + ((cluster - 2) * sectors_per_cluster);
-    uint8_t* sec_buf = (uint8_t*)kmalloc(512);
-    
-    for(int i=0; i<512; i++) sec_buf[i] = 0;
-    for(int i=0; i<text_len; i++) sec_buf[i] = text[i];
-    
-    ata_write_sector(data_sec, sec_buf);
-    kfree(sec_buf);
+    uint32_t bytes_left = text_len;
+    uint32_t data_idx = 0;
+    uint32_t last_cluster = 0;
+    uint32_t first_cluster = 0;
+
+    if (text_len > 0) {
+        uint8_t* sec_buf = (uint8_t*)kmalloc(512);
+        while (bytes_left > 0) {
+            uint32_t free_cluster = 0;
+            for (uint32_t i = 2; i < total_clusters + 2; i++) {
+                if (read_fat_entry(i) == 0x00000000) {
+                    free_cluster = i;
+                    write_fat_entry(i, 0x0FFFFFFF);
+                    break;
+                }
+            }
+            if (free_cluster == 0) {
+                kfree(sec_buf);
+                if (first_cluster != 0) free_fat_chain(first_cluster);
+                return 0; /* Disk Full */
+            }
+
+            if (first_cluster == 0) first_cluster = free_cluster;
+            if (last_cluster != 0) write_fat_entry(last_cluster, free_cluster);
+            last_cluster = free_cluster;
+
+            uint32_t data_sec = data_start + ((free_cluster - 2) * sectors_per_cluster);
+            for (int s = 0; s < sectors_per_cluster && bytes_left > 0; s++) {
+                for (int i = 0; i < 512; i++) sec_buf[i] = 0;
+                uint32_t chunk = (bytes_left > 512) ? 512 : bytes_left;
+                for (uint32_t i = 0; i < chunk; i++) sec_buf[i] = (uint8_t)text[data_idx++];
+                ata_write_sector(data_sec + s, sec_buf);
+                bytes_left -= chunk;
+            }
+        }
+        kfree(sec_buf);
+    }
 
     /* 4. Update the size and the cluster in the parent entry */
     uint8_t* dir_sector = (uint8_t*)kmalloc(512);
     ata_read_sector(dir_sec, dir_sector);
     fat_dir_entry_t* dir = (fat_dir_entry_t*)dir_sector;
     
-    set_cluster(dir[dir_idx], cluster);
-    dir[dir_idx].size = text_len;
+    set_cluster(dir[dir_idx], first_cluster);
+    dir[dir_idx].size = text_len - bytes_left;
     
     ata_write_sector(dir_sec, dir_sector);
     kfree(dir_sector);
