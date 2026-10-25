@@ -1197,8 +1197,13 @@ void fs_touch(const char* filename) {
         return;
     }
 
-    int len = 0; while(target_fat[len] && target_fat[len] != ' ') len++;
-    if (len > 12) { kprintf("Error: Filename too long.\n"); return; }
+    const char* base = filename;
+    for (int i = 0; filename[i] != '\0'; i++) {
+        if (filename[i] == '/') base = &filename[i + 1];
+    }
+    int len = 0;
+    while (base[len] != '\0' && base[len] != '/') len++;
+    if (len == 0 || len > 12) { kprintf("Error: Filename too long.\n"); return; }
 
     uint32_t old_cluster = current_dir_cluster;
     uint32_t old_sector = current_dir_sector;
