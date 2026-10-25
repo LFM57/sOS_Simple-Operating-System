@@ -59,6 +59,9 @@ void arp_update(uint8_t* ip, uint8_t* mac) {
 }
 
 void arp_request(uint8_t* target_ip) {
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
     static uint8_t packet[14 + 28];
     eth_hdr_t* eth = (eth_hdr_t*)packet;
     for(int i = 0; i < 6; i++) { eth->dst_mac[i] = 0xFF; eth->src_mac[i] = e1000_mac[i]; }
@@ -74,6 +77,8 @@ void arp_request(uint8_t* target_ip) {
     for(int i = 0; i < 4; i++) { arp->sender_ip[i] = sOS_ip[i]; arp->target_ip[i] = target_ip[i]; }
     
     e1000_transmit(packet, sizeof(packet));
+
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
 }
 
 int arp_resolve(uint8_t* dest_ip, uint8_t* out_mac) {
@@ -136,6 +141,9 @@ void net_send_tcp_raw(int sock_idx, uint8_t flags, uint8_t* payload, uint16_t le
     uint16_t packet_len = 14 + 20 + tcp_total_len;
     static uint8_t tcp_tx_buffer[2048]; /* Isolated buffer for TCP */
 
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
     /* 1. Ethernet Header */
     eth_hdr_t* eth = (eth_hdr_t*)tcp_tx_buffer;
     for(int i=0; i<6; i++) { eth->dst_mac[i] = dest_mac[i]; eth->src_mac[i] = e1000_mac[i]; }
@@ -183,6 +191,8 @@ void net_send_tcp_raw(int sock_idx, uint8_t flags, uint8_t* payload, uint16_t le
     tcp->checksum = calculate_checksum(chksum_buf, sizeof(tcp_pseudo_hdr_t) + tcp_total_len);
 
     e1000_transmit(tcp_tx_buffer, packet_len);
+
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
 }
 /* ------------------------- */
 
@@ -207,6 +217,8 @@ void net_bind_socket(int sock_idx, uint16_t port) {
 
 /* Raw internal UDP sender (Kernel use) */
 void net_send_udp_raw(uint16_t src_port, uint8_t* dest_ip, uint16_t dest_port, uint8_t* payload, uint16_t len) {
+    if (len > 1472) len = 1472;
+
     uint8_t dest_mac[6];
     
     /* Fetch MAC using ARP Cache / Router Gateway */
@@ -217,6 +229,9 @@ void net_send_udp_raw(uint16_t src_port, uint8_t* dest_ip, uint16_t dest_port, u
 
     uint16_t packet_len = 14 + 20 + 8 + len;
     
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
     eth_hdr_t* eth = (eth_hdr_t*)tx_buffer;
     for(int i=0; i<6; i++) { eth->dst_mac[i] = dest_mac[i]; eth->src_mac[i] = e1000_mac[i]; } 
     eth->type = htons(0x0800);
@@ -243,6 +258,8 @@ void net_send_udp_raw(uint16_t src_port, uint8_t* dest_ip, uint16_t dest_port, u
     for(int i=0; i<len; i++) data[i] = payload[i];
 
     e1000_transmit(tx_buffer, packet_len);
+
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
 }
 
 /* User-space wrapped UDP sender */
