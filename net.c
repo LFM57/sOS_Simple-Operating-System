@@ -59,7 +59,7 @@ void arp_update(uint8_t* ip, uint8_t* mac) {
 }
 
 void arp_request(uint8_t* target_ip) {
-    uint8_t packet[14 + 28];
+    static uint8_t packet[14 + 28];
     eth_hdr_t* eth = (eth_hdr_t*)packet;
     for(int i = 0; i < 6; i++) { eth->dst_mac[i] = 0xFF; eth->src_mac[i] = e1000_mac[i]; }
     eth->type = htons(0x0806);

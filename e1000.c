@@ -51,8 +51,9 @@ void e1000_rx_init(void) {
 void e1000_tx_init(void) {
     tx_descs = (struct e1000_tx_desc *)pmm_alloc_page();
     for (int i = 0; i < NUM_TX_DESC; i++) {
-        tx_descs[i].addr = 0;
+        tx_descs[i].addr = (uint64_t)(uint32_t)pmm_alloc_page();
         tx_descs[i].cmd = 0;
+        tx_descs[i].status = 0x01; /* Descriptor Done (DD): initially available */
     }
 
     e1000_write_reg(0x3800, (uint32_t)tx_descs); /* TDBAL */
@@ -73,10 +74,23 @@ void e1000_tx_init(void) {
 }
 
 void e1000_transmit(uint8_t* payload, uint16_t length) {
-    if (!e1000_installed || !tx_descs) return;
+    if (!e1000_installed || !tx_descs || !payload || length == 0) return;
+    if (length > 4096) length = 4096;
 
-    /* Set the memory address of the buffer to send */
-    tx_descs[tx_curr].addr = (uint64_t)(uint32_t)payload;
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
+    /* Wait for Descriptor Done (DD) bit if this descriptor is still in flight */
+    uint32_t timeout = 1000000;
+    while (!(tx_descs[tx_curr].status & 0x01) && timeout > 0) {
+        timeout--;
+    }
+
+    /* Copy payload into the descriptor's dedicated physical DMA buffer */
+    uint8_t* dma_buf = (uint8_t*)(uint32_t)tx_descs[tx_curr].addr;
+    for (uint16_t i = 0; i < length; i++) {
+        dma_buf[i] = payload[i];
+    }
     tx_descs[tx_curr].length = length;
     
     /* Command: EOP (End of Packet), IFCS (Insert FCS/CRC), RS (Report Status) */
@@ -87,6 +101,8 @@ void e1000_transmit(uint8_t* payload, uint16_t length) {
     
     /* Update the Tail register to tell the hardware to send it! */
     e1000_write_reg(0x3818, tx_curr); 
+
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
 }
 
 /* This function is called by the boot.s irq_nic assembly wrapper */
