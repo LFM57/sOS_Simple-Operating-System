@@ -75,9 +75,9 @@ volatile int cursor_pos = 0;      /* Current cursor position in cmd_buffer (inde
 
 /* --- BASIC SYSTEM COMMANDS --- */
 const char* system_commands[] = {
-    "help", "clear", "uptime", "ram", "ls", "cd", 
+    "help", "clear", "uptime", "ram", "free", "ls", "cd", 
     "mkdir", "rm", "touch", "write", "cat", "echo",
-    "loop", "run", "ps", "kill", "df", "about",
+    "loop", "run", "ps", "kill", "df", "about", "uname",
     "shutdown", "whoami", "chown", "chmod", "su", "sudo",
     "userlist", "nano", "passwd", "cp", "mv", "hex",
     "ifconfig", "wget", "update", "lock", "crash"
@@ -512,8 +512,8 @@ const char kbd_us[128] = {
 
 extern void kputc(char);
 
-/* Secure synchronous read */
-void kernel_gets(char* buffer, int max_len, int hidden, int allow_empty) {
+/* Secure synchronous read. Returns 1 on success, 0 if aborted with Ctrl+C */
+int kernel_gets(char* buffer, int max_len, int hidden, int allow_empty) {
     int i = 0;
     is_kernel_gets_active = 1;
     while (i < max_len - 1) {
@@ -521,10 +521,14 @@ void kernel_gets(char* buffer, int max_len, int hidden, int allow_empty) {
         char c = kbd_buf_get();
         
         if (c == 3) { /* Ctrl+C pressed */
+            if (is_logging_out) {
+                /* Ctrl+C is not allowed on initial session login */
+                continue;
+            }
             buffer[0] = '\0';
             kprintf("^C\n");
             is_kernel_gets_active = 0;
-            return;
+            return 0;
         }
         else if (c == '\r' || c == '\n') { 
             if (!allow_empty && i == 0) continue; 
@@ -539,6 +543,7 @@ void kernel_gets(char* buffer, int max_len, int hidden, int allow_empty) {
     }
     buffer[i] = '\0';
     is_kernel_gets_active = 0;
+    return 1;
 }
 
 void handle_input_char(char c) {
@@ -2247,7 +2252,7 @@ void run_hexdump(const char* filename) {
     
     if (!fs_load_file(filename, &file_buf, &file_size)) {
         if (fs_error == FS_ERR_PERMISSION) {
-            kprintf("Error: Permission denied (Read access required).\n");
+            kprintf("Error: Permission denied.\n");
         } else {
             kprintf("Error: '%s': No such file\n", filename);
         }
@@ -2432,6 +2437,76 @@ static int shell_dup_fd(int fd) {
     return -1;
 }
 
+static void util_print_aligned_str(const char* str, int width) {
+    kprintf("%s", str);
+    int len = 0;
+    while (str[len]) len++;
+    for (int i = len; i < width; i++) kputc(' ');
+}
+
+static void util_print_right_aligned_num(uint32_t val, int width) {
+    char buf[16];
+    int len = 0;
+    if (val == 0) {
+        buf[len++] = '0';
+    } else {
+        char temp[16];
+        int tlen = 0;
+        uint32_t v = val;
+        while (v > 0) {
+            temp[tlen++] = '0' + (v % 10);
+            v /= 10;
+        }
+        for (int i = tlen - 1; i >= 0; i--) buf[len++] = temp[i];
+    }
+    buf[len] = '\0';
+    for (int i = len; i < width; i++) kputc(' ');
+    kprintf("%s", buf);
+}
+
+static void util_print_right_aligned_str(const char* str, int width) {
+    int len = 0;
+    while (str[len]) len++;
+    for (int i = len; i < width; i++) kputc(' ');
+    kprintf("%s", str);
+}
+
+static void util_format_human_size(uint32_t kb, char* out) {
+    if (kb < 1024) {
+        char temp[16]; int tlen = 0; uint32_t v = kb;
+        if (v == 0) temp[tlen++] = '0';
+        else { while (v > 0) { temp[tlen++] = '0' + (v % 10); v /= 10; } }
+        int idx = 0;
+        for (int i = tlen - 1; i >= 0; i--) out[idx++] = temp[i];
+        out[idx++] = 'K';
+        out[idx] = '\0';
+    } else if (kb < 1048576) {
+        uint32_t mb = kb / 1024;
+        uint32_t dec = ((kb % 1024) * 10) / 1024;
+        char temp[16]; int tlen = 0; uint32_t v = mb;
+        if (v == 0) temp[tlen++] = '0';
+        else { while (v > 0) { temp[tlen++] = '0' + (v % 10); v /= 10; } }
+        int idx = 0;
+        for (int i = tlen - 1; i >= 0; i--) out[idx++] = temp[i];
+        out[idx++] = '.';
+        out[idx++] = '0' + dec;
+        out[idx++] = 'M';
+        out[idx] = '\0';
+    } else {
+        uint32_t gb = kb / 1048576;
+        uint32_t dec = ((kb % 1048576) * 10) / 1048576;
+        char temp[16]; int tlen = 0; uint32_t v = gb;
+        if (v == 0) temp[tlen++] = '0';
+        else { while (v > 0) { temp[tlen++] = '0' + (v % 10); v /= 10; } }
+        int idx = 0;
+        for (int i = tlen - 1; i >= 0; i--) out[idx++] = temp[i];
+        out[idx++] = '.';
+        out[idx++] = '0' + dec;
+        out[idx++] = 'G';
+        out[idx] = '\0';
+    }
+}
+
 static void execute_single_command(int is_bg) {
     /* Save of the parsed buffer */
     char raw_buf[256];
@@ -2475,7 +2550,7 @@ static void execute_single_command(int is_bg) {
             } else {
                 int len = 0;
                 while (system_commands[i][len]) len++;
-                for (int s = len; s < 10; s++) {
+                for (int s = len; s < 12; s++) {
                     kputc(' ');
                 }
             }
@@ -2513,10 +2588,177 @@ static void execute_single_command(int is_bg) {
         clear_terminal();
     } 
     else if (strcmp(cmd, "uptime") == 0) {
-        kprintf("Uptime: %d sec\n", timer_ticks / 100);
+        if (arg1 && (strcmp(arg1, "--help") == 0 || strcmp(arg1, "-help") == 0)) {
+            kprintf("Usage: uptime [OPTION]...\n");
+            kprintf("Tell how long the system has been running.\n\n");
+            kprintf("  -p, --pretty   show uptime in pretty format\n");
+            kprintf("  -s, --seconds  show uptime in raw seconds and ticks\n");
+            kprintf("  -v, --verbose  display exhaustive uptime and task statistics\n");
+            goto end_prompt;
+        }
+
+        uint32_t total_sec = timer_ticks / 100;
+        uint32_t days = total_sec / 86400;
+        uint32_t hours = (total_sec % 86400) / 3600;
+        uint32_t mins = (total_sec % 3600) / 60;
+        uint32_t secs = total_sec % 60;
+
+        int total_tasks = 0, running_tasks = 0, ready_tasks = 0, blocked_tasks = 0;
+        for (int t = 0; t < MAX_TASKS; t++) {
+            if (tasks[t].state != 0) {
+                total_tasks++;
+                if (tasks[t].state == 1) running_tasks++;
+                else if (tasks[t].state == 2) ready_tasks++;
+                else if (tasks[t].state == 4) blocked_tasks++;
+            }
+        }
+
+        if (arg1 && (strcmp(arg1, "-p") == 0 || strcmp(arg1, "--pretty") == 0)) {
+            kprintf("up ");
+            int printed = 0;
+            if (days > 0) {
+                kprintf("%d day%s", days, days > 1 ? "s" : "");
+                printed = 1;
+            }
+            if (hours > 0) {
+                if (printed) kprintf(", ");
+                kprintf("%d hour%s", hours, hours > 1 ? "s" : "");
+                printed = 1;
+            }
+            if (mins > 0) {
+                if (printed) kprintf(", ");
+                kprintf("%d minute%s", mins, mins > 1 ? "s" : "");
+                printed = 1;
+            }
+            if (secs > 0 || !printed) {
+                if (printed) kprintf(", ");
+                kprintf("%d second%s", secs, secs > 1 ? "s" : "");
+            }
+            kprintf("\n");
+            goto end_prompt;
+        }
+
+        if (arg1 && (strcmp(arg1, "-s") == 0 || strcmp(arg1, "--seconds") == 0)) {
+            kprintf("up %d seconds (%d ticks at 100 Hz)\n", total_sec, timer_ticks);
+            goto end_prompt;
+        }
+
+        if (arg1 && (strcmp(arg1, "-v") == 0 || strcmp(arg1, "--verbose") == 0)) {
+            kprintf("System Uptime & Activity:\n");
+            kprintf("  Uptime        : %d day%s, %d hour%s, %d min%s, %d sec%s\n",
+                    days, days == 1 ? "" : "s",
+                    hours, hours == 1 ? "" : "s",
+                    mins, mins == 1 ? "" : "s",
+                    secs, secs == 1 ? "" : "s");
+            kprintf("  Total Seconds : %d s (Timer ticks: %d at 100 Hz)\n", total_sec, timer_ticks);
+            kprintf("  Active User   : %s (UID: %d)\n", current_user, current_uid);
+            kprintf("  Active Tasks  : %d total (%d running, %d ready, %d blocked)\n",
+                    total_tasks, running_tasks, ready_tasks, blocked_tasks);
+            goto end_prompt;
+        }
+
+        /* Default standard Unix uptime format */
+        kprintf("up ");
+        if (days > 0) {
+            kprintf("%d day%s, ", days, days == 1 ? "" : "s");
+        }
+        if (hours > 0 || days > 0) {
+            kprintf("%d:%s%d, ", hours, mins < 10 ? "0" : "", mins);
+        } else {
+            kprintf("%d min%s, ", mins, mins == 1 ? "" : "s");
+        }
+        kprintf("1 user (%s), load: %d tasks (%d running, %d blocked)\n",
+                current_user, total_tasks, running_tasks, blocked_tasks);
     } 
-    else if (strcmp(cmd, "ram") == 0) {
-        kprintf("Total detected RAM: %d Mo\n", total_ram_kb / 1024);
+    else if (strcmp(cmd, "ram") == 0 || strcmp(cmd, "free") == 0) {
+        if (arg1 && (strcmp(arg1, "--help") == 0 || strcmp(arg1, "-help") == 0)) {
+            kprintf("Usage: %s [OPTION]...\n", cmd);
+            kprintf("Display amount of free and used memory in the system.\n\n");
+            kprintf("  -h, --human-readable  show output in human-readable format\n");
+            kprintf("  -m, --mega            show output in megabytes\n");
+            kprintf("  -k, --kilo            show output in kilobytes (default)\n");
+            kprintf("  -v, --verbose         display exhaustive memory and heap statistics\n");
+            goto end_prompt;
+        }
+
+        uint32_t total_kb = 0, used_kb = 0, free_kb = 0;
+        get_pmm_stats(&total_kb, &used_kb, &free_kb);
+
+        uint32_t heap_total = 0, heap_used = 0, heap_free = 0;
+        get_heap_stats(&heap_total, &heap_used, &heap_free);
+        uint32_t heap_kb = heap_total / 1024;
+
+        int is_human = (arg1 && (strcmp(arg1, "-h") == 0 || strcmp(arg1, "--human-readable") == 0));
+        int is_mega = (arg1 && (strcmp(arg1, "-m") == 0 || strcmp(arg1, "--mega") == 0));
+        int is_verbose = (arg1 && (strcmp(arg1, "-v") == 0 || strcmp(arg1, "--verbose") == 0));
+
+        if (is_verbose) {
+            uint32_t pct = total_kb > 0 ? (used_kb * 100) / total_kb : 0;
+            kprintf("System Memory Statistics:\n");
+            kprintf("  Physical Total : %d MB (%d KB, %d pages)\n", total_kb / 1024, total_kb, total_kb / 4);
+            kprintf("  Physical Used  : %d MB (%d KB) [%d%%]\n", used_kb / 1024, used_kb, pct);
+            kprintf("  Physical Free  : %d MB (%d KB) [%d%%]\n", free_kb / 1024, free_kb, 100 - pct);
+            kprintf("  Kernel Heap    : %d KB total (4 MB at 0x10000000)\n", heap_kb);
+            kprintf("    - Used       : %d KB\n", heap_used / 1024);
+            kprintf("    - Free       : %d KB\n", heap_free / 1024);
+            kprintf("  Page Directory : 32-bit x86 Two-Level Paging (Identity-mapped 64 MB)\n");
+            goto end_prompt;
+        }
+
+        if (is_human) {
+            char t_str[16], u_str[16], f_str[16], b_str[16];
+            util_format_human_size(total_kb, t_str);
+            util_format_human_size(used_kb, u_str);
+            util_format_human_size(free_kb, f_str);
+            util_format_human_size(heap_kb, b_str);
+
+            kprintf("               total        used        free      shared  buff/cache   available\n");
+            kprintf("Mem:    ");
+            util_print_right_aligned_str(t_str, 12);
+            util_print_right_aligned_str(u_str, 12);
+            util_print_right_aligned_str(f_str, 12);
+            util_print_right_aligned_str("0B", 12);
+            util_print_right_aligned_str(b_str, 12);
+            util_print_right_aligned_str(f_str, 12);
+            kprintf("\nSwap:   ");
+            util_print_right_aligned_str("0B", 12);
+            util_print_right_aligned_str("0B", 12);
+            util_print_right_aligned_str("0B", 12);
+            kprintf("\n");
+            goto end_prompt;
+        }
+
+        if (is_mega) {
+            kprintf("               total        used        free      shared  buff/cache   available\n");
+            kprintf("Mem:    ");
+            util_print_right_aligned_num(total_kb / 1024, 12);
+            util_print_right_aligned_num(used_kb / 1024, 12);
+            util_print_right_aligned_num(free_kb / 1024, 12);
+            util_print_right_aligned_num(0, 12);
+            util_print_right_aligned_num(heap_kb / 1024, 12);
+            util_print_right_aligned_num(free_kb / 1024, 12);
+            kprintf("\nSwap:   ");
+            util_print_right_aligned_num(0, 12);
+            util_print_right_aligned_num(0, 12);
+            util_print_right_aligned_num(0, 12);
+            kprintf("\n");
+            goto end_prompt;
+        }
+
+        /* Default: Kilobytes (POSIX standard) */
+        kprintf("               total        used        free      shared  buff/cache   available\n");
+        kprintf("Mem:    ");
+        util_print_right_aligned_num(total_kb, 12);
+        util_print_right_aligned_num(used_kb, 12);
+        util_print_right_aligned_num(free_kb, 12);
+        util_print_right_aligned_num(0, 12);
+        util_print_right_aligned_num(heap_kb, 12);
+        util_print_right_aligned_num(free_kb, 12);
+        kprintf("\nSwap:   ");
+        util_print_right_aligned_num(0, 12);
+        util_print_right_aligned_num(0, 12);
+        util_print_right_aligned_num(0, 12);
+        kprintf("\n");
     } 
     else if (strcmp(cmd, "ls") == 0) {
         fs_ls();
@@ -2539,7 +2781,11 @@ static void execute_single_command(int is_bg) {
     else if (strcmp(cmd, "write") == 0) {
         if (arg1 && arg_rest) {
             if (!fs_write(arg1, arg_rest)) {
-                kprintf("Error: Write failed (Permission denied or invalid path).\n");
+                if (fs_error == FS_ERR_PERMISSION) {
+                    kprintf("Error: Permission denied.\n");
+                } else {
+                    kprintf("Error: Write failed.\n");
+                }
             }
         } else {
             kprintf("Usage: write <filename> <text to write>\n");
@@ -2605,7 +2851,7 @@ static void execute_single_command(int is_bg) {
         kprintf("Background task launched! It will count in the background.\n");
     }
     else if (strcmp(cmd, "df") == 0) {
-        fs_df();
+        fs_df(arg1);
     }
     else if (strcmp(cmd, "cp") == 0) {
         if (arg1 && arg2) fs_cp(arg1, arg2);
@@ -2643,7 +2889,7 @@ static void execute_single_command(int is_bg) {
                     }
                 } else {
                     if (fs_error == FS_ERR_PERMISSION) {
-                        kprintf("Error: Permission denied (Read access required).\n");
+                        kprintf("Error: Permission denied.\n");
                     } else {
                         kprintf("Error: '%s': No such file\n", arg1);
                         char file_suggest[13];
@@ -2659,16 +2905,44 @@ static void execute_single_command(int is_bg) {
         }
     }
     else if (strcmp(cmd, "ps") == 0) {
-        kprintf("PID | Type       | State\n");
-        kprintf("-------------------------\n");
-        for(int i = 0; i < MAX_TASKS; i++) {
+        if (arg1 && (strcmp(arg1, "--help") == 0 || strcmp(arg1, "-help") == 0)) {
+            kprintf("Usage: ps [OPTION]...\n");
+            kprintf("Report a snapshot of the current processes.\n\n");
+            kprintf("  -u, -f, --verbose  display full/verbose process format with open file descriptors\n");
+            goto end_prompt;
+        }
+
+        int verbose = (arg1 && (strcmp(arg1, "-v") == 0 || strcmp(arg1, "-f") == 0 ||
+                               strcmp(arg1, "-u") == 0 || strcmp(arg1, "--verbose") == 0));
+
+        if (verbose) {
+            kprintf("  PID   UID  TYPE       STATE     MODE  OPEN_FDS\n");
+            kprintf("------------------------------------------------\n");
+        } else {
+            kprintf("  PID   UID  TYPE       STATE     MODE\n");
+            kprintf("----------------------------------------\n");
+        }
+
+        for (int i = 0; i < MAX_TASKS; i++) {
             if (tasks[i].state != 0) {
                 const char* type = (i == 0) ? "Shell" : ((i == IDLE_TASK_ID) ? "Idle" : (tasks[i].code_page == NULL ? "SysTask" : "UserApp"));
                 const char* state = (tasks[i].state == 1) ? "RUNNING" : ((tasks[i].state == 3) ? "ZOMBIE" : ((tasks[i].state == 4) ? "BLOCKED" : "READY"));
-                kprintf(" %d  | %s", i, type);
-                int len = 0; while(type[len]) len++;
-                for(int s = len; s < 10; s++) kprintf(" ");
-                kprintf(" | %s\n", state);
+                const char* mode = tasks[i].is_background ? "bg" : "fg";
+
+                util_print_right_aligned_num(i, 5);
+                util_print_right_aligned_num(tasks[i].uid, 6);
+                kprintf("  ");
+                util_print_aligned_str(type, 11);
+                util_print_aligned_str(state, 10);
+                util_print_aligned_str(mode, 6);
+                if (verbose) {
+                    int open_fds = 0;
+                    for (int f = 0; f < MAX_OPEN_FILES; f++) {
+                        if (tasks[i].open_files[f].is_used) open_fds++;
+                    }
+                    util_print_right_aligned_num(open_fds, 8);
+                }
+                kprintf("\n");
             }
         }
     }
@@ -2678,12 +2952,14 @@ static void execute_single_command(int is_bg) {
             while (*p >= '0' && *p <= '9') { pid = pid * 10 + (*p - '0'); p++; }
             if (pid == 0) {
                 kprintf("Error: Cannot kill the system Shell.\n");
+            } else if (pid == IDLE_TASK_ID) {
+                kprintf("Error: Cannot kill the Idle task.\n");
             } else if (pid >= MAX_TASKS || tasks[pid].state == 0 || tasks[pid].state == 3) {
                 kprintf("Error: No active process with PID %d.\n", pid);
             } else {
                 /* SECURITY: Only the creator (or root UID 0) can kill the task */
                 if (current_uid != 0 && tasks[pid].uid != current_uid) {
-                    kprintf("Error: Operation not permitted (You do not own this process).\n");
+                    kprintf("Error: Operation not permitted.\n");
                 } else {
                     tasks[pid].state = 3;
                     kprintf("Process %d terminated and memory freed.\n", pid);
@@ -2707,24 +2983,89 @@ static void execute_single_command(int is_bg) {
         kprintf("Uptime: %d sec\n", timer_ticks / 100);
         kprintf("Author: LFM57\n\n");
     }
-    else if (strcmp(cmd, "shutdown") == 0) {
-        kprintf("Are you sure you want to shutdown? [y/N]: ");
-        char choice = wait_key();
-        kprintf("%c\n", choice); 
-        if (choice == 'y' || choice == 'Y') {
-            kprintf("Shutting down sOS cleanly...\n");
-            for (volatile int i = 0; i < 100000000; i++);
-            outw(0x4004, 0x3400);
-            outw(0x604, 0x2000);
-            outw(0xB004, 0x2000);
-            kprintf("\nPower off failed. You can safely turn off your computer.\n");
-            while(1) { __asm__ volatile("cli; hlt"); }
+    else if (strcmp(cmd, "uname") == 0) {
+        if (arg1 == NULL || strcmp(arg1, "-s") == 0) {
+            kprintf("sOS\n");
+        } else if (strcmp(arg1, "-a") == 0 || strcmp(arg1, "--all") == 0) {
+            kprintf("sOS sOS-i686 %s i686 GNU/sOS\n", SOS_VERSION);
+        } else if (strcmp(arg1, "-r") == 0 || strcmp(arg1, "--kernel-release") == 0) {
+            kprintf("%s\n", SOS_VERSION);
+        } else if (strcmp(arg1, "-m") == 0 || strcmp(arg1, "-p") == 0 || strcmp(arg1, "-i") == 0 || strcmp(arg1, "--machine") == 0) {
+            kprintf("i686\n");
+        } else if (strcmp(arg1, "-o") == 0 || strcmp(arg1, "--operating-system") == 0) {
+            kprintf("GNU/sOS\n");
+        } else if (strcmp(arg1, "--help") == 0 || strcmp(arg1, "-help") == 0) {
+            kprintf("Usage: uname [OPTION]...\n");
+            kprintf("Print system information.\n\n");
+            kprintf("  -a, --all               print all information\n");
+            kprintf("  -s, --kernel-name       print the kernel name (default)\n");
+            kprintf("  -r, --kernel-release    print the kernel release\n");
+            kprintf("  -m, --machine           print the machine hardware name\n");
+            kprintf("  -o, --operating-system  print the operating system name\n");
         } else {
-            kprintf("Shutdown aborted.\n");
+            kprintf("uname: invalid option -- '%s'\nTry 'uname --help' for more information.\n", arg1);
+        }
+    }
+    else if (strcmp(cmd, "shutdown") == 0) {
+        if (current_uid != 0) {
+            kprintf("Error: Operation not permitted.\n");
+            goto end_prompt;
+        }
+
+        int reboot = 0;
+        if (arg1 != NULL) {
+            if (strcmp(arg1, "-r") == 0 || strcmp(arg1, "--reboot") == 0) {
+                reboot = 1;
+            } else {
+                kprintf("Usage: shutdown [-r]\n");
+                goto end_prompt;
+            }
+        }
+
+        if (reboot) {
+            kprintf("Are you sure you want to reboot? [y/N]: ");
+            char choice = wait_key();
+            kprintf("%c\n", choice); 
+            if (choice == 'y' || choice == 'Y') {
+                kprintf("Rebooting sOS cleanly...\n");
+                for (volatile int i = 0; i < 100000000; i++);
+                outb(0x64, 0xFE);
+                outb(0x92, 0x01);
+                outb(0xCF9, 0x06);
+                kprintf("\nReboot failed. You can safely turn off your computer.\n");
+                while(1) { __asm__ volatile("cli; hlt"); }
+            } else {
+                kprintf("Reboot aborted.\n");
+            }
+        } else {
+            kprintf("Are you sure you want to shutdown? [y/N]: ");
+            char choice = wait_key();
+            kprintf("%c\n", choice); 
+            if (choice == 'y' || choice == 'Y') {
+                kprintf("Shutting down sOS cleanly...\n");
+                for (volatile int i = 0; i < 100000000; i++);
+                outw(0x4004, 0x3400);
+                outw(0x604, 0x2000);
+                outw(0xB004, 0x2000);
+                kprintf("\nPower off failed. You can safely turn off your computer.\n");
+                while(1) { __asm__ volatile("cli; hlt"); }
+            } else {
+                kprintf("Shutdown aborted.\n");
+            }
         }
     }
     else if (strcmp(cmd, "whoami") == 0) {
-        kprintf("User: %s (UID: %d)\n", current_user, current_uid);
+        if (arg1 && (strcmp(arg1, "-u") == 0 || strcmp(arg1, "--uid") == 0)) {
+            kprintf("%d\n", current_uid);
+        } else if (arg1 && (strcmp(arg1, "-n") == 0 || strcmp(arg1, "--name") == 0)) {
+            kprintf("%s\n", current_user);
+        } else if (arg1 && (strcmp(arg1, "-v") == 0 || strcmp(arg1, "--verbose") == 0)) {
+            kprintf("User: %s (UID: %d, Role: %s)\n", current_user, current_uid, current_uid == 0 ? "root/superuser" : "standard user");
+        } else if (arg1 && (strcmp(arg1, "--help") == 0 || strcmp(arg1, "-help") == 0)) {
+            kprintf("Usage: whoami [OPTION]...\nPrint current active user details.\n  -u, --uid      print effective UID only\n  -n, --name     print username only\n  -v, --verbose  print detailed user and privilege role\n");
+        } else {
+            kprintf("User: %s (UID: %d)\n", current_user, current_uid);
+        }
     }
     else if (strcmp(cmd, "chown") == 0) {
         if (arg1 && arg2) {
@@ -2751,7 +3092,10 @@ static void execute_single_command(int is_bg) {
         char real_pass[32]; uint8_t uid;
         if (get_user_info(arg1, real_pass, &uid)) {
             kprintf("Password: ");
-            char pass[32]; kernel_gets(pass, 32, 1, 1);
+            char pass[32];
+            if (!kernel_gets(pass, 32, 1, 1)) {
+                goto end_prompt;
+            }
             if (check_password(pass, real_pass)) {
                 current_uid = uid; custom_strcpy(current_user, arg1);
                 kprintf("Switched to user %s.\n", current_user);
@@ -2776,7 +3120,10 @@ static void execute_single_command(int is_bg) {
         char real_pass[32]; uint8_t dummy_uid;
         if (get_user_info("root", real_pass, &dummy_uid)) {
             kprintf("[sudo] password for root: ");
-            char pass[32]; kernel_gets(pass, 32, 1, 1); 
+            char pass[32];
+            if (!kernel_gets(pass, 32, 1, 1)) {
+                goto end_prompt;
+            }
             if (check_password(pass, real_pass)) {
                 uint8_t old_uid = current_uid;
                 char old_user[32];
@@ -2860,7 +3207,7 @@ static void execute_single_command(int is_bg) {
         
         /* 2. ACTION: ADD */
         else if (strcmp(arg1, "add") == 0) {
-            if (current_uid != 0) { kprintf("Error: Root privileges required.\n"); goto end_prompt; }
+            if (current_uid != 0) { kprintf("Error: Operation not permitted.\n"); goto end_prompt; }
             
             /* Internal splitting of the argument (username / password) */
             char* username = arg2; char* password = NULL;
@@ -2981,7 +3328,7 @@ static void execute_single_command(int is_bg) {
         
         /* 3. ACTION: REMOVE */
         else if (strcmp(arg1, "remove") == 0) {
-            if (current_uid != 0) { kprintf("Error: Root privileges required.\n"); goto end_prompt; }
+            if (current_uid != 0) { kprintf("Error: Operation not permitted.\n"); goto end_prompt; }
             char* target = arg2;
             if (!target) { kprintf("Usage: userlist remove <username>\n"); goto end_prompt; }
             if (strcmp(target, "root") == 0) { kprintf("Error: Cannot remove root user.\n"); goto end_prompt; }
@@ -3066,7 +3413,10 @@ static void execute_single_command(int is_bg) {
             char real_pass[32]; uint8_t dummy_uid;
             if (get_user_info(current_user, real_pass, &dummy_uid)) {
                 kprintf("Current password: ");
-                char pass[32]; kernel_gets(pass, 32, 1, 1);
+                char pass[32];
+                if (!kernel_gets(pass, 32, 1, 1)) {
+                    goto end_prompt;
+                }
                 if (!check_password(pass, real_pass)) {
                     kprintf("passwd: Authentication failure\n");
                     goto end_prompt;
@@ -3079,11 +3429,17 @@ static void execute_single_command(int is_bg) {
         
         /* 2. NEW password input */
         kprintf("New password: ");
-        char new_pass[32]; kernel_gets(new_pass, 32, 1, 1);
+        char new_pass[32];
+        if (!kernel_gets(new_pass, 32, 1, 1)) {
+            goto end_prompt;
+        }
         
         /* 3. Security Check */
         kprintf("Retype new password: ");
-        char re_pass[32]; kernel_gets(re_pass, 32, 1, 1);
+        char re_pass[32];
+        if (!kernel_gets(re_pass, 32, 1, 1)) {
+            goto end_prompt;
+        }
         
         if (strcmp(new_pass, re_pass) != 0) {
             kprintf("Error: Passwords do not match.\n");
@@ -3176,7 +3532,7 @@ static void execute_single_command(int is_bg) {
     }
     else if (strcmp(cmd, "update") == 0) {
         if (current_uid != 0) {
-            kprintf("Error: Root privileges required. Use 'sudo update [-f|--force] <server_ip:port>'\n");
+            kprintf("Error: Operation not permitted.\n");
             goto end_prompt;
         }
 

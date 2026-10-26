@@ -186,3 +186,28 @@ void kfree(void* ptr) {
     }
     __asm__ volatile("sti"); /* Re-enable interrupts when done */
 }
+
+void get_pmm_stats(uint32_t* out_total_kb, uint32_t* out_used_kb, uint32_t* out_free_kb) {
+    uint32_t used_pages = 0;
+    for (uint32_t i = 0; i < total_pages; i++) {
+        if (pmm_is_used(i)) used_pages++;
+    }
+    if (out_total_kb) *out_total_kb = (total_pages * PAGE_SIZE) / 1024;
+    if (out_used_kb) *out_used_kb = (used_pages * PAGE_SIZE) / 1024;
+    if (out_free_kb) *out_free_kb = ((total_pages > used_pages ? total_pages - used_pages : 0) * PAGE_SIZE) / 1024;
+}
+
+void get_heap_stats(uint32_t* out_total_bytes, uint32_t* out_used_bytes, uint32_t* out_free_bytes) {
+    uint32_t total = 4 * 1024 * 1024;
+    uint32_t used = 0;
+    uint32_t free_b = 0;
+    heap_block_t* curr = heap_head;
+    while (curr != NULL && curr->magic == HEAP_MAGIC) {
+        if (curr->is_free) free_b += curr->size;
+        else used += curr->size;
+        curr = curr->next;
+    }
+    if (out_total_bytes) *out_total_bytes = total;
+    if (out_used_bytes) *out_used_bytes = used;
+    if (out_free_bytes) *out_free_bytes = free_b;
+}

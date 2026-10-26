@@ -679,13 +679,13 @@ static void print_human_size(uint32_t size) {
 void fs_ls() {
     /* [SECURITY] Check if the user has permission to read the current directory */
     if (!check_current_dir_permission(0)) {
-        kprintf("Error: Permission denied (Read access required).\n");
+        kprintf("Error: Permission denied.\n");
         return;
     }
 
     vfs_node_t* dir_node = vfs_open(get_current_path(), O_RDONLY);
     if (!dir_node) {
-        kprintf("Error: Permission denied (Read access required).\n");
+        kprintf("Error: Permission denied.\n");
         return;
     }
     
@@ -731,7 +731,80 @@ void fs_ls() {
     vfs_close(dir_node);
 }
 
-void fs_df() {
+static void print_right_aligned_num(uint32_t val, int width) {
+    char buf[16];
+    int len = 0;
+    if (val == 0) {
+        buf[len++] = '0';
+    } else {
+        char temp[16];
+        int tlen = 0;
+        uint32_t v = val;
+        while (v > 0) {
+            temp[tlen++] = '0' + (v % 10);
+            v /= 10;
+        }
+        for (int i = tlen - 1; i >= 0; i--) buf[len++] = temp[i];
+    }
+    buf[len] = '\0';
+    for (int i = len; i < width; i++) kputc(' ');
+    kprintf("%s", buf);
+}
+
+static void print_right_aligned_str(const char* str, int width) {
+    int len = 0;
+    while (str[len]) len++;
+    for (int i = len; i < width; i++) kputc(' ');
+    kprintf("%s", str);
+}
+
+static void format_human_size(uint32_t kb, char* out) {
+    if (kb < 1024) {
+        char temp[16]; int tlen = 0; uint32_t v = kb;
+        if (v == 0) temp[tlen++] = '0';
+        else { while (v > 0) { temp[tlen++] = '0' + (v % 10); v /= 10; } }
+        int idx = 0;
+        for (int i = tlen - 1; i >= 0; i--) out[idx++] = temp[i];
+        out[idx++] = 'K';
+        out[idx] = '\0';
+    } else if (kb < 1048576) {
+        uint32_t mb = kb / 1024;
+        uint32_t dec = ((kb % 1024) * 10) / 1024;
+        char temp[16]; int tlen = 0; uint32_t v = mb;
+        if (v == 0) temp[tlen++] = '0';
+        else { while (v > 0) { temp[tlen++] = '0' + (v % 10); v /= 10; } }
+        int idx = 0;
+        for (int i = tlen - 1; i >= 0; i--) out[idx++] = temp[i];
+        out[idx++] = '.';
+        out[idx++] = '0' + dec;
+        out[idx++] = 'M';
+        out[idx] = '\0';
+    } else {
+        uint32_t gb = kb / 1048576;
+        uint32_t dec = ((kb % 1048576) * 10) / 1048576;
+        char temp[16]; int tlen = 0; uint32_t v = gb;
+        if (v == 0) temp[tlen++] = '0';
+        else { while (v > 0) { temp[tlen++] = '0' + (v % 10); v /= 10; } }
+        int idx = 0;
+        for (int i = tlen - 1; i >= 0; i--) out[idx++] = temp[i];
+        out[idx++] = '.';
+        out[idx++] = '0' + dec;
+        out[idx++] = 'G';
+        out[idx] = '\0';
+    }
+}
+
+void fs_df(const char* arg) {
+    if (arg && (strcmp(arg, "--help") == 0 || strcmp(arg, "-help") == 0)) {
+        kprintf("Usage: df [OPTION]...\n");
+        kprintf("Show information about file system disk space.\n\n");
+        kprintf("  -h, --human-readable  print sizes in powers of 1024 (e.g., 64M)\n");
+        kprintf("  -k                    like default, use 1024-byte blocks\n");
+        kprintf("  -m                    use 1MB blocks\n");
+        kprintf("  -i, --inodes          list inode/cluster usage instead of block usage\n");
+        return;
+    }
+
     uint8_t* sector = (uint8_t*)kmalloc(512);
     uint32_t free_clusters = 0;
     uint32_t clusters_checked = 0;
@@ -751,11 +824,70 @@ void fs_df() {
     }
     kfree(sector);
     
-    uint32_t free_kb = (uint32_t)(((uint64_t)free_clusters * sectors_per_cluster) >> 1);
-    kprintf("Free storage space: %d KB (%d.%d MB)\n", 
-            free_kb, 
-            free_kb / 1024, 
-            (free_kb % 1024) * 10 / 1024);
+    uint32_t total_kb = (total_clusters * sectors_per_cluster) >> 1;
+    uint32_t free_kb = (free_clusters * sectors_per_cluster) >> 1;
+    uint32_t used_kb = total_kb >= free_kb ? total_kb - free_kb : 0;
+    uint32_t pct = total_kb > 0 ? (used_kb * 100) / total_kb : 0;
+
+    int is_inodes = (arg && (strcmp(arg, "-i") == 0 || strcmp(arg, "--inodes") == 0));
+    int is_human = (arg && (strcmp(arg, "-h") == 0 || strcmp(arg, "--human-readable") == 0));
+    int is_mb = (arg && strcmp(arg, "-m") == 0);
+
+    if (is_inodes) {
+        uint32_t used_clusters = total_clusters >= free_clusters ? total_clusters - free_clusters : 0;
+        uint32_t ipct = total_clusters > 0 ? (used_clusters * 100) / total_clusters : 0;
+        kprintf("Filesystem        Inodes     IUsed     IFree  IUse%% Mounted on\n");
+        kprintf("/dev/ata0   ");
+        print_right_aligned_num(total_clusters, 10);
+        print_right_aligned_num(used_clusters, 10);
+        print_right_aligned_num(free_clusters, 10);
+        if (ipct < 10) kprintf("     %d%% /\n", ipct);
+        else if (ipct < 100) kprintf("    %d%% /\n", ipct);
+        else kprintf("   %d%% /\n", ipct);
+        return;
+    }
+
+    if (is_human) {
+        char total_str[16], used_str[16], free_str[16];
+        format_human_size(total_kb, total_str);
+        format_human_size(used_kb, used_str);
+        format_human_size(free_kb, free_str);
+
+        kprintf("Filesystem          Size      Used     Avail  Use%% Mounted on\n");
+        kprintf("/dev/ata0   ");
+        print_right_aligned_str(total_str, 10);
+        print_right_aligned_str(used_str, 10);
+        print_right_aligned_str(free_str, 10);
+        if (pct < 10) kprintf("     %d%% /\n", pct);
+        else if (pct < 100) kprintf("    %d%% /\n", pct);
+        else kprintf("   %d%% /\n", pct);
+        return;
+    }
+
+    if (is_mb) {
+        uint32_t total_mb = total_kb / 1024;
+        uint32_t used_mb = (used_kb + 1023) / 1024;
+        uint32_t free_mb = free_kb / 1024;
+        kprintf("Filesystem     1M-blocks      Used Available  Use%% Mounted on\n");
+        kprintf("/dev/ata0   ");
+        print_right_aligned_num(total_mb, 12);
+        print_right_aligned_num(used_mb, 10);
+        print_right_aligned_num(free_mb, 10);
+        if (pct < 10) kprintf("     %d%% /\n", pct);
+        else if (pct < 100) kprintf("    %d%% /\n", pct);
+        else kprintf("   %d%% /\n", pct);
+        return;
+    }
+
+    /* Standard 1K-blocks (POSIX default) */
+    kprintf("Filesystem     1K-blocks      Used Available  Use%% Mounted on\n");
+    kprintf("/dev/ata0   ");
+    print_right_aligned_num(total_kb, 12);
+    print_right_aligned_num(used_kb, 10);
+    print_right_aligned_num(free_kb, 10);
+    if (pct < 10) kprintf("     %d%% /\n", pct);
+    else if (pct < 100) kprintf("    %d%% /\n", pct);
+    else kprintf("   %d%% /\n", pct);
 }
 
 void fs_cd(const char* path) {
@@ -799,7 +931,7 @@ void fs_cd(const char* path) {
     /* [SECURITY FIX] Ignore permission checks for "." and ".." */
     if (target_fat[0] != '.') {
         if (!check_permission_byte(entry.sec_byte, 0)) {
-            kprintf("Error: Permission denied (Read access required).\n");
+            kprintf("Error: Permission denied.\n");
             return;
         }
     }
@@ -846,7 +978,7 @@ void fs_mkdir(const char* dirname) {
 
     /* [SECURITY] Check if the user has permission to write to the parent directory */
     if (!check_current_dir_permission_in(parent_cluster, 1)) {
-        kprintf("Error: Permission denied (Write access required).\n");
+        kprintf("Error: Permission denied.\n");
         return;
     }
 
@@ -916,7 +1048,7 @@ void fs_cat(const char* filename) {
     vfs_node_t* node = vfs_open(filename, O_RDONLY);
     if (!node) {
         if (fs_error == FS_ERR_PERMISSION) {
-            kprintf("Error: Permission denied (Read access required).\n");
+            kprintf("Error: Permission denied.\n");
         } else {
             kprintf("Error: '%s': No such file.\n", filename);
         }
@@ -968,12 +1100,12 @@ void fs_rm(const char* arg1, const char* arg2) {
     /* WILDCARD (*) HANDLING */
     if (strcmp(filename, "*") == 0) {
         if (!check_current_dir_permission(1)) {
-            kprintf("Error: Permission denied (Write access required).\n");
+            kprintf("Error: Permission denied.\n");
             return;
         }
 
         if ((current_dir_cluster == root_cluster || current_dir_cluster == 0) && get_active_uid() != 0) {
-            kprintf("Error: Permission denied (Write access to '/' required).\n");
+            kprintf("Error: Permission denied.\n");
             return;
         }
 
@@ -1104,12 +1236,12 @@ void fs_rm(const char* arg1, const char* arg2) {
     /* -------------------------------------- */
 
     if (!check_current_dir_permission_in(parent_cluster, 1)) {
-        kprintf("Error: Permission denied (Write access required).\n");
+        kprintf("Error: Permission denied.\n");
         return;
     }
 
     if ((parent_cluster == root_cluster || parent_cluster == 0) && get_active_uid() != 0) {
-        kprintf("Error: Permission denied (Write access to '/' required).\n");
+        kprintf("Error: Permission denied.\n");
         return;
     }
 
@@ -1184,7 +1316,7 @@ void fs_touch(const char* filename) {
     }
 
     if (!check_current_dir_permission_in(parent_cluster, 1)) {
-        kprintf("Error: Permission denied (Write access required).\n");
+        kprintf("Error: Permission denied.\n");
         return;
     }
 
@@ -1284,7 +1416,7 @@ int fs_cp(const char* src_name, const char* dest_name) {
     vfs_node_t* src_node = vfs_open(src_name, O_RDONLY);
     if (!src_node) {
         if (fs_error == FS_ERR_PERMISSION) {
-            kprintf("Error: Permission denied (Read source required).\n");
+            kprintf("Error: Permission denied.\n");
         } else {
             kprintf("Error: Source file '%s' not found.\n", src_name);
         }
@@ -1307,7 +1439,7 @@ int fs_cp(const char* src_name, const char* dest_name) {
     vfs_node_t* dest_node = vfs_open(actual_dest, O_WRONLY | O_CREAT | O_TRUNC);
     if (!dest_node) {
         if (fs_error == FS_ERR_PERMISSION) {
-            kprintf("Error: Permission denied (Write to destination directory required).\n");
+            kprintf("Error: Permission denied.\n");
         } else {
             kprintf("Error: No space left in destination directory.\n");
         }

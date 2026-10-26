@@ -151,11 +151,11 @@ On boot, sOS presents a login prompt. The system image is pre-configured with th
 | **`cp`** | `cp <src> <dest>` | Copies a file (destination can be a file or a folder). |
 | **`mv`** | `mv <src> <dest>` | Moves or renames a file. |
 | **`rm`** | `rm [-r] <file/dir>` | Removes files or directories (supports recursive `-r` and `*`). |
-| **`df`** | `df` | Displays free disk space in KB and MB. |
+| **`df`** | `df [-h\|-k\|-m\|-i]` | Displays file system space usage in standardized Unix table format. |
 | **`hex`** | `hex <file>` | Displays a 16-byte formatted hexadecimal and ASCII dump. |
 | **`nano`** | `nano <file>` | Graphical full-screen text editor with scrolling and shortcuts (`^S`, `^X`). |
 | **`run`** | `run <binary.sos> [&]` | Loads and runs a Ring 3 ELF binary (`&` executes in background). |
-| **`ps`** | `ps` | Lists active tasks, PIDs, types (Shell, SysTask, UserApp), and states. |
+| **`ps`** | `ps [-u\|-v]` | Lists processes with PID, UID, type, state, and background mode. |
 | **`kill`** | `kill <PID>` | Terminates a running process (must be owner or root). |
 | **`ifconfig`**| `ifconfig` | Displays network status: MAC, IP, Subnet Mask, Gateway, and DNS. |
 | **`wget`** | `wget <http://host:port/path> <out>`| Downloads a file over HTTP TCP port 80 (or custom port). |
@@ -166,12 +166,13 @@ On boot, sOS presents a login prompt. The system image is pre-configured with th
 | **`passwd`** | `passwd [user]` | Updates user password using salted key stretching. |
 | **`chown`** | `chown <file> <uid>` | Updates file owner UID (supports `*`). |
 | **`chmod`** | `chmod <hex_perms> <file>` | Updates file permission flags (supports `*`). |
-| **`whoami`** | `whoami` | Displays current active user and UID. |
-| **`uptime`** | `uptime` | Shows system uptime in seconds. |
-| **`ram`** | `ram` | Prints total detected RAM. |
+| **`whoami`** | `whoami [-u\|-n\|-v]` | Displays current active user, UID, or detailed role. |
+| **`uptime`** | `uptime [-p\|-s\|-v]` | Displays formatted uptime duration, user, and task load. |
+| **`ram`** / **`free`** | `ram [-h\|-m\|-k\|-v]` | Displays memory statistics (PMM and Kernel Heap) in Unix format. |
+| **`uname`** | `uname [-a\|-s\|-r\|-m\|-o]` | Prints system architecture and OS release details. |
 | **`clear`** | `clear` | Clears terminal screen and resets cursor. |
 | **`lock`** | `lock` | Locks the current terminal session. |
-| **`shutdown`**| `shutdown` | Powers off the machine via ACPI/APM shutdown ports. |
+| **`shutdown`**| `sudo shutdown [-r]` | Powers off (`shutdown`) or reboots (`shutdown -r`) the machine (Root only). |
 
 > **Interactive Shell Tips:**
 > - **Tab Autocompletion:** Press `Tab` to auto-complete commands and filesystem paths. Double-press `Tab` to list all matching candidates.

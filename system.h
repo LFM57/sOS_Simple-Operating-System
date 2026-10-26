@@ -122,7 +122,9 @@ void fs_touch(const char* filename);
 int fs_write(const char* filename, const char* text);
 int fs_load_file(const char* filename, uint8_t** buffer_out, uint32_t* size_out);
 const char* get_current_path();
-void fs_df();
+void fs_df(const char* arg);
+void get_pmm_stats(uint32_t* out_total_kb, uint32_t* out_used_kb, uint32_t* out_free_kb);
+void get_heap_stats(uint32_t* out_total_bytes, uint32_t* out_used_bytes, uint32_t* out_free_bytes);
 void run_nano(const char* filename);
 int fs_complete(const char* prefix, char* out_match, int* out_match_count, int print_matches);
 int fs_cp(const char* src_name, const char* dest_name);
@@ -139,7 +141,7 @@ int check_permission_byte(uint8_t sec_byte, int is_write);
 void fs_chown(const char* filename, uint8_t new_uid);
 void fs_chmod(const char* filename, uint8_t new_perms);
 int get_user_info(const char* username, char* out_password, uint8_t* out_uid);
-void kernel_gets(char* buffer, int max_len, int hidden, int allow_empty);
+int kernel_gets(char* buffer, int max_len, int hidden, int allow_empty);
 uint8_t get_active_uid(void);
 
 /* --- File System Error Codes --- */
