@@ -12,6 +12,8 @@ void pmm_mark_used(uint32_t page) { pmm_bitmap[page / 32] |= (1 << (page % 32));
 void pmm_mark_free(uint32_t page) { pmm_bitmap[page / 32] &= ~(1 << (page % 32)); }
 int pmm_is_used(uint32_t page) { return pmm_bitmap[page / 32] & (1 << (page % 32)); }
 
+extern uint32_t _kernel_end;
+
 void init_pmm(uint32_t ram_kb) {
     total_pages = (ram_kb * 1024) / PAGE_SIZE;
     
@@ -27,7 +29,13 @@ void init_pmm(uint32_t ram_kb) {
     
     for (int i = 0; i < 32768; i++) pmm_bitmap[i] = 0xFFFFFFFF; 
     for (uint32_t i = 0; i < total_pages; i++) pmm_mark_free(i);
-    for (uint32_t i = 0; i < 512; i++) pmm_mark_used(i); /* Reserves 2 Mo */
+
+    /* Dynamically reserve all pages used by the kernel (.text, .rodata, .data, .bss) */
+    uint32_t reserved_pages = ((uint32_t)&_kernel_end + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (reserved_pages < 1024) {
+        reserved_pages = 1024; /* Reserve at least the first 4 MB */
+    }
+    for (uint32_t i = 0; i < reserved_pages; i++) pmm_mark_used(i);
 }
 
 void* pmm_alloc_page() {

@@ -64,6 +64,7 @@ void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags);
 void set_kernel_stack(uint32_t stack);
 
 /* --- Memory --- */
+extern uint32_t _kernel_end;
 extern uint32_t total_ram_kb;
 extern uint32_t kernel_page_directory[1024];
 void init_pmm(uint32_t ram_kb);

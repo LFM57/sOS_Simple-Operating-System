@@ -547,16 +547,6 @@ int kernel_gets(char* buffer, int max_len, int hidden, int allow_empty) {
 }
 
 void handle_input_char(char c) {
-    if (c == 3) { /* Ctrl+C pressed */
-        kprintf("^C\n");
-        cmd_idx = 0;
-        cmd_buffer[0] = '\0';
-        cursor_pos = 0;
-        history_index = -1;
-        kprintf("\033[32m%s@sOS\033[0m \033[34m%s\033[0m\033[33m%c\033[0m ", current_user, get_current_path(), current_uid == 0 ? '#' : '$');
-        return;
-    }
-
     /* State machine to detect consecutive double tabs within 60 ticks (~600ms) */
     static int last_key_was_tab = 0;
     static uint32_t last_tab_tick = 0;
@@ -692,7 +682,7 @@ void handle_input_char(char c) {
                 }
             }
 
-            char exec_matches[32][32];
+            static char exec_matches[32][32];
             int num_execs = fs_get_matching_executables(prefix, exec_matches, 32);
             for (int e = 0; e < num_execs; e++) {
                 int already_sys = 0;
