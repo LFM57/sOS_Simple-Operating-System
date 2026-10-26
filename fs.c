@@ -1683,25 +1683,38 @@ int fs_complete(const char* prefix, char* out_match, int* out_match_count, int p
                 if (print_matches) {
                     /* Display the original path prefix for clarity */
                     if (dir_path[0] != '\0') {
-                        kprintf("%s/", dir_path);
+                        if (dir_path[0] == '/' && dir_path[1] == '\0') {
+                            kprintf("/");
+                        } else {
+                            kprintf("%s/", dir_path);
+                        }
                     }
-                    kprintf("%s  ", printable_name);
+                    if (dir[i].attributes & 0x10) {
+                        kprintf("%s/  ", printable_name);
+                    } else {
+                        kprintf("%s  ", printable_name);
+                    }
                 }
                 if (match_count == 1) {
                     /* Reconstructing the full path for user autocomplete */
                     int idx = 0;
                     if (dir_path[0] != '\0') {
-                        while (dir_path[idx]) {
+                        while (dir_path[idx] && idx < 240) {
                             out_match[idx] = dir_path[idx];
                             idx++;
                         }
-                        if (idx > 0 && dir_path[idx - 1] != '/') {
+                        if (idx > 0 && dir_path[idx - 1] != '/' && idx < 240) {
                             out_match[idx++] = '/';
                         }
                     }
                     int f_idx = 0;
-                    while (printable_name[f_idx]) {
+                    while (printable_name[f_idx] && idx < 250) {
                         out_match[idx++] = printable_name[f_idx++];
+                    }
+                    if (dir[i].attributes & 0x10) {
+                        if (idx < 254) out_match[idx++] = '/';
+                    } else {
+                        if (idx < 254) out_match[idx++] = ' ';
                     }
                     out_match[idx] = '\0';
                 }
@@ -1721,6 +1734,116 @@ end_complete:
     kfree(sector);
     *out_match_count = match_count;
     return match_count;
+}
+
+/* Helper to scan a directory cluster for executable ELF files (.sos) matching prefix */
+static int scan_dir_for_executables(uint32_t dir_cluster, const char* prefix, int prefix_len,
+                                    char matches[][32], int count, int max_matches) {
+    uint32_t cluster = (dir_cluster == 0) ? root_cluster : dir_cluster;
+    uint32_t sec = data_start + ((cluster - 2) * sectors_per_cluster);
+    uint32_t sec_offset = 0;
+    uint8_t* sector = (uint8_t*)kmalloc(512);
+    char printable_name[13];
+
+    while (1) {
+        ata_read_sector(sec, sector);
+        fat_dir_entry_t* dir = (fat_dir_entry_t*)sector;
+
+        for (int i = 0; i < 16; i++) {
+            if (dir[i].name[0] == 0x00) goto done_scan;
+            if (dir[i].name[0] == (char)0xE5 || dir[i].attributes == 0x0F) continue;
+            if (dir[i].attributes & 0x10) continue; /* Skip subdirectories */
+
+            format_fat_name(dir[i].name, printable_name);
+
+            /* Check for .sos extension */
+            int name_len = 0;
+            while (printable_name[name_len]) name_len++;
+            if (name_len < 4) continue;
+            if (printable_name[name_len - 4] != '.' ||
+                printable_name[name_len - 3] != 's' ||
+                printable_name[name_len - 2] != 'o' ||
+                printable_name[name_len - 1] != 's') {
+                continue;
+            }
+
+            /* Check prefix match */
+            int is_match = 1;
+            for (int j = 0; j < prefix_len; j++) {
+                if (printable_name[j] != prefix[j]) {
+                    is_match = 0;
+                    break;
+                }
+            }
+            if (!is_match) continue;
+
+            /* Check for duplicates in matches list */
+            int dup = 0;
+            for (int k = 0; k < count; k++) {
+                if (strcmp(matches[k], printable_name) == 0) {
+                    dup = 1;
+                    break;
+                }
+            }
+            if (dup) continue;
+
+            if (count < max_matches) {
+                int mi = 0;
+                while (printable_name[mi] && mi < 31) {
+                    matches[count][mi] = printable_name[mi];
+                    mi++;
+                }
+                matches[count][mi] = '\0';
+                count++;
+            }
+        }
+
+        sec_offset++;
+        if (sec_offset % sectors_per_cluster == 0) {
+            cluster = read_fat_entry(cluster);
+            if (cluster < 2 || cluster >= 0x0FFFFFF8) break;
+            sec = data_start + ((cluster - 2) * sectors_per_cluster);
+        } else {
+            sec++;
+        }
+    }
+
+done_scan:
+    kfree(sector);
+    return count;
+}
+
+/* Scans current directory and /bin for executable files (.sos) matching prefix */
+int fs_get_matching_executables(const char* prefix, char matches[][32], int max_matches) {
+    int prefix_len = 0;
+    while (prefix[prefix_len]) prefix_len++;
+
+    int count = 0;
+
+    /* 1. Scan current directory if readable */
+    if (check_current_dir_permission_in(current_dir_cluster, 0)) {
+        count = scan_dir_for_executables(current_dir_cluster, prefix, prefix_len, matches, count, max_matches);
+    }
+
+    /* 2. Scan /bin directory (if it exists and is not the current directory) */
+    uint32_t bin_parent_cluster, bin_parent_sector;
+    char bin_fat[11];
+    if (resolve_path("/bin", &bin_parent_cluster, &bin_parent_sector, bin_fat)) {
+        if (bin_fat[0] != '\0') {
+            fat_dir_entry_t bin_entry;
+            if (find_entry_in(bin_parent_cluster, bin_fat, &bin_entry, NULL, NULL) && (bin_entry.attributes & 0x10)) {
+                if (check_permission_byte(bin_entry.sec_byte, 0)) {
+                    uint32_t bin_cluster = get_cluster(bin_entry);
+                    if (bin_cluster == 0) bin_cluster = root_cluster;
+                    if (bin_cluster != current_dir_cluster) {
+                        count = scan_dir_for_executables(bin_cluster, prefix, prefix_len, matches, count, max_matches);
+                    }
+                }
+            }
+        }
+    }
+
+    return count;
 }
 
 /* Allocate a free cluster and zero its sectors on disk */

@@ -557,13 +557,29 @@ void handle_input_char(char c) {
         return;
     }
 
-    /* Simple state machine to detect consecutive double tabs */
+    /* State machine to detect consecutive double tabs within 60 ticks (~600ms) */
     static int last_key_was_tab = 0;
-    int is_double_tab = (c == 9 && last_key_was_tab);
+    static uint32_t last_tab_tick = 0;
+
+    if (c == 3) { /* Ctrl+C pressed */
+        last_key_was_tab = 0;
+        last_tab_tick = 0;
+        kprintf("^C\n");
+        cmd_idx = 0;
+        cmd_buffer[0] = '\0';
+        cursor_pos = 0;
+        history_index = -1;
+        kprintf("\033[32m%s@sOS\033[0m \033[34m%s\033[0m\033[33m%c\033[0m ", current_user, get_current_path(), current_uid == 0 ? '#' : '$');
+        return;
+    }
+
+    int is_double_tab = (c == 9 && last_key_was_tab && (timer_ticks - last_tab_tick <= 60));
     if (c != 9) {
         last_key_was_tab = 0;
+        last_tab_tick = 0;
     } else {
         last_key_was_tab = 1;
+        last_tab_tick = timer_ticks;
     }
 
     if (c == '\r' || c == '\n') {
@@ -615,17 +631,51 @@ void handle_input_char(char c) {
 
         if (prefix_len == 0) {
             last_key_was_tab = 0; 
+            last_tab_tick = 0;
             return; 
         }
 
         if (is_double_tab) {
             last_key_was_tab = 0;
+            last_tab_tick = 0;
         }
 
         int match_count = 0;
-        char single_match[64] = {0};
+        char single_match[256] = {0};
 
-        if (word_start == 0) {
+        int is_command_position = 0;
+        int p = word_start;
+        while (p > 0 && cmd_buffer[p - 1] == ' ') p--;
+        if (p == 0) {
+            is_command_position = 1;
+        } else if (p > 0 && cmd_buffer[p - 1] == '|') {
+            is_command_position = 1;
+        } else {
+            /* Check if previous token was "sudo" */
+            int prev_end = p;
+            int prev_start = prev_end;
+            while (prev_start > 0 && cmd_buffer[prev_start - 1] != ' ' && cmd_buffer[prev_start - 1] != '|') {
+                prev_start--;
+            }
+            int prev_len = prev_end - prev_start;
+            if (prev_len == 4 &&
+                cmd_buffer[prev_start] == 's' &&
+                cmd_buffer[prev_start + 1] == 'u' &&
+                cmd_buffer[prev_start + 2] == 'd' &&
+                cmd_buffer[prev_start + 3] == 'o') {
+                is_command_position = 1;
+            }
+        }
+
+        int has_slash = 0;
+        for (int i = 0; i < prefix_len; i++) {
+            if (prefix[i] == '/') {
+                has_slash = 1;
+                break;
+            }
+        }
+
+        if (is_command_position && !has_slash) {
             for (unsigned int i = 0; i < num_system_commands; i++) {
                 int is_match = 1;
                 for (int j = 0; j < prefix_len; j++) {
@@ -639,6 +689,33 @@ void handle_input_char(char c) {
                     if (match_count == 1) {
                         custom_strcpy(single_match, system_commands[i]);
                     }
+                }
+            }
+
+            char exec_matches[32][32];
+            int num_execs = fs_get_matching_executables(prefix, exec_matches, 32);
+            for (int e = 0; e < num_execs; e++) {
+                int already_sys = 0;
+                for (unsigned int s = 0; s < num_system_commands; s++) {
+                    if (strcmp(system_commands[s], exec_matches[e]) == 0) {
+                        already_sys = 1;
+                        break;
+                    }
+                }
+                if (!already_sys) {
+                    match_count++;
+                    if (match_count == 1) {
+                        custom_strcpy(single_match, exec_matches[e]);
+                    }
+                }
+            }
+
+            if (match_count == 1) {
+                int slen = 0;
+                while (single_match[slen]) slen++;
+                if (cmd_buffer[cursor_pos] != ' ' && slen < 254) {
+                    single_match[slen] = ' ';
+                    single_match[slen + 1] = '\0';
                 }
             }
 
@@ -656,17 +733,29 @@ void handle_input_char(char c) {
                         kprintf("%s  ", system_commands[i]);
                     }
                 }
+                for (int e = 0; e < num_execs; e++) {
+                    int already_sys = 0;
+                    for (unsigned int s = 0; s < num_system_commands; s++) {
+                        if (strcmp(system_commands[s], exec_matches[e]) == 0) {
+                            already_sys = 1;
+                            break;
+                        }
+                    }
+                    if (!already_sys) {
+                        kprintf("%s  ", exec_matches[e]);
+                    }
+                }
                 kprintf("\n");
                 kprintf("\033[32m%s@sOS\033[0m \033[34m%s\033[0m\033[33m%c\033[0m %s", current_user, get_current_path(), current_uid == 0 ? '#' : '$', cmd_buffer);
                 int shift_back = cmd_idx - cursor_pos;
                 for (int i = 0; i < shift_back; i++) {
                     kputc('\b');
                 }
+                last_key_was_tab = 0;
+                last_tab_tick = 0;
             }
         } else {
-            fs_complete(prefix, single_match, &match_count, 0);
-            
-            if (match_count > 0 && is_double_tab) {
+            if (is_double_tab) {
                 kprintf("\n");
                 fs_complete(prefix, single_match, &match_count, 1); 
                 kprintf("\n");
@@ -675,7 +764,16 @@ void handle_input_char(char c) {
                 for (int i = 0; i < shift_back; i++) {
                     kputc('\b');
                 }
+                last_key_was_tab = 0;
+                last_tab_tick = 0;
+            } else {
+                fs_complete(prefix, single_match, &match_count, 0);
             }
+        }
+
+        if (match_count == 0) {
+            last_key_was_tab = 0;
+            last_tab_tick = 0;
         }
 
         if (match_count == 1 && !is_double_tab) {
@@ -683,6 +781,13 @@ void handle_input_char(char c) {
             int suffix_len = 0;
             while (suffix[suffix_len]) suffix_len++;
             
+            if (suffix_len > 0 && suffix[suffix_len - 1] == ' ' && cmd_buffer[cursor_pos] == ' ') {
+                suffix_len--;
+            }
+            if (suffix_len > 0 && suffix[suffix_len - 1] == '/' && cmd_buffer[cursor_pos] == '/') {
+                suffix_len--;
+            }
+
             if (cmd_idx + suffix_len < 255) {
                 for (int i = cmd_idx + suffix_len - 1; i >= cursor_pos + suffix_len; i--) {
                     cmd_buffer[i] = cmd_buffer[i - suffix_len];
@@ -702,6 +807,8 @@ void handle_input_char(char c) {
                     kputc('\b');
                 }
             }
+            last_key_was_tab = 0;
+            last_tab_tick = 0;
         }
     }
     else if (c == 17) { /* Up Arrow Key */
