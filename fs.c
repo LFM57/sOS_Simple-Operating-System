@@ -994,6 +994,10 @@ void fs_mkdir(const char* dirname) {
     if (len == 0 || len > 8) { kprintf("Error: Directory name too long.\n"); return; }
 
     if (find_entry_in(parent_cluster, fat_name, NULL, NULL, NULL)) {
+        if (ota_in_progress) {
+            kprintf("[OTA] Directory '%s' already exists.\n", dirname);
+            return;
+        }
         kprintf("Error: '%s' already exists.\n", dirname);
         return;
     }

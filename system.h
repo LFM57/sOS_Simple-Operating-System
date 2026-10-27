@@ -153,6 +153,11 @@ extern int fs_error;
 #define FS_ERR_NOT_FOUND 1
 #define FS_ERR_PERMISSION 2
 
+/* --- OTA Update State --- */
+extern int ota_in_progress;
+extern int ota_force_mode;
+extern int ota_error_occurred;
+
 /* --- Multitasking --- */
 #define MAX_TASKS 8
 #define MAX_OPEN_FILES 16

@@ -65,6 +65,14 @@ void kbd_buf_clear(void) {
 char cmd_buffer[256];
 int cmd_idx = 0;
 
+/* --- OTA UPDATE SYSTEM STATE --- */
+int ota_in_progress = 0;
+int ota_force_mode = 0;
+int ota_error_occurred = 0;
+char ota_server_str[64] = {0};
+char ota_server_host[64] = {0};
+uint16_t ota_server_port = 80;
+
 /* --- HISTORY AND INTERACTIVE EDITING --- */
 #define HISTORY_MAX 5
 char cmd_history[HISTORY_MAX][256];
@@ -2557,6 +2565,20 @@ int http_get(const char* host, uint16_t port, const char* path, uint8_t** out_da
        when evaluating (http_len - 3) in the loop condition below. */
     if (http_len < 4) { kfree(http_data); return 0; }
     
+    /* Validate HTTP response status: must be 200 OK */
+    if (http_len >= 12 && http_data[0] == 'H' && http_data[1] == 'T' && http_data[2] == 'T' && http_data[3] == 'P') {
+        uint32_t sp = 0;
+        while (sp < http_len && http_data[sp] != ' ') sp++;
+        while (sp < http_len && http_data[sp] == ' ') sp++;
+        if (sp + 2 < http_len) {
+            int code = (http_data[sp] - '0') * 100 + (http_data[sp + 1] - '0') * 10 + (http_data[sp + 2] - '0');
+            if (code != 200) {
+                kfree(http_data);
+                return 0;
+            }
+        }
+    }
+    
     uint32_t payload_start = 0;
     for(uint32_t i=0; i < http_len - 3; i++) {
         if(http_data[i] == '\r' && http_data[i+1] == '\n' && 
@@ -2664,6 +2686,8 @@ static void util_format_human_size(uint32_t kb, char* out) {
         out[idx] = '\0';
     }
 }
+
+static void execute_command_with_redirection(char* stage_cmd, int is_bg);
 
 static void execute_single_command(int is_bg) {
     /* Save of the parsed buffer */
@@ -2954,8 +2978,14 @@ static void execute_single_command(int is_bg) {
         }
     }
     else if (strcmp(cmd, "mkdir") == 0) {
-        if (arg1) fs_mkdir(arg1);
-        else kprintf("Usage: mkdir <directory>\n");
+        if (arg1 && (strcmp(arg1, "-p") == 0 || strcmp(arg1, "--parents") == 0)) {
+            if (arg2) fs_mkdir(arg2);
+            else kprintf("Usage: mkdir [-p] <directory>\n");
+        } else if (arg1) {
+            fs_mkdir(arg1);
+        } else {
+            kprintf("Usage: mkdir [-p] <directory>\n");
+        }
     }
     else if (strcmp(cmd, "rm") == 0) {
         fs_rm(arg1, arg2);
@@ -3672,7 +3702,7 @@ static void execute_single_command(int is_bg) {
             kprintf("Error: User '%s' not found.\n", target);
         }
     }
-    /* --- REPLACE THE wget COMMAND BLOCK IN kernel.c WITH THIS --- */
+    /* --- WGET COMMAND WITH AUTOMATIC UPDATE VERIFICATION --- */
     else if (strcmp(cmd, "wget") == 0) {
         if (!arg1 || !arg2) {
             kprintf("Usage: wget <http://domain.com:port/path> <out.txt>\n");
@@ -3683,6 +3713,7 @@ static void execute_single_command(int is_bg) {
         if (url[0] == 'h' && url[1] == 't' && url[2] == 't' && url[3] == 'p' && 
             url[4] == 's' && url[5] == ':' && url[6] == '/' && url[7] == '/') {
             kprintf("Error: HTTPS is not supported. Please use HTTP URLs.\n");
+            if (ota_in_progress) ota_error_occurred = 1;
             goto end_prompt;
         }
         
@@ -3725,16 +3756,109 @@ static void execute_single_command(int is_bg) {
         uint32_t dl_size = 0;
         
         if (http_get(host, port, path, &dl_data, &dl_size)) {
+            if (ota_in_progress) {
+                /* AUTOMATIC SIGNATURE VERIFICATION FOR DOWNLOADED UPDATE FILES */
+                char sig_path[160];
+                custom_strcpy(sig_path, path);
+                int sp_len = 0;
+                while (sig_path[sp_len]) sp_len++;
+                if (sp_len + 4 < (int)sizeof(sig_path)) {
+                    sig_path[sp_len++] = '.';
+                    sig_path[sp_len++] = 's';
+                    sig_path[sp_len++] = 'i';
+                    sig_path[sp_len++] = 'g';
+                    sig_path[sp_len] = '\0';
+                }
+                
+                uint8_t* sig_data = NULL;
+                uint32_t sig_len = 0;
+                kprintf("[+] Fetching signature from %s:%d%s...\n", host, port, sig_path);
+                int got_sig = http_get(host, port, sig_path, &sig_data, &sig_len);
+                if (!got_sig) {
+                    /* Try alternate signature replacing extension (e.g. /kernel.bin -> /kernel.sig) */
+                    char alt_sig[160];
+                    custom_strcpy(alt_sig, path);
+                    int dot_pos = -1;
+                    for (int d = 0; alt_sig[d] != '\0'; d++) {
+                        if (alt_sig[d] == '.') dot_pos = d;
+                        else if (alt_sig[d] == '/') dot_pos = -1;
+                    }
+                    if (dot_pos > 0) {
+                        alt_sig[dot_pos] = '\0';
+                        int ap_len = dot_pos;
+                        alt_sig[ap_len++] = '.';
+                        alt_sig[ap_len++] = 's';
+                        alt_sig[ap_len++] = 'i';
+                        alt_sig[ap_len++] = 'g';
+                        alt_sig[ap_len] = '\0';
+                        kprintf("[+] Trying alternate signature %s:%d%s...\n", host, port, alt_sig);
+                        got_sig = http_get(host, port, alt_sig, &sig_data, &sig_len);
+                    }
+                }
+                
+                if (!got_sig) {
+                    if (!ota_force_mode) {
+                        kprintf("\n\033[31mCRITICAL ERROR: Signature missing for %s! Aborting to prevent corruption.\033[0m\n", path);
+                        kfree(dl_data);
+                        ota_error_occurred = 1;
+                        goto end_prompt;
+                    }
+                    kprintf("\n\033[33m[WARNING] Signature missing for %s! Proceeding anyway (--force).\033[0m\n", path);
+                } else {
+                    /* Strip trailing newline or carriage return */
+                    while (sig_len > 0 && (sig_data[sig_len - 1] == '\r' || sig_data[sig_len - 1] == '\n' || sig_data[sig_len - 1] == ' ')) {
+                        sig_len--;
+                    }
+                    if (sig_len != 64) {
+                        if (!ota_force_mode) {
+                            kprintf("\n\033[31mCRITICAL ERROR: Invalid signature length (%d) for %s! Expected 64.\033[0m\n", sig_len, path);
+                            kfree(sig_data);
+                            kfree(dl_data);
+                            ota_error_occurred = 1;
+                            goto end_prompt;
+                        }
+                        kprintf("\n\033[33m[WARNING] Invalid signature length (%d) for %s! Proceeding anyway (--force).\033[0m\n", sig_len, path);
+                    } else {
+                        uint8_t mac[32];
+                        const uint8_t key[] = "sOS_super_secret_ota_key_2024";
+                        hmac_sha256(key, 29, dl_data, dl_size, mac);
+                        char mac_hex[65];
+                        bin_to_hex(mac, 32, mac_hex);
+                        
+                        int match = 1;
+                        for (int j = 0; j < 64; j++) {
+                            if (mac_hex[j] != sig_data[j]) { match = 0; break; }
+                        }
+                        
+                        if (!match) {
+                            if (!ota_force_mode) {
+                                kprintf("\n\033[31mCRITICAL ERROR: Signature mismatch for %s! File is corrupt or tampered with.\033[0m\n", path);
+                                kfree(sig_data);
+                                kfree(dl_data);
+                                ota_error_occurred = 1;
+                                goto end_prompt;
+                            }
+                            kprintf("\n\033[33m[WARNING] Signature mismatch for %s! Proceeding anyway (--force).\033[0m\n", path);
+                        } else {
+                            kprintf("[+] Signature verified successfully for %s!\n", path);
+                        }
+                    }
+                    kfree(sig_data);
+                }
+            }
+            
             kprintf("Saving %d bytes to '%s'...\n", dl_size, arg2);
             extern int fs_write_bin(const char*, uint8_t*, uint32_t);
             if (fs_write_bin(arg2, dl_data, dl_size)) {
-                kprintf("Success! Use 'cat %s' to read it.\n", arg2);
+                kprintf("Success! Saved '%s'.\n", arg2);
             } else {
-                kprintf("Error: File system write failed.\n");
+                kprintf("Error: File system write failed for '%s'.\n", arg2);
+                if (ota_in_progress) ota_error_occurred = 1;
             }
             kfree(dl_data);
         } else {
-            kprintf("Error: Download failed or timeout.\n");
+            kprintf("Error: Download failed or timeout for %s.\n", path);
+            if (ota_in_progress) ota_error_occurred = 1;
         }
     }
     else if (strcmp(cmd, "update") == 0) {
@@ -3744,22 +3868,27 @@ static void execute_single_command(int is_bg) {
         }
 
         int force_update = 0;
-        char* server_arg = arg1;
+        char* server_arg = NULL;
+        char* inst_arg = NULL;
 
         if (arg1 && (strcmp(arg1, "-f") == 0 || strcmp(arg1, "--force") == 0)) {
             force_update = 1;
             server_arg = arg2;
+            inst_arg = arg_rest;
         } else if (arg2 && (strcmp(arg2, "-f") == 0 || strcmp(arg2, "--force") == 0)) {
             force_update = 1;
             server_arg = arg1;
+        } else {
+            server_arg = arg1;
+            inst_arg = arg2;
         }
 
         if (!server_arg) {
-            kprintf("Usage: sudo update [-f|--force] <server_ip:port>\n");
+            kprintf("Usage: sudo update [-f|--force] <server_ip:port> [instruction_file]\n");
             kprintf("Example: sudo update 10.0.2.2:8080\n");
             goto end_prompt;
         }
-        
+
         kprintf("========================================\n");
         kprintf("       sOS Over-The-Air Update          \n");
         kprintf("========================================\n");
@@ -3781,106 +3910,257 @@ static void execute_single_command(int is_bg) {
                 idx++;
             }
         }
-        
-        uint8_t* sig_data = NULL;
-        uint32_t sig_len = 0;
-        kprintf("[1/4] Fetching kernel signature from %s:%d...\n", host, port);
-        if (!http_get(host, port, "/kernel.sig", &sig_data, &sig_len)) {
-            kprintf("Error: Could not download /kernel.sig from %s:%d\n", host, port);
-            goto end_prompt;
+
+        /* Save to global OTA state for variable expansion during command execution */
+        custom_strcpy(ota_server_str, server_arg);
+        custom_strcpy(ota_server_host, host);
+        ota_server_port = port;
+
+        /* Target instructions file */
+        char inst_file[64];
+        char sig_file[64];
+        if (inst_arg) {
+            if (inst_arg[0] == '/') {
+                custom_strcpy(inst_file, inst_arg);
+            } else {
+                inst_file[0] = '/';
+                custom_strcpy(&inst_file[1], inst_arg);
+            }
+            custom_strcpy(sig_file, inst_file);
+            int sl = 0; while (sig_file[sl]) sl++;
+            sig_file[sl++] = '.'; sig_file[sl++] = 's'; sig_file[sl++] = 'i'; sig_file[sl++] = 'g'; sig_file[sl] = '\0';
+        } else {
+            custom_strcpy(inst_file, "/uinstruct");
+            custom_strcpy(sig_file, "/uinstruct.sig");
         }
 
-        /* Ensure the downloaded signature is exactly 64 bytes long 
-           before attempting to read from the buffer later on. */
+        uint8_t* sig_data = NULL;
+        uint32_t sig_len = 0;
+        kprintf("[1/3] Fetching update instructions signature from %s:%d...\n", host, port);
+        int got_sig = http_get(host, port, sig_file, &sig_data, &sig_len);
+        if (!got_sig && !inst_arg) {
+            /* Fallback to /uintruct.sig */
+            custom_strcpy(inst_file, "/uintruct");
+            custom_strcpy(sig_file, "/uintruct.sig");
+            got_sig = http_get(host, port, sig_file, &sig_data, &sig_len);
+        }
+
+        /* If instructions file signature is not found, check for legacy kernel.sig update */
+        if (!got_sig) {
+            if (http_get(host, port, "/kernel.sig", &sig_data, &sig_len)) {
+                kprintf("[INFO] No uinstruct found. Falling back to legacy kernel update...\n");
+                while (sig_len > 0 && (sig_data[sig_len - 1] == '\r' || sig_data[sig_len - 1] == '\n' || sig_data[sig_len - 1] == ' ')) {
+                    sig_len--;
+                }
+                if (sig_len != 64) {
+                    kprintf("Error: Invalid signature length (%d bytes). Expected exactly 64.\n", sig_len);
+                    kfree(sig_data);
+                    goto end_prompt;
+                }
+                uint8_t* bin_data = NULL;
+                uint32_t bin_len = 0;
+                kprintf("[2/4] Downloading kernel.bin...\n");
+                if (!http_get(host, port, "/kernel.bin", &bin_data, &bin_len)) {
+                    kprintf("Error: Could not download /kernel.bin from %s:%d\n", host, port);
+                    kfree(sig_data);
+                    goto end_prompt;
+                }
+                kprintf("[3/4] Verifying cryptographic signature...\n");
+                uint8_t mac[32];
+                const uint8_t key[] = "sOS_super_secret_ota_key_2024";
+                hmac_sha256(key, 29, bin_data, bin_len, mac);
+                char mac_hex[65];
+                bin_to_hex(mac, 32, mac_hex);
+                int match = 1;
+                for (int j = 0; j < 64; j++) {
+                    if (mac_hex[j] != sig_data[j]) { match = 0; break; }
+                }
+                if (!match) {
+                    if (!force_update) {
+                        kprintf("\n\033[31mCRITICAL ERROR: Signature mismatch! Update rejected.\033[0m\n");
+                        kfree(sig_data); kfree(bin_data);
+                        goto end_prompt;
+                    }
+                    kprintf("\n\033[33m[WARNING] Signature mismatch! Proceeding anyway (--force).\033[0m\n");
+                }
+                kprintf("[4/4] Flashing new kernel to disk...\n");
+                extern int fs_write_bin(const char*, uint8_t*, uint32_t);
+                if (fs_write_bin("/kernel.bin", bin_data, bin_len)) {
+                    kprintf("\033[32mSuccess! Firmware verified and updated.\033[0m\n");
+                    kprintf("\nRebooting system in 5 seconds...\n");
+                    extern void fs_touch(const char*);
+                    fs_touch("/updt.flg");
+                    uint32_t start_wait = timer_ticks;
+                    while(timer_ticks < start_wait + 500) { __asm__ volatile("hlt"); }
+                    outb(0x64, 0xFE);
+                    while(1) { __asm__ volatile("cli; hlt"); }
+                } else {
+                    kprintf("Error: Failed to write kernel to disk.\n");
+                }
+                kfree(sig_data); kfree(bin_data);
+                goto end_prompt;
+            } else {
+                kprintf("Error: Could not download %s from %s:%d\n", sig_file, host, port);
+                goto end_prompt;
+            }
+        }
+
+        /* Modern OTA update flow via uinstruct */
+        while (sig_len > 0 && (sig_data[sig_len - 1] == '\r' || sig_data[sig_len - 1] == '\n' || sig_data[sig_len - 1] == ' ')) {
+            sig_len--;
+        }
         if (sig_len != 64) {
             kprintf("Error: Invalid signature length (%d bytes). Expected exactly 64.\n", sig_len);
             kfree(sig_data);
             goto end_prompt;
         }
-        
-        uint8_t* bin_data = NULL;
-        uint32_t bin_len = 0;
-        kprintf("[2/4] Downloading kernel.bin...\n");
-        if (!http_get(host, port, "/kernel.bin", &bin_data, &bin_len)) {
-            kprintf("Error: Could not download /kernel.bin from %s:%d\n", host, port);
+
+        uint8_t* inst_data = NULL;
+        uint32_t inst_len = 0;
+        kprintf("[2/3] Downloading %s...\n", inst_file);
+        if (!http_get(host, port, inst_file, &inst_data, &inst_len)) {
+            kprintf("Error: Could not download %s from %s:%d\n", inst_file, host, port);
             kfree(sig_data);
             goto end_prompt;
         }
-        
-        kprintf("[3/4] Verifying cryptographic signature...\n");
-        
+
+        kprintf("[3/3] Verifying instructions cryptographic signature...\n");
         uint8_t mac[32];
         const uint8_t key[] = "sOS_super_secret_ota_key_2024";
-        /* 29 is the exact length of the key string above */
-        hmac_sha256(key, 29, bin_data, bin_len, mac);
-        
+        hmac_sha256(key, 29, inst_data, inst_len, mac);
         char mac_hex[65];
         bin_to_hex(mac, 32, mac_hex);
-        
-        kprintf("\n[+] Downloaded File Size: %d bytes\n", bin_len);
-        
-        kprintf("[+] Expected Sig : ");
-        for(int j=0; j<64; j++) kputc(sig_data[j]);
-        kprintf("\n");
-        
-        kprintf("[+] Computed Sig : %s\n", mac_hex);
-        
+
         int match = 1;
         for (int j = 0; j < 64; j++) {
             if (mac_hex[j] != sig_data[j]) { match = 0; break; }
         }
-        
+
         if (!match) {
             if (!force_update) {
-                kprintf("\n\033[31mCRITICAL ERROR: Signature mismatch! Update rejected.\033[0m\n");
-                kprintf("The file is corrupt, unsigned, or has been tampered with.\n");
-                kfree(sig_data); kfree(bin_data);
+                kprintf("\n\033[31mCRITICAL ERROR: Signature mismatch on %s! Update rejected.\033[0m\n", inst_file);
+                kprintf("The instructions file is corrupt, unsigned, or has been tampered with.\n");
+                kfree(sig_data);
+                kfree(inst_data);
                 goto end_prompt;
             }
             kprintf("\n\033[33m[WARNING] Signature mismatch! Proceeding anyway (--force).\033[0m\n");
+        } else {
+            kprintf("[+] Instructions signature verified successfully.\n");
         }
+        kfree(sig_data);
 
-        kprintf("[+] Checking current version against update...\n\n");
-        uint8_t* cur_bin = NULL;
-        uint32_t cur_len = 0;
-        if (fs_load_file("/kernel.bin", &cur_bin, &cur_len)) {
-            if (cur_len == bin_len) {
-                int is_diff = 0;
-                for (uint32_t j = 0; j < bin_len; j++) {
-                    if (cur_bin[j] != bin_data[j]) { is_diff = 1; break; }
-                }
-                if (!is_diff) {
-                    if (!force_update) {
-                        kprintf("\033[32mYour system is already up to date\033[0m\n");
-                        kfree(cur_bin); kfree(sig_data); kfree(bin_data);
-                        goto end_prompt;
+        char* inst_str = (char*)kmalloc(inst_len + 1);
+        if (!inst_str) {
+            kprintf("Error: Out of memory for instructions.\n");
+            kfree(inst_data);
+            goto end_prompt;
+        }
+        for (uint32_t i = 0; i < inst_len; i++) inst_str[i] = (char)inst_data[i];
+        inst_str[inst_len] = '\0';
+        kfree(inst_data);
+
+        kprintf("\n========================================\n");
+        kprintf("     Executing Update Instructions      \n");
+        kprintf("========================================\n");
+
+        ota_in_progress = 1;
+        ota_force_mode = force_update;
+        ota_error_occurred = 0;
+
+        int cmd_count = 0;
+        int error = 0;
+        char* p = inst_str;
+
+        while (*p != '\0') {
+            while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ';') p++;
+            if (*p == '\0') break;
+
+            if (*p == '#' || (*p == '/' && *(p + 1) == '/')) {
+                while (*p && *p != '\n') p++;
+                continue;
+            }
+
+            char single_cmd[256];
+            int c_idx = 0;
+            while (*p != '\0' && *p != ';' && *p != '\n' && *p != '\r') {
+                if (c_idx < 255) single_cmd[c_idx++] = *p;
+                p++;
+            }
+            single_cmd[c_idx] = '\0';
+
+            while (c_idx > 0 && (single_cmd[c_idx - 1] == ' ' || single_cmd[c_idx - 1] == '\t')) {
+                single_cmd[--c_idx] = '\0';
+            }
+            if (c_idx == 0) continue;
+
+            /* Variable substitution: replace [ip], [server], $IP, $SERVER with ota_server_str */
+            char expanded_cmd[256];
+            int e_idx = 0;
+            for (int i = 0; single_cmd[i] != '\0' && e_idx < 255; ) {
+                if (single_cmd[i] == '[' && (
+                    (single_cmd[i+1] == 'i' || single_cmd[i+1] == 'I') &&
+                    (single_cmd[i+2] == 'p' || single_cmd[i+2] == 'P') &&
+                    single_cmd[i+3] == ']')) {
+                    for (int s = 0; ota_server_str[s] != '\0' && e_idx < 255; s++) {
+                        expanded_cmd[e_idx++] = ota_server_str[s];
                     }
-                    kprintf("\033[33m[WARNING] System is already up to date. Forcing update (--force)...\033[0m\n\n");
+                    i += 4;
+                } else if (single_cmd[i] == '[' && (
+                    (single_cmd[i+1] == 's' || single_cmd[i+1] == 'S') &&
+                    (single_cmd[i+2] == 'e' || single_cmd[i+2] == 'E') &&
+                    (single_cmd[i+3] == 'r' || single_cmd[i+3] == 'R') &&
+                    (single_cmd[i+4] == 'v' || single_cmd[i+4] == 'V') &&
+                    (single_cmd[i+5] == 'e' || single_cmd[i+5] == 'E') &&
+                    (single_cmd[i+6] == 'r' || single_cmd[i+6] == 'R') &&
+                    single_cmd[i+7] == ']')) {
+                    for (int s = 0; ota_server_str[s] != '\0' && e_idx < 255; s++) {
+                        expanded_cmd[e_idx++] = ota_server_str[s];
+                    }
+                    i += 8;
+                } else {
+                    expanded_cmd[e_idx++] = single_cmd[i++];
                 }
             }
-            kfree(cur_bin);
-        }
-        
-        kprintf("[4/4] Flashing new kernel to disk...\n");
-        extern int fs_write_bin(const char*, uint8_t*, uint32_t);
-        
-        if (fs_write_bin("/kernel.bin", bin_data, bin_len)) {
-            kprintf("\033[32mSuccess! Firmware verified and updated.\033[0m\n");
-            kprintf("\nRebooting system in 5 seconds...\n");
-            
-            extern void fs_touch(const char*);
-            fs_touch("/updt.flg");
+            expanded_cmd[e_idx] = '\0';
 
-            uint32_t start_wait = timer_ticks;
-            while(timer_ticks < start_wait + 500) { __asm__ volatile("hlt"); }
-            
-            outb(0x64, 0xFE);
-            while(1) { __asm__ volatile("cli; hlt"); }
-        } else {
-            kprintf("Error: Failed to write kernel to disk.\n");
+            kprintf("\n[OTA %d] %s\n", cmd_count + 1, expanded_cmd);
+
+            execute_command_with_redirection(expanded_cmd, 0);
+
+            if (ota_error_occurred) {
+                error = 1;
+                break;
+            }
+            cmd_count++;
         }
-        
-        kfree(sig_data); kfree(bin_data);
+
+        kfree(inst_str);
+        ota_in_progress = 0;
+
+        if (error) {
+            kprintf("\n\033[31mCRITICAL ERROR: OTA Update aborted due to errors!\033[0m\n");
+            goto end_prompt;
+        }
+
+        if (cmd_count == 0) {
+            kprintf("\n[WARNING] No executable commands found in update instructions.\n");
+            goto end_prompt;
+        }
+
+        kprintf("\n========================================\n");
+        kprintf("\033[32m  %d UPDATE INSTRUCTION(S) APPLIED!\033[0m\n", cmd_count);
+        kprintf("========================================\n");
+        kprintf("\nRebooting system in 5 seconds...\n");
+
+        extern void fs_touch(const char*);
+        fs_touch("/updt.flg");
+
+        uint32_t start_wait = timer_ticks;
+        while(timer_ticks < start_wait + 500) { __asm__ volatile("hlt"); }
+
+        outb(0x64, 0xFE);
+        while(1) { __asm__ volatile("cli; hlt"); }
     }
     else if (strcmp(cmd, "lock") == 0) {
         clear_terminal();

@@ -110,8 +110,10 @@ On boot, sOS presents a login prompt. The system image is pre-configured with th
 
 ### 🔒 Cryptographic Over-The-Air (OTA) Updates
 * Native in-kernel implementation of **SHA-256** and **HMAC-SHA256**.
-* Run `sudo update <server:port>` to download a new `kernel.bin` and cryptographic signature `kernel.sig`.
-* The kernel verifies payload authenticity using HMAC-SHA256, compares it against the active kernel, writes the update directly to the FAT32 disk image via ATA PIO, creates a flag, and triggers an automated hardware reboot via the PS/2 controller (`0x64`).
+* Modern command-based update model: fetches an update instructions file (`uinstruct` and `uinstruct.sig`) containing a list of update commands (e.g. `mkdir /bin/ ; wget [ip]/app.sos /bin/app.sos ; wget [ip]/kernel.bin /kernel.bin`).
+* Automatic HMAC-SHA256 signing and verification for every downloaded file to prevent corruption and tampering.
+* Run `sudo update <server:port>` to download instructions, verify signatures, execute filesystem modifications and payload downloads, create `/updt.flg`, and trigger an automated hardware reboot via the PS/2 controller (`0x64`).
+* Fallback support for legacy single `kernel.bin`/`kernel.sig` updates.
 
 ### 📁 Virtual Filesystem (VFS) & Unix-Like Hierarchy
 * **Modular VFS Layer:** Unified abstraction routing all file descriptors, standard I/O streams, pipelines, and disk storage through a common `vfs_node_t` interface.
@@ -163,7 +165,7 @@ On boot, sOS presents a login prompt. The system image is pre-configured with th
 | **`kill`** | `kill <PID>` | Terminates a running process (must be owner or root). |
 | **`ifconfig`**| `ifconfig` | Displays network status: MAC, IP, Subnet Mask, Gateway, and DNS. |
 | **`wget`** | `wget <http://host:port/path> <out>`| Downloads a file over HTTP TCP port 80 (or custom port). |
-| **`update`** | `sudo update <server:port>` | OTA update: downloads, verifies HMAC signature, flashes kernel, and reboots. |
+| **`update`** | `sudo update <server:port> [inst_file]` | Modern OTA update: downloads instructions, verifies HMAC signatures, applies commands (fs/binaries), and reboots. |
 | **`su`** | `su [username]` | Switches active user session. |
 | **`sudo`** | `sudo <command>` | Executes a command with temporary Root privileges. |
 | **`userlist`**| `userlist <list\|add\|remove>`| Lists users (shows salts/hashes to root), adds, or removes accounts. |

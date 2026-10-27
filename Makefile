@@ -81,5 +81,5 @@ drive.vdi: drive.img
 	qemu-img convert -f raw -O vdi drive.img drive.vdi
 
 clean:
-	rm -f *.o kernel.bin drive.img test.txt app.sos app.bin sos.iso drive.vdi kernel.sig
+	rm -f *.o kernel.bin drive.img test.txt app.sos app.bin sos.iso drive.vdi *.sig
 	rm -rf isodir
