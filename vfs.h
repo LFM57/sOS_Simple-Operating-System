@@ -70,4 +70,9 @@ void vfs_close(vfs_node_t* node);
 int vfs_readdir(vfs_node_t* node, uint32_t index, vfs_dirent_t* out_dirent);
 vfs_node_t* vfs_finddir(vfs_node_t* node, const char* name);
 
+void vfs_canonicalize_path(const char* path, char* out_canonical, uint32_t max_len);
+int vfs_is_dev_path(const char* canonical_path);
+vfs_node_t* devfs_open(const char* dev_name, uint32_t flags);
+vfs_node_t* devfs_get_root(void);
+
 #endif

@@ -676,16 +676,22 @@ static void print_human_size(uint32_t size) {
     }
 }
 
-void fs_ls() {
-    /* [SECURITY] Check if the user has permission to read the current directory */
-    if (!check_current_dir_permission(0)) {
-        kprintf("Error: Permission denied.\n");
+void fs_ls(const char* target_path) {
+    const char* path_to_open = (target_path && target_path[0] != '\0') ? target_path : get_current_path();
+
+    vfs_node_t* dir_node = vfs_open(path_to_open, O_RDONLY);
+    if (!dir_node) {
+        if (fs_error == FS_ERR_PERMISSION) {
+            kprintf("Error: Permission denied.\n");
+        } else {
+            kprintf("Error: '%s': No such file or directory\n", path_to_open);
+        }
         return;
     }
 
-    vfs_node_t* dir_node = vfs_open(get_current_path(), O_RDONLY);
-    if (!dir_node) {
-        kprintf("Error: Permission denied.\n");
+    if (dir_node->type != VFS_DIRECTORY) {
+        kprintf("Error: '%s' is not a directory.\n", path_to_open);
+        vfs_close(dir_node);
         return;
     }
     
@@ -703,6 +709,8 @@ void fs_ls() {
         
         if (dirent.type == VFS_DIRECTORY) {
             kprintf("| Directory | -\n");
+        } else if (dirent.type == VFS_CHARDEV) {
+            kprintf("| Device    | -\n");
         } else {
             char type[4] = {' ', ' ', ' ', '\0'};
             int dot = -1;
@@ -944,18 +952,22 @@ void fs_cd(const char* path) {
     current_dir_sector = data_start + ((cluster - 2) * sectors_per_cluster);
 
     /* Dynamic and robust reconstruction of the command prompt path */
-    if (path[0] == '/') {
-        current_path[0] = '/';
-        current_path[1] = '\0';
-    }
-    const char* track_p = path;
-    char track_comp[64];
-    while ((track_p = next_component(track_p, track_comp)) != NULL) {
-        update_path(track_comp);
-    }
+    char canon[256];
+    vfs_canonicalize_path(path, canon, sizeof(canon));
+    int ci = 0;
+    while (canon[ci] && ci < 255) { current_path[ci] = canon[ci]; ci++; }
+    current_path[ci] = '\0';
 }
 
 void fs_mkdir(const char* dirname) {
+    if (!dirname) return;
+    char canon[128];
+    vfs_canonicalize_path(dirname, canon, sizeof(canon));
+    if (vfs_is_dev_path(canon)) {
+        kprintf("Error: Operation not permitted on /dev.\n");
+        return;
+    }
+
     uint32_t parent_cluster, parent_sector;
     char fat_name[11];
     if (!resolve_path(dirname, &parent_cluster, &parent_sector, fat_name) || fat_name[0] == '\0' || fat_name[0] == '.') {
@@ -1096,6 +1108,13 @@ void fs_rm(const char* arg1, const char* arg2) {
         recursive = 1; filename = arg2;
     }
     if (filename == NULL) { kprintf("Usage: rm [-r] <file or directory>\n"); return; }
+
+    char canon[128];
+    vfs_canonicalize_path(filename, canon, sizeof(canon));
+    if (vfs_is_dev_path(canon)) {
+        kprintf("Error: Operation not permitted on /dev.\n");
+        return;
+    }
 
     /* WILDCARD (*) HANDLING */
     if (strcmp(filename, "*") == 0) {
@@ -1295,6 +1314,14 @@ void fs_rm(const char* arg1, const char* arg2) {
 
 /* Create an empty file (0 bytes) */
 void fs_touch(const char* filename) {
+    if (!filename) return;
+    char canon[128];
+    vfs_canonicalize_path(filename, canon, sizeof(canon));
+    if (vfs_is_dev_path(canon)) {
+        kprintf("Error: Operation not permitted on /dev.\n");
+        return;
+    }
+
     uint32_t parent_cluster, parent_sector;
     char target_fat[11];
     if (!resolve_path(filename, &parent_cluster, &parent_sector, target_fat)) {

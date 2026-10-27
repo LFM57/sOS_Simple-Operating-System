@@ -81,9 +81,9 @@ On boot, sOS presents a login prompt. The system image is pre-configured with th
 
 | Username | Password | UID | Privilege Level | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **`root`** | `root` | `0` | Superuser / Administrator | Full system access |
-| **`user`** | `password` | `1` | Standard User | Home directory at `/user` |
-| **`guest`** | *(None — hit Enter)* | `2` | Guest User | Home directory at `/guest` |
+| **`root`** | `root` | `0` | Superuser / Administrator | Full system access (`/`) |
+| **`user`** | `password` | `1` | Standard User | Home directory at `/home/user` |
+| **`guest`** | *(None — hit Enter)* | `2` | Guest User | Home directory at `/home/guest` |
 
 ---
 
@@ -113,14 +113,18 @@ On boot, sOS presents a login prompt. The system image is pre-configured with th
 * Run `sudo update <server:port>` to download a new `kernel.bin` and cryptographic signature `kernel.sig`.
 * The kernel verifies payload authenticity using HMAC-SHA256, compares it against the active kernel, writes the update directly to the FAT32 disk image via ATA PIO, creates a flag, and triggers an automated hardware reboot via the PS/2 controller (`0x64`).
 
-### 📁 FAT32 Filesystem with UNIX Permissions
-* Full FAT32 driver reading/writing sectors via ATA PIO mode (`0x1F0`-`0x1F7`).
-* Dynamic directory expansion when adding files.
-* **Extended Permission Byte:** Directory entries repurpose unused attribute bytes into a permission byte:
-  * Lower 4 bits: Owner UID (0–15).
-  * High nibble: Read/Write flags for Owner and Others (`[UID|RWrw]`).
-* Path traversal supporting relative paths (`.`, `..`), nested paths, and absolute roots (`/`).
-* Wildcard (`*`) support for batch operations (`rm *`, `chown *`, `chmod *`).
+### 📁 Virtual Filesystem (VFS) & Unix-Like Hierarchy
+* **Modular VFS Layer:** Unified abstraction routing all file descriptors, standard I/O streams, pipelines, and disk storage through a common `vfs_node_t` interface.
+* **Structured Hierarchy:**
+  * `/home/[username]/`: Personal user home directories (`/home/user`, `/home/guest`, etc.) with ownership isolation (`0x30` permissions).
+  * `/bin/`: User application binaries (e.g. `/bin/app.sos`) accessible globally from the shell.
+  * `/dev/`: Virtual device filesystem (`devfs`) exposing character device nodes:
+    * `/dev/null`: Data sink / discard stream.
+    * `/dev/zero`: Infinite zero-byte generator.
+    * `/dev/tty`: Interactive terminal I/O device.
+    * `/dev/eth0`: Direct network interface node (read metrics, transmit raw Ethernet frames).
+    * `/dev/urandom`: Pseudorandom number generator.
+* **Full FAT32 Driver:** Reading/writing sectors via ATA PIO mode (`0x1F0`-`0x1F7`) with Unix permissions (`[UID|RWrw]`), path canonicalization, and wildcard (`*`) support.
 
 ### ⏱️ Preemptive Multitasking & Ring 3 User Space
 * **Timer:** Programmable Interval Timer (PIT) at 100 Hz delivering 10 ms preemptive time slices.

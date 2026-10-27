@@ -167,6 +167,16 @@ int strcmp(const char *s1, const char *s2) {
     return *(const unsigned char*)s1 - *(const unsigned char*)s2;
 }
 
+int strncmp(const char *s1, const char *s2, uint32_t n) {
+    while (n && *s1 && (*s1 == *s2)) {
+        s1++;
+        s2++;
+        n--;
+    }
+    if (n == 0) return 0;
+    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
+}
+
 struct multiboot_info {
     uint32_t flags; uint32_t mem_lower; uint32_t mem_upper;
     uint32_t boot_device; uint32_t cmdline; uint32_t mods_count; uint32_t mods_addr;
@@ -1416,6 +1426,69 @@ int sys_waitpid(int pid, int* status, int options) {
     return pid;
 }
 
+static int test_load_candidate(const char* candidate, char* out_path, uint32_t max_len) {
+    uint8_t* test_buf = NULL;
+    uint32_t test_size = 0;
+    if (fs_load_file(candidate, &test_buf, &test_size)) {
+        kfree(test_buf);
+        uint32_t i = 0;
+        while (candidate[i] && i < max_len - 1) { out_path[i] = candidate[i]; i++; }
+        out_path[i] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
+int resolve_binary_path(const char* input, char* out_path, uint32_t max_len) {
+    if (!input || input[0] == '\0' || !out_path || max_len == 0) return 0;
+
+    int has_slash = 0;
+    for (int i = 0; input[i]; i++) {
+        if (input[i] == '/') { has_slash = 1; break; }
+    }
+
+    char candidate[160];
+
+    if (has_slash) {
+        /* Direct path */
+        if (test_load_candidate(input, out_path, max_len)) return 1;
+
+        /* Direct path with .sos */
+        int ci = 0;
+        while (input[ci] && ci < 150) { candidate[ci] = input[ci]; ci++; }
+        candidate[ci++] = '.'; candidate[ci++] = 's';
+        candidate[ci++] = 'o'; candidate[ci++] = 's'; candidate[ci] = '\0';
+        if (test_load_candidate(candidate, out_path, max_len)) return 1;
+
+        return 0;
+    }
+
+    /* 1. Current directory: <input> */
+    if (test_load_candidate(input, out_path, max_len)) return 1;
+
+    /* 2. Current directory: <input>.sos */
+    int ci = 0;
+    while (input[ci] && ci < 150) { candidate[ci] = input[ci]; ci++; }
+    candidate[ci++] = '.'; candidate[ci++] = 's';
+    candidate[ci++] = 'o'; candidate[ci++] = 's'; candidate[ci] = '\0';
+    if (test_load_candidate(candidate, out_path, max_len)) return 1;
+
+    /* 3. In /bin/: /bin/<input> */
+    candidate[0] = '/'; candidate[1] = 'b'; candidate[2] = 'i';
+    candidate[3] = 'n'; candidate[4] = '/';
+    ci = 5;
+    for (int j = 0; input[j] && ci < 150; j++) candidate[ci++] = input[j];
+    candidate[ci] = '\0';
+    if (test_load_candidate(candidate, out_path, max_len)) return 1;
+
+    /* 4. In /bin/: /bin/<input>.sos */
+    candidate[ci++] = '.'; candidate[ci++] = 's';
+    candidate[ci++] = 'o'; candidate[ci++] = 's'; candidate[ci] = '\0';
+    if (test_load_candidate(candidate, out_path, max_len)) return 1;
+
+    return 0;
+}
+
 int sys_execve(const char* path, char* const argv[], char* const envp[]) {
     (void)argv;
     (void)envp;
@@ -1426,24 +1499,12 @@ int sys_execve(const char* path, char* const argv[], char* const envp[]) {
     uint32_t elf_size = 0;
 
     char resolved_path[128];
-    int pi = 0;
-    while (path[pi] && pi < 127) { resolved_path[pi] = path[pi]; pi++; }
-    resolved_path[pi] = '\0';
+    if (!resolve_binary_path(path, resolved_path, sizeof(resolved_path))) {
+        return -1;
+    }
 
     if (!fs_load_file(resolved_path, &elf_buf, &elf_size)) {
-        char with_ext[132];
-        int k = 0;
-        while (resolved_path[k] && k < 127) { with_ext[k] = resolved_path[k]; k++; }
-        with_ext[k++] = '.'; with_ext[k++] = 's'; with_ext[k++] = 'o'; with_ext[k++] = 's'; with_ext[k] = '\0';
-        if (!fs_load_file(with_ext, &elf_buf, &elf_size)) {
-            char bin_path[140] = "/bin/";
-            int bi = 5;
-            for (int j = 0; resolved_path[j] && bi < 135; j++) bin_path[bi++] = resolved_path[j];
-            bin_path[bi] = '\0';
-            if (!fs_load_file(bin_path, &elf_buf, &elf_size)) {
-                return -1;
-            }
-        }
+        return -1;
     }
 
     if (elf_size < sizeof(Elf32_Ehdr)) {
@@ -2858,11 +2919,39 @@ static void execute_single_command(int is_bg) {
         kprintf("\n");
     } 
     else if (strcmp(cmd, "ls") == 0) {
-        fs_ls();
+        fs_ls(arg1);
     } 
     else if (strcmp(cmd, "cd") == 0) {
-        if (arg1) fs_cd(arg1);
-        else kprintf("Usage: cd <directory>\n");
+        if (!arg1 || strcmp(arg1, "~") == 0) {
+            if (current_uid == 0) {
+                fs_cd("/");
+            } else {
+                char home_dir[64] = "/home/";
+                int hi = 6;
+                for (int i = 0; current_user[i] && hi < 60; i++) home_dir[hi++] = current_user[i];
+                home_dir[hi] = '\0';
+                fs_cd(home_dir);
+            }
+        } else if (arg1[0] == '~' && (arg1[1] == '/' || arg1[1] == '\0')) {
+            char target[128];
+            int ti = 0;
+            if (current_uid == 0) {
+                target[ti++] = '/';
+            } else {
+                const char* h = "/home/";
+                for (int i = 0; h[i]; i++) target[ti++] = h[i];
+                for (int i = 0; current_user[i] && ti < 60; i++) target[ti++] = current_user[i];
+            }
+            if (arg1[1] == '/') {
+                int ai = 2;
+                if (ti > 0 && target[ti - 1] != '/') target[ti++] = '/';
+                while (arg1[ai] && ti < 127) target[ti++] = arg1[ai++];
+            }
+            target[ti] = '\0';
+            fs_cd(target);
+        } else {
+            fs_cd(arg1);
+        }
     }
     else if (strcmp(cmd, "mkdir") == 0) {
         if (arg1) fs_mkdir(arg1);
@@ -2960,40 +3049,43 @@ static void execute_single_command(int is_bg) {
     }
     else if (strcmp(cmd, "run") == 0) {
         if (arg1 != NULL) {
-            if (current_task != 0) {
-                sys_execve(arg1, NULL, NULL);
-                kprintf("Error: Failed to exec '%s'.\n", arg1);
-                kill_current_task();
-            } else {
-                uint8_t* file_buf;
-                uint32_t file_size;
-                if (fs_load_file(arg1, &file_buf, &file_size)) {
-                    int task_id = create_user_task(file_buf, file_size);
-                    kfree(file_buf);
-                    if (task_id != -1) {
-                        /* Associate the background status with the task */
-                        tasks[task_id].is_background = is_bg; 
-                        
-                        if (is_bg) {
-                            kprintf("[Process %d launched in background]\n", task_id);
-                            /* Prompt is given back instantly to the user */
-                        } else {
-                            /* Classic blocking synchronous mode */
-                            fg_task = task_id;
-                            sys_waitpid(task_id, NULL, 0);
-                            fg_task = -1;
+            char target_binary[128];
+            if (resolve_binary_path(arg1, target_binary, sizeof(target_binary))) {
+                if (current_task != 0) {
+                    sys_execve(target_binary, NULL, NULL);
+                    kprintf("Error: Failed to exec '%s'.\n", target_binary);
+                    kill_current_task();
+                } else {
+                    uint8_t* file_buf;
+                    uint32_t file_size;
+                    if (fs_load_file(target_binary, &file_buf, &file_size)) {
+                        int task_id = create_user_task(file_buf, file_size);
+                        kfree(file_buf);
+                        if (task_id != -1) {
+                            /* Associate the background status with the task */
+                            tasks[task_id].is_background = is_bg; 
+                            
+                            if (is_bg) {
+                                kprintf("[Process %d launched in background]\n", task_id);
+                                /* Prompt is given back instantly to the user */
+                            } else {
+                                /* Classic blocking synchronous mode */
+                                fg_task = task_id;
+                                sys_waitpid(task_id, NULL, 0);
+                                fg_task = -1;
+                            }
                         }
                     }
+                }
+            } else {
+                if (fs_error == FS_ERR_PERMISSION) {
+                    kprintf("Error: Permission denied.\n");
                 } else {
-                    if (fs_error == FS_ERR_PERMISSION) {
-                        kprintf("Error: Permission denied.\n");
-                    } else {
-                        kprintf("Error: '%s': No such file\n", arg1);
-                        char file_suggest[13];
-                        extern int fs_suggest_file(const char*, char*);
-                        if (fs_suggest_file(arg1, file_suggest)) {
-                            kprintf("Did you mean '%s'?\n", file_suggest);
-                        }
+                    kprintf("Error: '%s': No such file\n", arg1);
+                    char file_suggest[13];
+                    extern int fs_suggest_file(const char*, char*);
+                    if (fs_suggest_file(arg1, file_suggest)) {
+                        kprintf("Did you mean '%s'?\n", file_suggest);
                     }
                 }
             }
@@ -3201,12 +3293,17 @@ static void execute_single_command(int is_bg) {
                 fs_cd("/");
                 
                 if (current_uid != 0) {
+                    char home_dir[64] = "/home/";
+                    int hi = 6;
+                    for (int i = 0; arg1[i] && hi < 60; i++) home_dir[hi++] = arg1[i];
+                    home_dir[hi] = '\0';
+
                     current_uid = 0; /* Switch to Root for chown/chmod */
-                    fs_chown(arg1, uid);
-                    fs_chmod(arg1, 0x30);
+                    fs_chown(home_dir, uid);
+                    fs_chmod(home_dir, 0x30);
                     current_uid = uid; /* Restores user original identity */
                     
-                    fs_cd(arg1); /* Move into his personnal folder */
+                    fs_cd(home_dir); /* Move into his personal folder */
                 }
             } else kprintf("su: Authentication failure\n");
         } else kprintf("su: user %s does not exist\n", arg1);
@@ -3416,11 +3513,16 @@ static void execute_single_command(int is_bg) {
             kfree(buf); kfree(new_buf);
 
             /* Automatic creation of Home folder */
-            fs_mkdir(username);
-            fs_chown(username, new_uid);
-            fs_chmod(username, 0x30); /* Standard 0x30 permissions */
+            char home_dir[64] = "/home/";
+            int hi = 6;
+            for (int i = 0; username[i] && hi < 60; i++) home_dir[hi++] = username[i];
+            home_dir[hi] = '\0';
 
-            kprintf("User '%s' (UID %d) added. Home directory created.\n", username, new_uid);
+            fs_mkdir(home_dir);
+            fs_chown(home_dir, new_uid);
+            fs_chmod(home_dir, 0x30); /* Standard 0x30 permissions */
+
+            kprintf("User '%s' (UID %d) added. Home directory %s created.\n", username, new_uid, home_dir);
         }
         
         /* 3. ACTION: REMOVE */
@@ -3784,23 +3886,10 @@ static void execute_single_command(int is_bg) {
     }
     else {
         /* Check if cmd is an executable ELF binary */
-        uint8_t* test_buf = NULL;
-        uint32_t test_size = 0;
         char possible_file[128];
-        int ci = 0;
-        while (cmd[ci] && ci < 120) { possible_file[ci] = cmd[ci]; ci++; }
-        possible_file[ci] = '\0';
-
-        int found = fs_load_file(possible_file, &test_buf, &test_size);
-        if (!found) {
-            possible_file[ci++] = '.'; possible_file[ci++] = 's';
-            possible_file[ci++] = 'o'; possible_file[ci++] = 's';
-            possible_file[ci] = '\0';
-            found = fs_load_file(possible_file, &test_buf, &test_size);
-        }
+        int found = resolve_binary_path(cmd, possible_file, sizeof(possible_file));
 
         if (found) {
-            kfree(test_buf);
             if (current_task != 0) {
                 sys_execve(possible_file, NULL, NULL);
                 kprintf("Error: Failed to exec '%s'.\n", possible_file);
@@ -4085,15 +4174,20 @@ void logout_and_login(const char* message) {
             kprintf("\nWelcome, %s!\n", current_user);
             kprintf("Type 'help' for a list of available commands.\n");
             
-            /* Auto-CD to the user's personnal directory */
+            /* Auto-CD to the user's personal home directory */
             if (current_uid != 0) {
+                char home_dir[64] = "/home/";
+                int hi = 6;
+                for (int i = 0; user[i] && hi < 60; i++) home_dir[hi++] = user[i];
+                home_dir[hi] = '\0';
+
                 uint8_t old_uid = current_uid;
                 current_uid = 0; /* Temporarly Root */
-                fs_chown(user, uid);
-                fs_chmod(user, 0x30); 
+                fs_chown(home_dir, uid);
+                fs_chmod(home_dir, 0x30); 
                 current_uid = old_uid; /* Restores original identity */
                 
-                fs_cd(user);
+                fs_cd(home_dir);
             }
             break;
         } else {

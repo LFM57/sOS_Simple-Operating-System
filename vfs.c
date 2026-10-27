@@ -1,6 +1,13 @@
 #include "system.h"
 #include "vfs.h"
 #include "net.h"
+#include "e1000.h"
+
+extern uint8_t sOS_subnet[4];
+extern uint8_t sOS_router[4];
+extern uint8_t sOS_dns[4];
+extern volatile uint32_t timer_ticks;
+extern int check_permission_byte(uint8_t sec_byte, int is_write);
 
 /* FAT32 Directory Entry structure & internals from fs.c */
 typedef struct {
@@ -549,6 +556,403 @@ int vfs_create_pipe(vfs_node_t** out_read_node, vfs_node_t** out_write_node) {
     return 0;
 }
 
+/* --- DevFS Virtual Device Operations --- */
+
+static void dev_append_str(char* buf, uint32_t* pos, const char* s) {
+    for (int i = 0; s[i]; i++) buf[(*pos)++] = s[i];
+}
+
+static void dev_append_int(char* buf, uint32_t* pos, uint32_t val) {
+    if (val == 0) { buf[(*pos)++] = '0'; return; }
+    char tmp[12];
+    int t = 0;
+    while (val > 0) { tmp[t++] = '0' + (val % 10); val /= 10; }
+    for (int i = t - 1; i >= 0; i--) buf[(*pos)++] = tmp[i];
+}
+
+/* /dev/null */
+static int null_vfs_read(struct vfs_node* node, uint32_t offset, uint32_t size, uint8_t* buffer) {
+    (void)node; (void)offset; (void)size; (void)buffer;
+    return 0;
+}
+
+static int null_vfs_write(struct vfs_node* node, uint32_t offset, uint32_t size, const uint8_t* buffer) {
+    (void)node; (void)offset; (void)buffer;
+    return (int)size;
+}
+
+static vfs_ops_t null_vfs_ops = {
+    .read = null_vfs_read,
+    .write = null_vfs_write,
+    .open = NULL,
+    .close = NULL,
+    .readdir = NULL,
+    .finddir = NULL
+};
+
+/* /dev/zero */
+static int zero_vfs_read(struct vfs_node* node, uint32_t offset, uint32_t size, uint8_t* buffer) {
+    (void)node; (void)offset;
+    if (!buffer) return -1;
+    for (uint32_t i = 0; i < size; i++) buffer[i] = 0;
+    return (int)size;
+}
+
+static int zero_vfs_write(struct vfs_node* node, uint32_t offset, uint32_t size, const uint8_t* buffer) {
+    (void)node; (void)offset; (void)buffer;
+    return (int)size;
+}
+
+static vfs_ops_t zero_vfs_ops = {
+    .read = zero_vfs_read,
+    .write = zero_vfs_write,
+    .open = NULL,
+    .close = NULL,
+    .readdir = NULL,
+    .finddir = NULL
+};
+
+/* /dev/eth0 (Intel 82540EM / e1000 network card) */
+static int eth0_vfs_read(struct vfs_node* node, uint32_t offset, uint32_t size, uint8_t* buffer) {
+    (void)node;
+    if (!buffer || size == 0) return 0;
+
+    if (!e1000_installed) {
+        const char* msg = "e1000: device not present\n";
+        uint32_t len = 0; while (msg[len]) len++;
+        if (offset >= len) return 0;
+        uint32_t avail = len - offset;
+        uint32_t to_copy = (size < avail) ? size : avail;
+        for (uint32_t i = 0; i < to_copy; i++) buffer[i] = (uint8_t)msg[offset + i];
+        return (int)to_copy;
+    }
+
+    char info[512];
+    uint32_t pos = 0;
+    const char* hex = "0123456789ABCDEF";
+
+    dev_append_str(info, &pos, "e1000     Link encap: Ethernet  HWaddr ");
+    for (int i = 0; i < 6; i++) {
+        uint8_t m = e1000_mac[i];
+        info[pos++] = hex[m >> 4];
+        info[pos++] = hex[m & 0x0F];
+        if (i < 5) info[pos++] = ':';
+    }
+    info[pos++] = '\n';
+
+    dev_append_str(info, &pos, "          inet addr: ");
+    for (int i = 0; i < 4; i++) {
+        dev_append_int(info, &pos, sOS_ip[i]);
+        if (i < 3) info[pos++] = '.';
+    }
+    dev_append_str(info, &pos, "  Mask: ");
+    for (int i = 0; i < 4; i++) {
+        dev_append_int(info, &pos, sOS_subnet[i]);
+        if (i < 3) info[pos++] = '.';
+    }
+    info[pos++] = '\n';
+
+    dev_append_str(info, &pos, "          Gateway  : ");
+    for (int i = 0; i < 4; i++) {
+        dev_append_int(info, &pos, sOS_router[i]);
+        if (i < 3) info[pos++] = '.';
+    }
+    dev_append_str(info, &pos, "  DNS : ");
+    for (int i = 0; i < 4; i++) {
+        dev_append_int(info, &pos, sOS_dns[i]);
+        if (i < 3) info[pos++] = '.';
+    }
+    info[pos++] = '\n';
+
+    dev_append_str(info, &pos, "          UP BROADCAST RUNNING MULTICAST  MTU: 1500\n");
+    info[pos] = '\0';
+
+    if (offset >= pos) return 0;
+    uint32_t avail = pos - offset;
+    uint32_t to_copy = (size < avail) ? size : avail;
+    for (uint32_t i = 0; i < to_copy; i++) {
+        buffer[i] = (uint8_t)info[offset + i];
+    }
+    return (int)to_copy;
+}
+
+static int eth0_vfs_write(struct vfs_node* node, uint32_t offset, uint32_t size, const uint8_t* buffer) {
+    (void)node;
+    (void)offset;
+    if (!buffer) return -1;
+    if (!e1000_installed || size == 0) return 0;
+    uint16_t tx_len = (size > 1514) ? 1514 : (uint16_t)size;
+    e1000_transmit((uint8_t*)buffer, tx_len);
+    return (int)tx_len;
+}
+
+static vfs_ops_t eth0_vfs_ops = {
+    .read = eth0_vfs_read,
+    .write = eth0_vfs_write,
+    .open = NULL,
+    .close = NULL,
+    .readdir = NULL,
+    .finddir = NULL
+};
+
+/* /dev/urandom */
+static uint32_t urandom_seed = 0x12345678;
+
+static int urandom_vfs_read(struct vfs_node* node, uint32_t offset, uint32_t size, uint8_t* buffer) {
+    (void)node;
+    (void)offset;
+    if (!buffer) return -1;
+    for (uint32_t i = 0; i < size; i++) {
+        urandom_seed = (urandom_seed * 1103515245 + 12345) ^ timer_ticks;
+        buffer[i] = (uint8_t)(urandom_seed >> 16);
+    }
+    return (int)size;
+}
+
+static int urandom_vfs_write(struct vfs_node* node, uint32_t offset, uint32_t size, const uint8_t* buffer) {
+    (void)node;
+    (void)offset;
+    if (!buffer) return -1;
+    for (uint32_t i = 0; i < size; i++) {
+        urandom_seed = (urandom_seed << 5) ^ buffer[i];
+    }
+    return (int)size;
+}
+
+static vfs_ops_t urandom_vfs_ops = {
+    .read = urandom_vfs_read,
+    .write = urandom_vfs_write,
+    .open = NULL,
+    .close = NULL,
+    .readdir = NULL,
+    .finddir = NULL
+};
+
+/* DevFS Directory Operations */
+static int devfs_readdir(struct vfs_node* node, uint32_t index, vfs_dirent_t* out_dirent) {
+    if (!node || node->type != VFS_DIRECTORY || !out_dirent) return 0;
+
+    static const struct {
+        const char* name;
+        uint8_t type;
+        uint8_t sec_byte;
+        uint32_t size;
+    } dev_entries[] = {
+        { ".",       VFS_DIRECTORY, 0x70, 0 },
+        { "..",      VFS_DIRECTORY, 0x70, 0 },
+        { "null",    VFS_CHARDEV,   0xF0, 0 },
+        { "zero",    VFS_CHARDEV,   0xF0, 0 },
+        { "tty",     VFS_CHARDEV,   0xF0, 0 },
+        { "eth0",    VFS_CHARDEV,   0x70, 0 },
+        { "urandom", VFS_CHARDEV,   0xF0, 0 }
+    };
+    uint32_t num_devs = sizeof(dev_entries) / sizeof(dev_entries[0]);
+
+    if (index >= num_devs) return 0;
+
+    for (int k = 0; k < 64; k++) out_dirent->name[k] = 0;
+    const char* s = dev_entries[index].name;
+    for (int k = 0; s[k] && k < 63; k++) out_dirent->name[k] = s[k];
+    out_dirent->type = dev_entries[index].type;
+    out_dirent->sec_byte = dev_entries[index].sec_byte;
+    out_dirent->size = dev_entries[index].size;
+    return 1;
+}
+
+static struct vfs_node* devfs_finddir(struct vfs_node* node, const char* name) {
+    if (!node || node->type != VFS_DIRECTORY || !name || name[0] == '\0') return NULL;
+    if (strcmp(name, ".") == 0) {
+        return devfs_get_root();
+    }
+    if (strcmp(name, "..") == 0) {
+        return vfs_open("/", O_RDONLY);
+    }
+    return devfs_open(name, O_RDWR);
+}
+
+static vfs_ops_t devfs_dir_ops = {
+    .read = NULL,
+    .write = NULL,
+    .open = NULL,
+    .close = NULL,
+    .readdir = devfs_readdir,
+    .finddir = devfs_finddir
+};
+
+vfs_node_t* devfs_get_root(void) {
+    vfs_node_t* dev_node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+    if (!dev_node) return NULL;
+    for (int i = 0; i < 64; i++) dev_node->name[i] = 0;
+    dev_node->name[0] = 'd';
+    dev_node->name[1] = 'e';
+    dev_node->name[2] = 'v';
+    dev_node->type = VFS_DIRECTORY;
+    dev_node->sec_byte = 0x70;
+    dev_node->size = 0;
+    dev_node->inode = 0;
+    dev_node->dir_sec = 0;
+    dev_node->dir_idx = 0;
+    dev_node->ref_count = 1;
+    dev_node->ops = &devfs_dir_ops;
+    dev_node->private_data = NULL;
+    return dev_node;
+}
+
+vfs_node_t* devfs_open(const char* dev_name, uint32_t flags) {
+    (void)flags;
+    if (!dev_name || dev_name[0] == '\0') return NULL;
+
+    if (strcmp(dev_name, "null") == 0) {
+        vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+        if (!node) return NULL;
+        for (int i = 0; i < 64; i++) node->name[i] = 0;
+        const char* n = "null"; for (int i = 0; n[i]; i++) node->name[i] = n[i];
+        node->type = VFS_CHARDEV;
+        node->sec_byte = 0xF0;
+        node->size = 0;
+        node->inode = 0; node->dir_sec = 0; node->dir_idx = 0;
+        node->ref_count = 1;
+        node->ops = &null_vfs_ops;
+        node->private_data = NULL;
+        return node;
+    }
+    if (strcmp(dev_name, "zero") == 0) {
+        vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+        if (!node) return NULL;
+        for (int i = 0; i < 64; i++) node->name[i] = 0;
+        const char* n = "zero"; for (int i = 0; n[i]; i++) node->name[i] = n[i];
+        node->type = VFS_CHARDEV;
+        node->sec_byte = 0xF0;
+        node->size = 0;
+        node->inode = 0; node->dir_sec = 0; node->dir_idx = 0;
+        node->ref_count = 1;
+        node->ops = &zero_vfs_ops;
+        node->private_data = NULL;
+        return node;
+    }
+    if (strcmp(dev_name, "tty") == 0 || strcmp(dev_name, "console") == 0) {
+        vfs_node_t* node = vfs_get_tty_node();
+        node->ref_count++;
+        return node;
+    }
+    if (strcmp(dev_name, "eth0") == 0 || strcmp(dev_name, "net0") == 0) {
+        vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+        if (!node) return NULL;
+        for (int i = 0; i < 64; i++) node->name[i] = 0;
+        const char* n = "eth0"; for (int i = 0; n[i]; i++) node->name[i] = n[i];
+        node->type = VFS_CHARDEV;
+        node->sec_byte = 0x70;
+        node->size = 0;
+        node->inode = 0; node->dir_sec = 0; node->dir_idx = 0;
+        node->ref_count = 1;
+        node->ops = &eth0_vfs_ops;
+        node->private_data = NULL;
+        return node;
+    }
+    if (strcmp(dev_name, "urandom") == 0 || strcmp(dev_name, "random") == 0) {
+        vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+        if (!node) return NULL;
+        for (int i = 0; i < 64; i++) node->name[i] = 0;
+        const char* n = "urandom"; for (int i = 0; n[i]; i++) node->name[i] = n[i];
+        node->type = VFS_CHARDEV;
+        node->sec_byte = 0xF0;
+        node->size = 0;
+        node->inode = 0; node->dir_sec = 0; node->dir_idx = 0;
+        node->ref_count = 1;
+        node->ops = &urandom_vfs_ops;
+        node->private_data = NULL;
+        return node;
+    }
+
+    fs_error = FS_ERR_NOT_FOUND;
+    return NULL;
+}
+
+/* --- VFS Path Canonicalization & Helpers --- */
+
+void vfs_canonicalize_path(const char* path, char* out_canonical, uint32_t max_len) {
+    if (!out_canonical || max_len == 0) return;
+    if (!path || path[0] == '\0') {
+        const char* cwd = get_current_path();
+        uint32_t i = 0;
+        while (cwd[i] && i < max_len - 1) { out_canonical[i] = cwd[i]; i++; }
+        out_canonical[i] = '\0';
+        return;
+    }
+
+    char combined[256];
+    uint32_t ci = 0;
+    if (path[0] != '/') {
+        const char* cwd = get_current_path();
+        while (cwd[ci] && ci < 240) { combined[ci] = cwd[ci]; ci++; }
+        if (ci > 0 && combined[ci - 1] != '/' && ci < 240) {
+            combined[ci++] = '/';
+        }
+    }
+    uint32_t pi = 0;
+    while (path[pi] && ci < 254) {
+        combined[ci++] = path[pi++];
+    }
+    combined[ci] = '\0';
+
+    char segs[16][32];
+    int seg_count = 0;
+    uint32_t idx = 0;
+
+    while (combined[idx] != '\0') {
+        while (combined[idx] == '/') idx++;
+        if (combined[idx] == '\0') break;
+
+        char seg[32];
+        uint32_t si = 0;
+        while (combined[idx] != '\0' && combined[idx] != '/' && si < 31) {
+            seg[si++] = combined[idx++];
+        }
+        seg[si] = '\0';
+
+        if (seg[0] == '.' && seg[1] == '\0') {
+            continue;
+        } else if (seg[0] == '.' && seg[1] == '.' && seg[2] == '\0') {
+            if (seg_count > 0) seg_count--;
+        } else {
+            if (seg_count < 16) {
+                int k = 0;
+                while (seg[k] && k < 31) { segs[seg_count][k] = seg[k]; k++; }
+                segs[seg_count][k] = '\0';
+                seg_count++;
+            }
+        }
+    }
+
+    if (seg_count == 0) {
+        if (max_len > 1) {
+            out_canonical[0] = '/';
+            out_canonical[1] = '\0';
+        } else {
+            out_canonical[0] = '\0';
+        }
+        return;
+    }
+
+    uint32_t out_idx = 0;
+    for (int s = 0; s < seg_count; s++) {
+        if (out_idx < max_len - 1) out_canonical[out_idx++] = '/';
+        for (int k = 0; segs[s][k] && out_idx < max_len - 1; k++) {
+            out_canonical[out_idx++] = segs[s][k];
+        }
+    }
+    out_canonical[out_idx] = '\0';
+}
+
+int vfs_is_dev_path(const char* canonical_path) {
+    if (!canonical_path) return 0;
+    if (strcmp(canonical_path, "/dev") == 0) return 1;
+    if (canonical_path[0] == '/' && canonical_path[1] == 'd' &&
+        canonical_path[2] == 'e' && canonical_path[3] == 'v' &&
+        canonical_path[4] == '/') return 1;
+    return 0;
+}
+
 /* --- Public VFS API --- */
 
 void init_vfs(void) {
@@ -580,9 +984,31 @@ vfs_node_t* vfs_open(const char* path, uint32_t flags) {
     if (!path || path[0] == '\0') return NULL;
     fs_error = FS_ERR_NONE;
 
+    char canonical[256];
+    vfs_canonicalize_path(path, canonical, sizeof(canonical));
+
+    /* 1. DevFS Routing */
+    if (strcmp(canonical, "/dev") == 0) {
+        if ((flags & 0x03) != O_RDONLY || (flags & (O_CREAT | O_TRUNC | O_APPEND))) {
+            fs_error = FS_ERR_PERMISSION;
+            return NULL;
+        }
+        return devfs_get_root();
+    }
+    if (canonical[0] == '/' && canonical[1] == 'd' &&
+        canonical[2] == 'e' && canonical[3] == 'v' &&
+        canonical[4] == '/') {
+        const char* dev_name = canonical + 5;
+        if (dev_name[0] == '\0') {
+            return devfs_get_root();
+        }
+        return devfs_open(dev_name, flags);
+    }
+
+    /* 2. FAT32 Routing */
     uint32_t parent_cluster = 0, parent_sector = 0;
     char target_fat[11];
-    if (!resolve_path(path, &parent_cluster, &parent_sector, target_fat)) {
+    if (!resolve_path(canonical, &parent_cluster, &parent_sector, target_fat)) {
         fs_error = FS_ERR_NOT_FOUND;
         return NULL;
     }
@@ -624,9 +1050,9 @@ vfs_node_t* vfs_open(const char* path, uint32_t flags) {
             return NULL;
         }
 
-        const char* base = path;
-        for (int i = 0; path[i] != '\0'; i++) {
-            if (path[i] == '/') base = &path[i + 1];
+        const char* base = canonical;
+        for (int i = 0; canonical[i] != '\0'; i++) {
+            if (canonical[i] == '/') base = &canonical[i + 1];
         }
         int len = 0;
         while (base[len] != '\0' && base[len] != '/') len++;

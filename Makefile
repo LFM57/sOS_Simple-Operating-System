@@ -45,14 +45,19 @@ drive.img: app.sos kernel.bin
 	echo "user:364b5f18:1" >> passwd
 	echo "guest:811c9dc5:2" >> passwd
 	
-	@echo "Copying system files to FAT16 Hard Drive..."
+	@echo "Copying system files to FAT32 Hard Drive..."
 	mcopy -i drive.img passwd ::/
-	mcopy -i drive.img app.sos ::/
 	mcopy -i drive.img kernel.bin ::/
 	
-	@echo "Creating personnal directories..."
-	mmd -i drive.img ::/user
-	mmd -i drive.img ::/guest
+	@echo "Creating Unix-like filesystem hierarchy..."
+	mmd -i drive.img ::/bin
+	mmd -i drive.img ::/home
+	mmd -i drive.img ::/home/user
+	mmd -i drive.img ::/home/guest
+	mmd -i drive.img ::/dev
+	
+	@echo "Populating /bin with binaries..."
+	mcopy -i drive.img app.sos ::/bin/
 	
 	rm -f passwd
 

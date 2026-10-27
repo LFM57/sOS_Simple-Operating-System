@@ -35,6 +35,7 @@ void ata_read_sector(uint32_t lba, uint8_t *buffer);
 
 /* --- Tools (Utilities) --- */
 int strcmp(const char *s1, const char *s2);
+int strncmp(const char *s1, const char *s2, uint32_t n);
 int fs_suggest_file(const char* target_name, char* out_suggestion);
 
 /* --- Display (print.c) --- */
@@ -112,16 +113,16 @@ int sys_waitpid(int pid, int* status, int options);
 /* --- Disk & File System (disk.c / fs.c) --- */
 void ata_read_sector(uint32_t lba, uint8_t *buffer);
 void init_fs();
-void fs_ls();
+void fs_ls(const char* target_path);
 void fs_cd(const char* dirname);
 void fs_cat(const char* filename);
 void ata_write_sector(uint32_t lba, uint8_t *buffer);
-void fs_mkdir(const char* dirname);
 void fs_mkdir(const char* dirname);
 void fs_rm(const char* arg1, const char* arg2);
 void fs_touch(const char* filename);
 int fs_write(const char* filename, const char* text);
 int fs_load_file(const char* filename, uint8_t** buffer_out, uint32_t* size_out);
+int resolve_binary_path(const char* input, char* out_path, uint32_t max_len);
 const char* get_current_path();
 void fs_df(const char* arg);
 void get_pmm_stats(uint32_t* out_total_kb, uint32_t* out_used_kb, uint32_t* out_free_kb);
