@@ -13,7 +13,7 @@ USER_LD = i686-linux-gnu-ld
 OBJS = boot.o print.o memory.o gdt_idt.o disk.o fs.o vfs.o kernel.o pci.o e1000.o net.o crypto.o
 
 # The 'all' target compiles everything
-all: kernel.bin drive.img sos.iso drive.vdi
+all: kernel.bin drive.img sos.iso drive.vdi sign
 
 # Renamed myos.bin to kernel.bin
 kernel.bin: $(OBJS)
@@ -32,6 +32,13 @@ app.sos: app.c sos.c
 	$(USER_CC) -ffreestanding -nostdlib -fno-pie -c app.c -o app.o
 	$(USER_LD) -T app_linker.ld app.o sos.o -o app.sos
 	rm -f app.o sos.o
+
+# Automatic OTA signing: signs uinstruct, kernel.bin, and all files ordered by instructions
+sign: kernel.bin app.sos
+	@if [ -f sign_update.py ]; then \
+		echo "Generating automatic OTA signatures..."; \
+		python3 sign_update.py; \
+	fi
 
 # Creation of the 64 MB raw FAT32 disk
 drive.img: app.sos kernel.bin
