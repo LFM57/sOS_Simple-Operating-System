@@ -483,6 +483,16 @@ void init_fs() {
     current_dir_cluster = root_cluster;
     current_dir_sector = root_dir_start;
     
+    /* Ensure /home permissions are set to Owner UID 8, with read permissions for others if it exists */
+    uint32_t home_pclus, home_psec;
+    char home_fat[11];
+    fat_dir_entry_t home_entry;
+    if (resolve_path("/home", &home_pclus, &home_psec, home_fat) && home_fat[0] != '\0' &&
+        find_entry_in(home_pclus, home_fat, &home_entry, NULL, NULL)) {
+        fs_chown("/home", 8);
+        fs_chmod("/home", 0x40);
+    }
+
     kprintf("[INFO] FS FAT32 OK (Root cluster: %d, Total clusters: %d).\n", root_cluster, total_clusters);
     kfree(boot_sector);
 }
@@ -1078,12 +1088,28 @@ void fs_cat(const char* filename) {
     uint8_t* sector = (uint8_t*)kmalloc(512);
     uint32_t offset = 0;
     int bytes_read;
+    uint32_t max_chardev_bytes = 256;
+    int sampled_cap = 0;
     
     while ((bytes_read = vfs_read(node, offset, 512, sector)) > 0) {
-        for (int j = 0; j < bytes_read; j++) {
+        int count_to_print = bytes_read;
+        if (node->type == VFS_CHARDEV && (strcmp(node->name, "urandom") == 0 || strcmp(node->name, "zero") == 0)) {
+            if (offset + (uint32_t)count_to_print >= max_chardev_bytes) {
+                count_to_print = (int)(max_chardev_bytes - offset);
+                sampled_cap = 1;
+            }
+        }
+
+        for (int j = 0; j < count_to_print; j++) {
             kprintf("%c", sector[j]);
         }
-        offset += (uint32_t)bytes_read;
+        offset += (uint32_t)count_to_print;
+
+        if (sampled_cap) {
+            kprintf("\n[Sampled %d bytes from /dev/%s - use 'hex /dev/%s' to view formatted dump]",
+                    max_chardev_bytes, node->name, node->name);
+            break;
+        }
     }
     
     kprintf("\n----------------\n");
@@ -1531,6 +1557,30 @@ int fs_load_file(const char* filename, uint8_t** buffer_out, uint32_t* size_out)
         return 0;
     }
 
+    if (node->type == VFS_CHARDEV) {
+        uint32_t sample_size = (strcmp(node->name, "null") == 0) ? 0 : 128;
+        if (sample_size > 0) {
+            *buffer_out = (uint8_t*)kmalloc(sample_size);
+            if (!*buffer_out) {
+                vfs_close(node);
+                return 0;
+            }
+            int bytes_read = vfs_read(node, 0, sample_size, *buffer_out);
+            if (bytes_read < 0) {
+                kfree(*buffer_out);
+                *buffer_out = NULL;
+                vfs_close(node);
+                return 0;
+            }
+            *size_out = (uint32_t)bytes_read;
+        } else {
+            *size_out = 0;
+            *buffer_out = (uint8_t*)kmalloc(1);
+        }
+        vfs_close(node);
+        return 1;
+    }
+
     *size_out = node->size;
     *buffer_out = (uint8_t*)kmalloc(node->size ? node->size : 1);
     if (!*buffer_out) {
@@ -1634,131 +1684,78 @@ int fs_complete(const char* prefix, char* out_match, int* out_match_count, int p
         file_prefix[j] = '\0';
     }
 
-    /* 2. Temporarily resolve the target directory to scan by following the FAT */
-    uint32_t target_cluster = current_dir_cluster;
-    uint32_t target_sector = current_dir_sector;
+    /* 2. Open target directory via VFS (supports both FAT32 and /dev/ virtual streams) */
+    const char* scan_path = (dir_path[0] != '\0') ? dir_path : get_current_path();
+    vfs_node_t* dir_node = vfs_open(scan_path, O_RDONLY);
+    if (!dir_node || dir_node->type != VFS_DIRECTORY) {
+        if (dir_node) vfs_close(dir_node);
+        *out_match_count = 0;
+        return 0;
+    }
 
-    if (dir_path[0] != '\0') {
-            uint32_t parent_cluster, parent_sector;
-            char target_fat[11];
-            if (!resolve_path(dir_path, &parent_cluster, &parent_sector, target_fat)) {
-                *out_match_count = 0;
-                return 0;
-            }
-
-            if (target_fat[0] == '\0') {
-                target_cluster = root_cluster;
-                target_sector = data_start + ((root_cluster - 2) * sectors_per_cluster);
-            } else {
-                fat_dir_entry_t entry;
-                int found = find_entry_in(parent_cluster, target_fat, &entry, NULL, NULL);
-
-                if (!found || !(entry.attributes & 0x10)) {
-                    *out_match_count = 0;
-                    return 0;
-                }
-
-                /* [SECURITY FIX] Block autocomplete if read is forbidden on the target directory */
-                if (target_fat[0] != '.') {
-                    if (!check_permission_byte(entry.sec_byte, 0)) {
-                        *out_match_count = 0;
-                        return 0; /* Access denied: Unable to list files */
-                    }
-                }
-
-                target_cluster = get_cluster(entry);
-                if (target_cluster == 0) target_cluster = root_cluster;
-                target_sector = data_start + ((target_cluster - 2) * sectors_per_cluster);
-            }
-        }
-
-    /* 3. Scan the resolved directory looking for matches */
+    /* 3. Scan directory via vfs_readdir looking for matches */
     int file_prefix_len = 0;
     while (file_prefix[file_prefix_len]) file_prefix_len++;
 
     int match_count = 0;
-    char printable_name[13];
-    uint32_t cluster = target_cluster;
-    uint32_t sec = target_sector;
-    uint32_t sec_offset = 0;
-    uint8_t* sector = (uint8_t*)kmalloc(512);
-    
-    while (1) {
-        ata_read_sector(sec, sector);
-        fat_dir_entry_t* dir = (fat_dir_entry_t*)sector;
+    vfs_dirent_t dirent;
+    uint32_t idx = 0;
 
-        for (int i = 0; i < 16; i++) {
-            if (dir[i].name[0] == 0x00) goto end_complete;
-            if (dir[i].name[0] == (char)0xE5 || dir[i].attributes == 0x0F) continue;
+    while (vfs_readdir(dir_node, idx++, &dirent)) {
+        if (dirent.name[0] == '.' && (dirent.name[1] == '\0' || (dirent.name[1] == '.' && dirent.name[2] == '\0'))) {
+            continue;
+        }
 
-            format_fat_name(dir[i].name, printable_name);
-            
-            if (printable_name[0] == '.' && (printable_name[1] == '\0' || (printable_name[1] == '.' && printable_name[2] == '\0'))) {
-                continue;
-            }
-
-            int is_match = 1;
-            for (int j = 0; j < file_prefix_len; j++) {
-                if (printable_name[j] != file_prefix[j]) {
-                    is_match = 0;
-                    break;
-                }
-            }
-
-            if (is_match) {
-                match_count++;
-                if (print_matches) {
-                    /* Display the original path prefix for clarity */
-                    if (dir_path[0] != '\0') {
-                        if (dir_path[0] == '/' && dir_path[1] == '\0') {
-                            kprintf("/");
-                        } else {
-                            kprintf("%s/", dir_path);
-                        }
-                    }
-                    if (dir[i].attributes & 0x10) {
-                        kprintf("%s/  ", printable_name);
-                    } else {
-                        kprintf("%s  ", printable_name);
-                    }
-                }
-                if (match_count == 1) {
-                    /* Reconstructing the full path for user autocomplete */
-                    int idx = 0;
-                    if (dir_path[0] != '\0') {
-                        while (dir_path[idx] && idx < 240) {
-                            out_match[idx] = dir_path[idx];
-                            idx++;
-                        }
-                        if (idx > 0 && dir_path[idx - 1] != '/' && idx < 240) {
-                            out_match[idx++] = '/';
-                        }
-                    }
-                    int f_idx = 0;
-                    while (printable_name[f_idx] && idx < 250) {
-                        out_match[idx++] = printable_name[f_idx++];
-                    }
-                    if (dir[i].attributes & 0x10) {
-                        if (idx < 254) out_match[idx++] = '/';
-                    } else {
-                        if (idx < 254) out_match[idx++] = ' ';
-                    }
-                    out_match[idx] = '\0';
-                }
+        int is_match = 1;
+        for (int j = 0; j < file_prefix_len; j++) {
+            if (dirent.name[j] != file_prefix[j]) {
+                is_match = 0;
+                break;
             }
         }
-        
-        sec_offset++;
-        if (sec_offset % sectors_per_cluster == 0) {
-            cluster = read_fat_entry(cluster);
-            if (cluster < 2 || cluster >= 0x0FFFFFF8) break; 
-            sec = data_start + ((cluster - 2) * sectors_per_cluster);
-        } else {
-            sec++;
+
+        if (is_match) {
+            match_count++;
+            if (print_matches) {
+                if (dir_path[0] != '\0') {
+                    if (dir_path[0] == '/' && dir_path[1] == '\0') {
+                        kprintf("/");
+                    } else {
+                        kprintf("%s/", dir_path);
+                    }
+                }
+                if (dirent.type == VFS_DIRECTORY) {
+                    kprintf("%s/  ", dirent.name);
+                } else {
+                    kprintf("%s  ", dirent.name);
+                }
+            }
+            if (match_count == 1) {
+                int out_idx = 0;
+                if (dir_path[0] != '\0') {
+                    while (dir_path[out_idx] && out_idx < 240) {
+                        out_match[out_idx] = dir_path[out_idx];
+                        out_idx++;
+                    }
+                    if (out_idx > 0 && dir_path[out_idx - 1] != '/' && out_idx < 240) {
+                        out_match[out_idx++] = '/';
+                    }
+                }
+                int f_idx = 0;
+                while (dirent.name[f_idx] && out_idx < 250) {
+                    out_match[out_idx++] = dirent.name[f_idx++];
+                }
+                if (dirent.type == VFS_DIRECTORY) {
+                    if (out_idx < 254) out_match[out_idx++] = '/';
+                } else {
+                    if (out_idx < 254) out_match[out_idx++] = ' ';
+                }
+                out_match[out_idx] = '\0';
+            }
         }
     }
-end_complete:
-    kfree(sector);
+
+    vfs_close(dir_node);
     *out_match_count = match_count;
     return match_count;
 }

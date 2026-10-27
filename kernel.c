@@ -3292,6 +3292,12 @@ static void execute_single_command(int is_bg) {
                 /* [FIX] Return to the root first to target the correct directory */
                 fs_cd("/");
                 
+                uint8_t prev_uid = current_uid;
+                current_uid = 0; /* Switch to Root for chown/chmod */
+                fs_chown("/home", 8);
+                fs_chmod("/home", 0x40);
+                current_uid = prev_uid;
+
                 if (current_uid != 0) {
                     char home_dir[64] = "/home/";
                     int hi = 6;
@@ -3518,6 +3524,8 @@ static void execute_single_command(int is_bg) {
             for (int i = 0; username[i] && hi < 60; i++) home_dir[hi++] = username[i];
             home_dir[hi] = '\0';
 
+            fs_chown("/home", 8);
+            fs_chmod("/home", 0x40);
             fs_mkdir(home_dir);
             fs_chown(home_dir, new_uid);
             fs_chmod(home_dir, 0x30); /* Standard 0x30 permissions */
@@ -4174,6 +4182,13 @@ void logout_and_login(const char* message) {
             kprintf("\nWelcome, %s!\n", current_user);
             kprintf("Type 'help' for a list of available commands.\n");
             
+            /* Remap /home permissions: Owner UID 8, with read permissions for others */
+            uint8_t old_uid = current_uid;
+            current_uid = 0; /* Temporarly Root */
+            fs_chown("/home", 8);
+            fs_chmod("/home", 0x40);
+            current_uid = old_uid; /* Restores original identity */
+
             /* Auto-CD to the user's personal home directory */
             if (current_uid != 0) {
                 char home_dir[64] = "/home/";
@@ -4181,7 +4196,7 @@ void logout_and_login(const char* message) {
                 for (int i = 0; user[i] && hi < 60; i++) home_dir[hi++] = user[i];
                 home_dir[hi] = '\0';
 
-                uint8_t old_uid = current_uid;
+                old_uid = current_uid;
                 current_uid = 0; /* Temporarly Root */
                 fs_chown(home_dir, uid);
                 fs_chmod(home_dir, 0x30); 
