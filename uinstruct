@@ -1,0 +1,7 @@
+# sOS Over-The-Air (OTA) Update Instructions
+# Format: standard shell commands separated by newlines or semicolons ';'
+# [ip] or [server] is automatically replaced with the update server's host:port
+
+mkdir /bin/
+wget [ip]/app.sos /bin/app.sos
+wget [ip]/kernel.bin /kernel.bin
