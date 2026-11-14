@@ -196,6 +196,7 @@ extern volatile int cmd_ready;
 void create_task(void (*entry_point)());
 int create_user_task(uint8_t* elf_buffer, uint32_t elf_size);
 void kill_current_task(void);
+void terminate_task(int id);
 void print_shell_prompt(void);
 
 /* --- Multitasking --- */
@@ -254,6 +255,8 @@ struct task {
     void* user_stack;
     void* kernel_stack;
     uint32_t prog_break;
+    wait_node_t wait_node;
+    wait_queue_t* waiting_on;
     file_descriptor_t open_files[MAX_OPEN_FILES];
 };
 

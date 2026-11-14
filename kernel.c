@@ -231,38 +231,62 @@ static void remove_wait_node(wait_queue_t* queue, wait_node_t* node) {
 void sleep_on(wait_queue_t* queue) {
     if (!queue || current_task < 0 || current_task == IDLE_TASK_ID) return;
 
-    uint32_t eflags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    uint32_t eflags = irq_save_disable();
 
-    wait_node_t node;
-    node.task = &tasks[current_task];
-    node.next = queue->head;
-    queue->head = &node;
+    task_t* t = &tasks[current_task];
+    t->wait_node.task = t;
+    t->wait_node.next = queue->head;
+    queue->head = &t->wait_node;
+    t->waiting_on = queue;
 
-    tasks[current_task].state = 4; /* BLOCKED */
+    t->state = 4; /* BLOCKED */
 
     yield();
 
-    remove_wait_node(queue, &node);
+    if (t->waiting_on == queue) {
+        remove_wait_node(queue, &t->wait_node);
+        t->waiting_on = NULL;
+        t->wait_node.next = NULL;
+    }
 
-    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    irq_restore(eflags);
 }
 
 void wake_up(wait_queue_t* queue) {
     if (!queue) return;
-    uint32_t eflags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    uint32_t eflags = irq_save_disable();
 
     wait_node_t* curr = queue->head;
-    while (curr) {
-        if (curr->task && curr->task->state == 4) {
-            curr->task->state = 2; /* READY */
-        }
-        curr = curr->next;
-    }
     queue->head = NULL;
+    while (curr) {
+        wait_node_t* next = curr->next;
+        curr->next = NULL;
+        if (curr->task) {
+            if (curr->task->waiting_on == queue) {
+                curr->task->waiting_on = NULL;
+            }
+            if (curr->task->state == 4) {
+                curr->task->state = 2; /* READY */
+            }
+        }
+        curr = next;
+    }
 
-    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    irq_restore(eflags);
+}
+
+void terminate_task(int id) {
+    if (id <= 0 || id >= IDLE_TASK_ID) return;
+    uint32_t eflags = irq_save_disable();
+    if (tasks[id].state != 0) {
+        if (tasks[id].waiting_on != NULL) {
+            remove_wait_node(tasks[id].waiting_on, &tasks[id].wait_node);
+            tasks[id].waiting_on = NULL;
+            tasks[id].wait_node.next = NULL;
+        }
+        tasks[id].state = 3;
+    }
+    irq_restore(eflags);
 }
 
 static void idle_task_entry(void) {
@@ -294,6 +318,9 @@ static void create_idle_task(void) {
     tasks[id].id = id;
     tasks[id].uid = 0;
     tasks[id].page_directory = kernel_page_directory;
+    tasks[id].waiting_on = NULL;
+    tasks[id].wait_node.task = &tasks[id];
+    tasks[id].wait_node.next = NULL;
     init_task_fds(&tasks[id]);
     tasks[id].state = 2; /* Always READY */
     tasks[id].is_background = 1;
@@ -308,7 +335,12 @@ uint8_t get_active_uid() {
 }
 
 void init_multitasking() {
-    for(int i = 0; i < MAX_TASKS; i++) tasks[i].state = 0;
+    for(int i = 0; i < MAX_TASKS; i++) {
+        tasks[i].state = 0;
+        tasks[i].waiting_on = NULL;
+        tasks[i].wait_node.task = &tasks[i];
+        tasks[i].wait_node.next = NULL;
+    }
     
     tasks[0].id = 0;
     tasks[0].state = 1;
@@ -376,6 +408,11 @@ void cleanup_task_memory(int id) {
     if (tasks[id].state == 0) {
         __asm__ volatile("push %0; popf" :: "r"(eflags));
         return;
+    }
+    if (tasks[id].waiting_on != NULL) {
+        remove_wait_node(tasks[id].waiting_on, &tasks[id].wait_node);
+        tasks[id].waiting_on = NULL;
+        tasks[id].wait_node.next = NULL;
     }
     tasks[id].state = 0;
 
@@ -465,6 +502,9 @@ void create_task(void (*entry_point)()) {
     tasks[id].id = id;
     tasks[id].uid = current_uid; /* Saves the creator */
     tasks[id].page_directory = kernel_page_directory;
+    tasks[id].waiting_on = NULL;
+    tasks[id].wait_node.task = &tasks[id];
+    tasks[id].wait_node.next = NULL;
     init_task_fds(&tasks[id]);
     tasks[id].state = 2; 
     tasks[id].is_background = 0;
@@ -1226,6 +1266,9 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
     tasks[id].uid = current_uid;
     tasks[id].state = 2; 
     tasks[id].is_background = 0;
+    tasks[id].waiting_on = NULL;
+    tasks[id].wait_node.task = &tasks[id];
+    tasks[id].wait_node.next = NULL;
 
     init_task_fds(&tasks[id]); /* stdin/stdout/stderr Initialisation */
     if (current_task >= 0) {
@@ -1402,6 +1445,9 @@ int sys_fork(syscall_frame_t* frame) {
     child->prog_break = parent->prog_break;
     child->user_stack = parent->user_stack;
     child->code_page = NULL;
+    child->waiting_on = NULL;
+    child->wait_node.task = child;
+    child->wait_node.next = NULL;
 
     uint32_t* top = (uint32_t*)child->kernel_esp;
 
@@ -3293,7 +3339,7 @@ static void execute_single_command(int is_bg) {
                 if (current_uid != 0 && tasks[pid].uid != current_uid) {
                     kprintf("Error: Operation not permitted.\n");
                 } else {
-                    tasks[pid].state = 3;
+                    terminate_task(pid);
                     gui_destroy_windows_by_pid((uint32_t)pid);
                     wake_up(&exit_queue);
                     kprintf("Process %d terminated and memory freed.\n", pid);
@@ -4603,7 +4649,7 @@ void reset_session_state(void) {
         if (i == current_task) continue;
         if (tasks[i].state != 0 && tasks[i].state != 3 &&
             (tasks[i].page_directory != kernel_page_directory || tasks[i].code_page != NULL)) {
-            tasks[i].state = 3;
+            terminate_task(i);
         }
     }
     irq_restore(eflags);

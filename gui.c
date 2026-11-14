@@ -414,7 +414,7 @@ void gui_destroy_windows_by_uid(uint8_t uid) {
             if (pid > 0 && pid < (MAX_TASKS - 1) &&
                 tasks[pid].state != 0 &&
                 tasks[pid].page_directory != kernel_page_directory) {
-                tasks[pid].state = 3;
+                terminate_task((int)pid);
             }
         }
     }
@@ -422,13 +422,13 @@ void gui_destroy_windows_by_uid(uint8_t uid) {
         if (tasks[pid].state != 0 &&
             tasks[pid].uid == uid &&
             tasks[pid].page_directory != kernel_page_directory) {
-            tasks[pid].state = 3;
+            terminate_task(pid);
         }
     }
     if (fg_task > 0 && fg_task < (MAX_TASKS - 1) &&
         tasks[fg_task].state != 0 &&
         tasks[fg_task].uid == uid) {
-        tasks[fg_task].state = 3;
+        terminate_task((int)fg_task);
     }
     wake_up(&exit_queue);
 }
