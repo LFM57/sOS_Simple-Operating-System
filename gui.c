@@ -1,13 +1,18 @@
 #include "gui.h"
 #include "mouse.h"
 
+extern task_t tasks[MAX_TASKS];
+extern int current_task;
+
 static window_t windows[MAX_WINDOWS];
 static window_t* z_order[MAX_WINDOWS];
 static int window_count = 0;
 
 volatile int gui_dirty = 0;
 volatile int gui_full_dirty = 0;
+volatile int gui_exit_requested = 0;
 wait_queue_t gui_wait_queue = {0};
+window_t* gui_terminal_window = NULL;
 
 /* Mouse packet ring buffer filled by IRQ12 and drained by gui_process_input() */
 #define MOUSE_Q_SIZE 32
@@ -103,8 +108,16 @@ void gui_init(void) {
     rendered_cursor_y = -1;
     gui_dirty = 1;
     gui_full_dirty = 1;
+    gui_exit_requested = 0;
+    gui_terminal_window = NULL;
     mouse_set_callback(gui_on_mouse_packet);
     irq_restore(eflags);
+}
+
+void gui_request_exit(void) {
+    gui_exit_requested = 1;
+    gui_dirty = 1;
+    wake_up(&gui_wait_queue);
 }
 
 void gui_mark_dirty(int full_redraw) {
@@ -344,17 +357,31 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
     }
 
     if (!prev_left && curr_left) {
-        /* Left click: check taskbar window chips first */
+        /* Left click: check taskbar buttons and window chips first */
         if (my >= (int)g_height - TASKBAR_HEIGHT) {
-            int chip_x = 8;
-            for (int i = 0; i < MAX_WINDOWS; i++) {
-                if (windows[i].is_used && (windows[i].flags & WIN_VISIBLE)) {
-                    int chip_w = 120;
-                    if (mx >= chip_x && mx < chip_x + chip_w) {
-                        gui_focus_window(&windows[i]);
-                        break;
+            int exit_x = (int)g_width - 68;
+            if (mx >= exit_x && mx < exit_x + 60) {
+                gui_request_exit();
+            } else {
+                int chip_x = 8;
+                int term_btn_w = 88;
+                if (gui_terminal_window && mx >= chip_x && mx < chip_x + term_btn_w) {
+                    gui_terminal_window->flags |= WIN_VISIBLE;
+                    gui_focus_window(gui_terminal_window);
+                    gui_full_dirty = 1;
+                    gui_dirty = 1;
+                } else {
+                    chip_x += term_btn_w + 8;
+                    for (int i = 0; i < MAX_WINDOWS; i++) {
+                        if (!windows[i].is_used || !(windows[i].flags & WIN_VISIBLE)) continue;
+                        if (&windows[i] == gui_terminal_window) continue;
+                        int chip_w = 120;
+                        if (mx >= chip_x && mx < chip_x + chip_w) {
+                            gui_focus_window(&windows[i]);
+                            break;
+                        }
+                        chip_x += chip_w + 6;
                     }
-                    chip_x += chip_w + 6;
                 }
             }
         } else {
@@ -377,13 +404,19 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
                         int close_y = w->y - TITLEBAR_HEIGHT + 4;
                         if (mx >= close_x && mx < close_x + 16 &&
                             my >= close_y && my < close_y + 16) {
-                            gui_event_t ev;
-                            ev.type = GUI_EVENT_WINDOW_CLOSE;
-                            ev.x = 0;
-                            ev.y = 0;
-                            ev.button = 1;
-                            ev.key = 0;
-                            gui_push_event(w, &ev);
+                            if (w == gui_terminal_window) {
+                                w->flags &= ~WIN_VISIBLE;
+                                gui_full_dirty = 1;
+                                gui_dirty = 1;
+                            } else {
+                                gui_event_t ev;
+                                ev.type = GUI_EVENT_WINDOW_CLOSE;
+                                ev.x = 0;
+                                ev.y = 0;
+                                ev.button = 1;
+                                ev.key = 0;
+                                gui_push_event(w, &ev);
+                            }
                             break;
                         }
                         if (my < w->y) {
@@ -478,10 +511,22 @@ static void draw_taskbar(window_t* focused) {
     bb_fill_rect(0, bar_y, (int)g_width, 1, 0x00334155);
 
     int chip_x = 8;
+    if (gui_terminal_window) {
+        int term_btn_w = 88;
+        int is_term_act = (gui_terminal_window == focused && (gui_terminal_window->flags & WIN_VISIBLE));
+        uint32_t bg = is_term_act ? 0x002563EB : 0x001E293B;
+        bb_fill_rect(chip_x, bar_y + 4, term_btn_w, TASKBAR_HEIGHT - 8, bg);
+        bb_draw_rect_outline(chip_x, bar_y + 4, term_btn_w, TASKBAR_HEIGHT - 8,
+                             is_term_act ? 0x0060A5FA : 0x00334155);
+        bb_draw_string_transparent("Terminal", chip_x + 12, bar_y + 6, 0x00F8FAFC);
+        chip_x += term_btn_w + 8;
+    }
+
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (!windows[i].is_used || !(windows[i].flags & WIN_VISIBLE)) continue;
+        if (&windows[i] == gui_terminal_window) continue;
         int chip_w = 120;
-        if (chip_x + chip_w > (int)g_width - 100) break;
+        if (chip_x + chip_w > (int)g_width - 140) break;
 
         int is_act = (&windows[i] == focused);
         uint32_t bg = is_act ? 0x002563EB : 0x001E293B;
@@ -495,7 +540,10 @@ static void draw_taskbar(window_t* focused) {
         chip_x += chip_w + 6;
     }
 
-    bb_draw_string_transparent("sOS GUI", (int)g_width - 68, bar_y + 6, 0x0094A3B8);
+    int exit_x = (int)g_width - 68;
+    bb_fill_rect(exit_x, bar_y + 4, 60, TASKBAR_HEIGHT - 8, 0x00991B1B);
+    bb_draw_rect_outline(exit_x, bar_y + 4, 60, TASKBAR_HEIGHT - 8, 0x00EF4444);
+    bb_draw_string_transparent("Exit", exit_x + 14, bar_y + 6, 0x00FFFFFF);
 }
 
 static void draw_window_title_clipped(window_t* w) {
@@ -571,4 +619,89 @@ void gui_render(void) {
 
     rendered_cursor_x = cur_cx;
     rendered_cursor_y = cur_cy;
+}
+
+static void gui_teardown(void) {
+    uint32_t eflags = irq_save_disable();
+    is_gui_mode = 0;
+    gui_exit_requested = 0;
+    gui_terminal_window = NULL;
+    dragging_window = NULL;
+    mouse_set_callback(NULL);
+    irq_restore(eflags);
+
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (windows[i].is_used) {
+            gui_destroy_window(i);
+        }
+    }
+
+    term_fg_color = 0x00FFFFFF;
+    term_bg_color = 0x00000000;
+    clear_terminal();
+    kprintf("[GUI] Exited to text shell.\n");
+    if (shell_input_enabled && fg_task == -1) {
+        print_shell_prompt();
+    }
+}
+
+static void gui_compositor_task(void) {
+    if (current_task > 0) {
+        tasks[current_task].is_background = 1;
+    }
+
+    gui_render();
+
+    while (is_gui_mode && !gui_exit_requested) {
+        gui_process_input();
+        if (gui_exit_requested || !is_gui_mode) break;
+
+        if (gui_dirty) {
+            gui_render();
+        }
+
+        uint32_t eflags = irq_save_disable();
+        if (is_gui_mode && !gui_exit_requested && !gui_dirty && mq_head == mq_tail) {
+            sleep_on(&gui_wait_queue);
+        }
+        irq_restore(eflags);
+    }
+
+    gui_teardown();
+    kill_current_task();
+}
+
+void gui_start(void) {
+    if (!is_graphics_mode || is_gui_mode) return;
+
+    gui_init();
+
+    int term_w = 640;
+    int term_h = 400;
+    int term_x = ((int)g_width - term_w) / 2;
+    int term_y = ((int)g_height - TASKBAR_HEIGHT - term_h) / 2 + (TITLEBAR_HEIGHT / 2);
+    if (term_x < 8) term_x = 8;
+    if (term_y < TITLEBAR_HEIGHT + 4) term_y = TITLEBAR_HEIGHT + 4;
+
+    int term_id = gui_create_window("Terminal", term_x, term_y, term_w, term_h,
+                                    WIN_VISIBLE | WIN_DECORATED | WIN_BUILTIN, 0);
+    if (term_id < 0) {
+        kprintf("[GUI] Error: Failed to allocate Terminal window.\n");
+        return;
+    }
+
+    gui_terminal_window = gui_get_window(term_id);
+    term_fg_color = 0x00FFFFFF;
+    term_bg_color = 0x00000000;
+    cursor_x = 0;
+    cursor_y = 0;
+    is_gui_mode = 1;
+
+    clear_terminal();
+    kprintf("==================================================\n");
+    kprintf("  sOS Desktop Terminal (80x25)                    \n");
+    kprintf("  Press Ctrl+Q or click [Exit] to return to shell \n");
+    kprintf("==================================================\n\n");
+
+    create_task(gui_compositor_task);
 }

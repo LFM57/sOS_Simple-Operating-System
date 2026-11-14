@@ -90,7 +90,7 @@ const char* system_commands[] = {
     "loop", "run", "ps", "kill", "df", "about", "uname",
     "shutdown", "whoami", "chown", "chmod", "su", "sudo",
     "userlist", "nano", "passwd", "cp", "mv", "hex",
-    "ifconfig", "wget", "update", "lock", "crash"
+    "ifconfig", "wget", "update", "lock", "crash", "startgui"
 };
 unsigned int num_system_commands = sizeof(system_commands) / sizeof(system_commands[0]);
 
@@ -920,8 +920,17 @@ void keyboard_handler() {
             ascii = kbd_us[scancode];
         }
         
+        if (is_gui_mode && ctrl_active && scancode == 0x10) {
+            /* Ctrl+Q exits GUI mode back to full-screen text shell */
+            gui_request_exit();
+            outb(0x20, 0x20);
+            return;
+        }
+
         if (ascii != 0) {
-            if (is_gui_mode) {
+            if (is_gui_mode &&
+                !(gui_terminal_window && (gui_terminal_window->flags & WIN_VISIBLE) &&
+                  gui_get_focused_window() == gui_terminal_window)) {
                 gui_on_key_press(ascii);
             }
             /* Scenario 1: A foreground task is running */
@@ -1838,9 +1847,37 @@ static void nano_set_save_status(uint32_t bytes, const char* fname) {
     nano_status_msg[idx] = '\0';
 }
 
+static void nano_draw_char(char c, int x, int y, uint32_t fg, uint32_t bg) {
+    if (is_gui_mode && gui_terminal_window && gui_terminal_window->canvas) {
+        surface_draw_char(gui_terminal_window->canvas,
+                          gui_terminal_window->width,
+                          gui_terminal_window->height,
+                          c, x, y, fg, bg);
+    } else {
+        draw_char(c, (uint32_t)x, (uint32_t)y, fg, bg);
+    }
+}
+
+static void nano_draw_string(const char* str, int x, int y, uint32_t fg, uint32_t bg) {
+    int cx = x;
+    while (*str) {
+        nano_draw_char(*str++, cx, y, fg, bg);
+        cx += 8;
+    }
+}
+
 void draw_editor(const char* filename) {
-    int term_cols = is_graphics_mode ? (g_width / 8) : 80;
-    int term_rows = is_graphics_mode ? (g_height / 16) : 25;
+    int term_cols = 80;
+    int term_rows = 25;
+    if (is_graphics_mode) {
+        if (is_gui_mode && gui_terminal_window) {
+            term_cols = gui_terminal_window->width / 8;
+            term_rows = gui_terminal_window->height / 16;
+        } else {
+            term_cols = g_width / 8;
+            term_rows = g_height / 16;
+        }
+    }
     int visible_lines = term_rows - 3;
 
     if (term_cols > NANO_MAX_COLS) term_cols = NANO_MAX_COLS;
@@ -1912,7 +1949,7 @@ void draw_editor(const char* filename) {
         uint32_t fg_invert = 0x00000000; /* Black */
 
         /* Draw Header */
-        draw_string(header, 0, 0, fg_invert, bg_invert);
+        nano_draw_string(header, 0, 0, fg_invert, bg_invert);
 
         /* Draw Editing Area */
         for (int l = 0; l < visible_lines; l++) {
@@ -1926,16 +1963,16 @@ void draw_editor(const char* filename) {
 
             for (int c = 0; c < clear_to; c++) {
                 char char_to_draw = (c < cur_len) ? edit_lines[line_idx][c] : ' ';
-                draw_char(char_to_draw, c * 8, (l + 1) * 16, fg_normal, bg_normal);
+                nano_draw_char(char_to_draw, c * 8, (l + 1) * 16, fg_normal, bg_normal);
             }
             nano_prev_lens[l] = cur_len;
         }
 
         /* Draw Status Line (Yellow on Dark Gray) */
-        draw_string(status, 0, (term_rows - 2) * 16, 0x00FFFF55, 0x00222222);
+        nano_draw_string(status, 0, (term_rows - 2) * 16, 0x00FFFF55, 0x00222222);
 
         /* Draw Footer */
-        draw_string(footer, 0, (term_rows - 1) * 16, fg_invert, bg_invert);
+        nano_draw_string(footer, 0, (term_rows - 1) * 16, fg_invert, bg_invert);
 
         /* Draw Software Block Cursor */
         if (edit_cy >= scroll_y && edit_cy < scroll_y + visible_lines) {
@@ -1943,10 +1980,14 @@ void draw_editor(const char* filename) {
             if (edit_cx < edit_lens[edit_cy]) {
                 char_under_cursor = edit_lines[edit_cy][edit_cx];
             }
-            draw_char(char_under_cursor, edit_cx * 8, ((edit_cy - scroll_y) + 1) * 16, bg_normal, fg_normal);
+            nano_draw_char(char_under_cursor, edit_cx * 8, ((edit_cy - scroll_y) + 1) * 16, bg_normal, fg_normal);
         }
 
-        swap_buffers();
+        if (is_gui_mode) {
+            gui_mark_dirty(1);
+        } else {
+            swap_buffers();
+        }
         nano_full_redraw = 0;
     } 
     /* 5. Fallback Legacy VGA Mode */
@@ -1972,9 +2013,18 @@ void draw_editor(const char* filename) {
 }
 
 void run_nano(const char* filename) {
-    int term_cols = is_graphics_mode ? (g_width / 8) : 80;
+    int term_cols = 80;
+    int term_rows = 25;
+    if (is_graphics_mode) {
+        if (is_gui_mode && gui_terminal_window) {
+            term_cols = gui_terminal_window->width / 8;
+            term_rows = gui_terminal_window->height / 16;
+        } else {
+            term_cols = g_width / 8;
+            term_rows = g_height / 16;
+        }
+    }
     if (term_cols > NANO_MAX_COLS) term_cols = NANO_MAX_COLS;
-    int term_rows = is_graphics_mode ? (g_height / 16) : 25;
     int visible_lines = term_rows - 3;
     if (visible_lines > 60) visible_lines = 60;
 
@@ -4172,6 +4222,15 @@ static void execute_single_command(int is_bg) {
         logout_and_login("Session locked.");
         return;
     }
+    else if (strcmp(cmd, "startgui") == 0 || strcmp(cmd, "desktop") == 0) {
+        if (!is_graphics_mode) {
+            kprintf("Error: VBE graphical framebuffer mode is required for GUI.\n");
+        } else if (is_gui_mode) {
+            kprintf("GUI mode is already active.\n");
+        } else {
+            gui_start();
+        }
+    }
     else if (strcmp(cmd, "crash") == 0) {
         /* Triggers Exception 14 (Page Fault) by dereferencing an unmapped address */
         volatile int* trap = (int*)0xDEADBEEF;
@@ -4430,6 +4489,13 @@ void execute_command() {
     history_index = -1;   /* Cleans up history */
     kprintf("\033[32m%s@sOS\033[0m \033[34m%s\033[0m\033[33m%c\033[0m ", current_user, get_current_path(), current_uid == 0 ? '#' : '$');
     shell_input_enabled = 1; /* Reactivates shell input */
+}
+
+void print_shell_prompt(void) {
+    kprintf("\033[32m%s@sOS\033[0m \033[34m%s\033[0m\033[33m%c\033[0m ", current_user, get_current_path(), current_uid == 0 ? '#' : '$');
+    for (int i = 0; i < cmd_idx; i++) {
+        kputc(cmd_buffer[i]);
+    }
 }
 
 void logout_and_login(const char* message) {

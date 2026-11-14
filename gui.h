@@ -47,9 +47,13 @@ typedef struct window {
 
 extern volatile int gui_dirty;
 extern volatile int gui_full_dirty;
+extern volatile int gui_exit_requested;
 extern wait_queue_t gui_wait_queue;
+extern window_t* gui_terminal_window;
 
 void gui_init(void);
+void gui_start(void);
+void gui_request_exit(void);
 int gui_create_window(const char* title, int x, int y, int w, int h, uint32_t flags, uint32_t owner_pid);
 void gui_destroy_window(int win_id);
 void gui_destroy_windows_by_pid(uint32_t pid);

@@ -1,4 +1,5 @@
 #include "system.h"
+#include "gui.h"
 #define FONT8x16_IMPLEMENTATION /* Tell the header to instantiate the array here */
 #include "font8x16.h"
 
@@ -331,6 +332,56 @@ void update_software_cursor(void) {
     last_cy = cursor_y;
 }
 
+/* --- GUI TERMINAL CURSOR HELPERS --- */
+static int term_cursor_drawn = 0;
+static int last_term_cx = 0;
+static int last_term_cy = 0;
+static uint32_t saved_term_cursor[16];
+
+static void gui_term_erase_cursor(void) {
+    if (!term_cursor_drawn || !gui_terminal_window || !gui_terminal_window->canvas) {
+        term_cursor_drawn = 0;
+        return;
+    }
+    int w = gui_terminal_window->width;
+    int h = gui_terminal_window->height;
+    uint32_t* canvas = gui_terminal_window->canvas;
+
+    for (int cy = 0; cy < 2; cy++) {
+        int py = last_term_cy * 16 + 13 + cy;
+        if (py < 0 || py >= h) continue;
+        for (int cx = 0; cx < 8; cx++) {
+            int px = last_term_cx * 8 + cx;
+            if (px < 0 || px >= w) continue;
+            canvas[py * w + px] = saved_term_cursor[cy * 8 + cx];
+        }
+    }
+    term_cursor_drawn = 0;
+}
+
+static void gui_term_draw_cursor(void) {
+    if (!show_cursor || !gui_terminal_window || !gui_terminal_window->canvas) return;
+    int w = gui_terminal_window->width;
+    int h = gui_terminal_window->height;
+    uint32_t* canvas = gui_terminal_window->canvas;
+
+    for (int cy = 0; cy < 2; cy++) {
+        int py = cursor_y * 16 + 13 + cy;
+        for (int cx = 0; cx < 8; cx++) {
+            int px = cursor_x * 8 + cx;
+            if (px >= 0 && px < w && py >= 0 && py < h) {
+                saved_term_cursor[cy * 8 + cx] = canvas[py * w + px];
+                canvas[py * w + px] = term_fg_color;
+            } else {
+                saved_term_cursor[cy * 8 + cx] = term_bg_color;
+            }
+        }
+    }
+    last_term_cx = cursor_x;
+    last_term_cy = cursor_y;
+    term_cursor_drawn = 1;
+}
+
 void write_vga(char c) {
     if (ansi_state == 0) {
         if (c == '\033') {
@@ -340,7 +391,33 @@ void write_vga(char c) {
         
         if (is_graphics_mode) {
             if (is_gui_mode) {
-                /* In GUI mode (before terminal window hook), do not overwrite desktop backbuffer/VRAM */
+                if (!gui_terminal_window || !gui_terminal_window->canvas) return;
+                gui_term_erase_cursor();
+                int term_cols = gui_terminal_window->width / 8;
+                if (c == '\n') {
+                    cursor_x = 0;
+                    cursor_y++;
+                } else if (c == '\b') {
+                    if (cursor_x > 0) {
+                        cursor_x--;
+                    } else if (cursor_y > 0) {
+                        cursor_y--;
+                        cursor_x = term_cols - 1;
+                    }
+                } else if (c == '\r') {
+                    cursor_x = 0;
+                } else {
+                    surface_draw_char(gui_terminal_window->canvas,
+                                      gui_terminal_window->width,
+                                      gui_terminal_window->height,
+                                      c, cursor_x * 8, cursor_y * 16,
+                                      term_fg_color, term_bg_color);
+                    cursor_x++;
+                    if (cursor_x >= term_cols) { cursor_x = 0; cursor_y++; }
+                }
+                scroll();
+                gui_term_draw_cursor();
+                gui_mark_dirty(1);
                 return;
             }
             int term_cols = g_width / 8;
@@ -411,6 +488,29 @@ void write_vga(char c) {
 /* Instantaneous Scrolling Engine */
 void scroll(void) {
     if (is_graphics_mode) {
+        if (is_gui_mode) {
+            if (!gui_terminal_window || !gui_terminal_window->canvas) return;
+            int term_rows = gui_terminal_window->height / 16;
+            if (cursor_y < term_rows) return;
+
+            uint32_t* canvas = gui_terminal_window->canvas;
+            uint32_t row_dwords = (uint32_t)gui_terminal_window->width * 16;
+            uint32_t lines = (uint32_t)(cursor_y - term_rows + 1);
+
+            if (lines >= (uint32_t)term_rows) {
+                fast_memset(canvas, term_bg_color,
+                            (uint32_t)gui_terminal_window->width * (uint32_t)gui_terminal_window->height);
+                cursor_y = 0;
+            } else {
+                uint32_t shift_dwords = (uint32_t)(term_rows - (int)lines) * row_dwords;
+                fast_memcpy(canvas, canvas + (lines * row_dwords), shift_dwords);
+                fast_memset(canvas + shift_dwords, term_bg_color, lines * row_dwords);
+                cursor_y = term_rows - 1;
+            }
+            gui_mark_dirty(1);
+            return;
+        }
+
         int term_rows = g_height / 16;
         if (cursor_y < term_rows) return;
 
@@ -476,7 +576,18 @@ void kputc(char c) {
 
 void clear_terminal(void) {
     if (is_graphics_mode) {
-        if (is_gui_mode) return;
+        if (is_gui_mode) {
+            term_cursor_drawn = 0;
+            if (gui_terminal_window && gui_terminal_window->canvas) {
+                fast_memset(gui_terminal_window->canvas, term_bg_color,
+                            (uint32_t)gui_terminal_window->width * (uint32_t)gui_terminal_window->height);
+                cursor_x = 0;
+                cursor_y = 0;
+                gui_term_draw_cursor();
+                gui_mark_dirty(1);
+            }
+            return;
+        }
         uint32_t total_pixels = (g_height * g_pitch) / 4;
         fast_memset(backbuffer, term_bg_color, total_pixels);
         cursor_x = 0; 

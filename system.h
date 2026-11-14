@@ -174,6 +174,13 @@ extern int ota_in_progress;
 extern int ota_force_mode;
 extern int ota_error_occurred;
 
+/* --- Task & Shell Helpers (kernel.c) --- */
+extern volatile int shell_input_enabled;
+extern volatile int fg_task;
+void create_task(void (*entry_point)());
+void kill_current_task(void);
+void print_shell_prompt(void);
+
 /* --- Multitasking --- */
 #define MAX_TASKS 16
 #define MAX_OPEN_FILES 16
