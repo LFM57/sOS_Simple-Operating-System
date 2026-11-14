@@ -48,12 +48,16 @@ typedef struct window {
 extern volatile int gui_dirty;
 extern volatile int gui_full_dirty;
 extern volatile int gui_exit_requested;
+extern volatile int is_gui_locked;
+extern volatile int gui_logout_requested;
 extern wait_queue_t gui_wait_queue;
 extern window_t* gui_terminal_window;
 
 void gui_init(void);
 void gui_start(void);
 void gui_request_exit(void);
+void gui_lock_screen(void);
+void gui_lock_on_key_press(char ascii);
 int gui_create_window(const char* title, int x, int y, int w, int h, uint32_t flags, uint32_t owner_pid);
 int gui_create_user_window(const char* title, int w, int h, uint32_t owner_pid);
 int gui_present_window(int win_id, const uint32_t* buf, uint32_t owner_pid);

@@ -539,7 +539,14 @@ int kernel_gets(char* buffer, int max_len, int hidden, int allow_empty) {
     int i = 0;
     is_kernel_gets_active = 1;
     while (i < max_len - 1) {
-        while (!kbd_buf_has_char()) { sleep_on(&console_queue); }
+        while (!kbd_buf_has_char()) {
+            if (gui_logout_requested && !is_logging_out) {
+                buffer[0] = '\0';
+                is_kernel_gets_active = 0;
+                return 0;
+            }
+            sleep_on(&console_queue);
+        }
         char c = kbd_buf_get();
         
         if (c == 3) { /* Ctrl+C pressed */
@@ -922,6 +929,21 @@ void keyboard_handler() {
             ascii = kbd_us[scancode];
         }
         
+        if (is_gui_mode && is_gui_locked) {
+            if (ascii != 0) {
+                gui_lock_on_key_press(ascii);
+            }
+            outb(0x20, 0x20);
+            return;
+        }
+
+        if (is_gui_mode && ctrl_active && scancode == 0x26) {
+            /* Ctrl+L locks the GUI session */
+            gui_lock_screen();
+            outb(0x20, 0x20);
+            return;
+        }
+
         if (is_gui_mode && ctrl_active && scancode == 0x10) {
             /* Ctrl+Q exits GUI mode back to full-screen text shell */
             gui_request_exit();
@@ -968,6 +990,10 @@ void init_serial() {
 void serial_handler() {
     if (inb(0x3f8 + 5) & 0x01) {
         char c = inb(0x3f8);
+        if (is_gui_mode && is_gui_locked) {
+            outb(0x20, 0x20);
+            return;
+        }
         
         /* CRLF key sequence handling */
         static char last_char = 0;
@@ -1006,6 +1032,10 @@ void serial_handler() {
 char wait_key(void) {
     is_kernel_gets_active = 1;
     while (!kbd_buf_has_char()) {
+        if (gui_logout_requested && !is_logging_out) {
+            is_kernel_gets_active = 0;
+            return 0;
+        }
         sleep_on(&console_queue);
     }
     char c = kbd_buf_get();
@@ -1761,14 +1791,26 @@ int check_password(const char* input_pass, const char* stored_str) {
 int get_user_info(const char* username, char* out_password, uint8_t* out_uid) {
     /* Temporary privilege elevation to ROOT (0) to read the passwd file */
     uint8_t old_uid = current_uid;
-    current_uid = 0; 
+    uint8_t old_task_uid = 0;
+    if (current_task > 0) {
+        old_task_uid = tasks[current_task].uid;
+        tasks[current_task].uid = 0;
+    } else {
+        current_uid = 0;
+    }
 
     uint8_t* buf; uint32_t size;
-    if (!fs_load_file("/passwd", &buf, &size)) {
-        current_uid = old_uid;
+    int loaded = fs_load_file("/passwd", &buf, &size);
+
+    if (current_task > 0) {
+        tasks[current_task].uid = old_task_uid;
+    } else {
+        current_uid = old_uid; /* Restore the original user's UID */
+    }
+
+    if (!loaded) {
         return 0;
     }
-    current_uid = old_uid; /* Restore the original user's UID */
     
     uint32_t i = 0;
     while (i < size) {
@@ -4224,9 +4266,14 @@ static void execute_single_command(int is_bg) {
         while(1) { __asm__ volatile("cli; hlt"); }
     }
     else if (strcmp(cmd, "lock") == 0) {
-        clear_terminal();
-        logout_and_login("Session locked.");
-        return;
+        if (is_gui_mode) {
+            gui_lock_screen();
+            goto end_prompt;
+        } else {
+            clear_terminal();
+            logout_and_login("Session locked.");
+            return;
+        }
     }
     else if (strcmp(cmd, "startgui") == 0 || strcmp(cmd, "desktop") == 0) {
         if (!is_graphics_mode) {
@@ -4646,8 +4693,14 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
     logout_and_login(NULL);
 
     while(1) {
-        while (!cmd_ready) {
+        while (!cmd_ready && !gui_logout_requested) {
             sleep_on(&console_queue);
+        }
+        if (gui_logout_requested) {
+            gui_logout_requested = 0;
+            clear_terminal();
+            logout_and_login("Logged out of GUI session.");
+            continue;
         }
         session_reset = 0;
         execute_command();
