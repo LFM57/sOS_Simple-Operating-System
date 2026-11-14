@@ -8,6 +8,7 @@ extern void irq0(void);
 extern void irq1(void);
 extern void irq4(void);
 extern void irq7(void);
+extern void irq12(void);
 extern void irq15(void);
 extern void isr128(void);
 
@@ -111,6 +112,7 @@ void init_idt() {
     idt_set_gate(33, (uint32_t)irq1, 0x08, 0x8E); 
     idt_set_gate(36, (uint32_t)irq4, 0x08, 0x8E); 
     idt_set_gate(39, (uint32_t)irq7, 0x08, 0x8E); 
+    idt_set_gate(44, (uint32_t)irq12, 0x08, 0x8E);
     idt_set_gate(47, (uint32_t)irq15, 0x08, 0x8E); 
     /* 0xEE because the high E allows Ring 3 */
     idt_set_gate(128, (uint32_t)isr128, 0x08, 0xEE); 

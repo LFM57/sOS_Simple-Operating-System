@@ -4,6 +4,7 @@
 #include "net.h"
 #include "e1000.h"
 #include "crypto.h" 
+#include "mouse.h"
 
 #define SOS_VERSION "2.6.0"
 
@@ -4540,6 +4541,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
     init_fs();
     init_vfs();
     init_pit();  kprintf("[INFO] PIT (100 Hz) OK\n");
+    init_mouse(); kprintf("[INFO] PS/2 Mouse OK\n");
     init_e1000();
     
     init_multitasking(); kprintf("[INFO] Multitasking OK\n");

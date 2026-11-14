@@ -100,6 +100,7 @@ void cleanup_task_memory(int id);
 /* --- Hardware (kernel.c) --- */
 extern volatile uint32_t timer_ticks;
 void init_pic();
+void pic_enable_irq(uint8_t irq);
 void init_serial();
 void init_pit();
 typedef struct {

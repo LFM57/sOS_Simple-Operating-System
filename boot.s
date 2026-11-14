@@ -257,6 +257,31 @@ irq7:
     popa
     iret
 
+/* IRQ12 (PS/2 Mouse) */
+.global irq12
+.type irq12, @function
+irq12:
+    pusha
+    push %ds
+    push %es
+    push %fs
+    push %gs
+
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+
+    call mouse_handler
+
+    pop %gs
+    pop %fs
+    pop %es
+    pop %ds
+    popa
+    iret
+
 /* IRQ15 - Slave PIC Spurious Interrupt Handler */
 .global irq15
 .type irq15, @function
