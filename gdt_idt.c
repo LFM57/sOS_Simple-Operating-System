@@ -139,6 +139,7 @@ void fault_handler(registers_t *regs) {
 
         /* --- GRAPHICAL BSOD TRIGGER --- */
         if (is_graphics_mode) {
+            is_gui_mode = 0;
             show_cursor = 0;            /* Erase and hide the blinking cursor */
             term_bg_color = 0x000000AA; /* BSOD Blue */
             term_fg_color = 0x00FFFFFF; /* White text */

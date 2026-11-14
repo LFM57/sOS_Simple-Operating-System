@@ -6,6 +6,7 @@
 
 /* --- GRAPHICS ENGINE --- */
 int is_graphics_mode = 0;
+int is_gui_mode = 0;  /* When 1, compositor owns backbuffer and lfb_mem */
 int show_cursor = 1; /* Global flag to toggle the software cursor */
 uint32_t* lfb_mem = (uint32_t*)0xE0000000;    /* Physical Video RAM mapped here */
 uint32_t* backbuffer = (uint32_t*)0xE1000000; /* RAM Backbuffer mapped here */
@@ -61,7 +62,9 @@ void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
     
     uint32_t offset = (y * g_pitch) + (x * (g_bpp / 8));
     *(uint32_t*)((uint8_t*)backbuffer + offset) = color;
-    *(uint32_t*)((uint8_t*)lfb_mem + offset) = color; 
+    if (!is_gui_mode) {
+        *(uint32_t*)((uint8_t*)lfb_mem + offset) = color;
+    }
 }
 
 void update_software_cursor(void);
@@ -73,7 +76,174 @@ void swap_buffers(void) {
     /* Fast block copy from RAM backbuffer to Video memory (completes in ~1 ms) */
     fast_memcpy(lfb_mem, backbuffer, total_dwords);
 
-    update_software_cursor(); 
+    if (!is_gui_mode) {
+        update_software_cursor();
+    }
+}
+
+void flush_rect(int x, int y, int w, int h) {
+    if (!is_graphics_mode) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > (int)g_width) w = (int)g_width - x;
+    if (y + h > (int)g_height) h = (int)g_height - y;
+    if (w <= 0 || h <= 0) return;
+
+    uint32_t bpp_bytes = g_bpp / 8;
+    for (int row = y; row < y + h; row++) {
+        uint32_t offset = ((uint32_t)row * g_pitch) + ((uint32_t)x * bpp_bytes);
+        fast_memcpy((uint8_t*)lfb_mem + offset, (uint8_t*)backbuffer + offset, (uint32_t)w);
+    }
+}
+
+/* --- BACKBUFFER-ONLY PRIMITIVES (GUI / COMPOSITOR) --- */
+
+void bb_put_pixel(int x, int y, uint32_t color) {
+    if (!is_graphics_mode || x < 0 || y < 0 || x >= (int)g_width || y >= (int)g_height) return;
+    uint32_t offset = ((uint32_t)y * g_pitch) + ((uint32_t)x * (g_bpp / 8));
+    *(uint32_t*)((uint8_t*)backbuffer + offset) = color;
+}
+
+void bb_fill_rect(int x, int y, int w, int h, uint32_t color) {
+    if (!is_graphics_mode) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > (int)g_width) w = (int)g_width - x;
+    if (y + h > (int)g_height) h = (int)g_height - y;
+    if (w <= 0 || h <= 0) return;
+
+    uint32_t bpp_bytes = g_bpp / 8;
+    for (int row = y; row < y + h; row++) {
+        uint32_t offset = ((uint32_t)row * g_pitch) + ((uint32_t)x * bpp_bytes);
+        fast_memset((uint8_t*)backbuffer + offset, color, (uint32_t)w);
+    }
+}
+
+void bb_draw_rect_outline(int x, int y, int w, int h, uint32_t color) {
+    if (w <= 0 || h <= 0) return;
+    bb_fill_rect(x, y, w, 1, color);
+    bb_fill_rect(x, y + h - 1, w, 1, color);
+    bb_fill_rect(x, y, 1, h, color);
+    bb_fill_rect(x + w - 1, y, 1, h, color);
+}
+
+static void render_glyph_to_surface(uint32_t* surface, int surf_w, int surf_h, uint32_t pitch_bytes,
+                                    char c, int x, int y, uint32_t fg_color, uint32_t bg_color, int transparent_bg) {
+    unsigned char idx = (unsigned char)c;
+    if (idx >= 128) idx = '?';
+    const unsigned char* glyph = font8x16[idx];
+
+    for (int cy = 0; cy < 16; cy++) {
+        int py = y + cy;
+        if (py < 0 || py >= surf_h) continue;
+        uint32_t* row = (uint32_t*)((uint8_t*)surface + ((uint32_t)py * pitch_bytes));
+        unsigned char row_bits = glyph[cy];
+        for (int cx = 0; cx < 8; cx++) {
+            int px = x + cx;
+            if (px < 0 || px >= surf_w) continue;
+            if (row_bits & (0x80 >> cx)) {
+                row[px] = fg_color;
+            } else if (!transparent_bg) {
+                row[px] = bg_color;
+            }
+        }
+    }
+}
+
+void surface_draw_char(uint32_t* surface, int surf_w, int surf_h, char c, int x, int y, uint32_t fg_color, uint32_t bg_color) {
+    if (!surface || surf_w <= 0 || surf_h <= 0) return;
+    render_glyph_to_surface(surface, surf_w, surf_h, (uint32_t)surf_w * 4, c, x, y, fg_color, bg_color, 0);
+}
+
+void bb_draw_char(char c, int x, int y, uint32_t fg_color, uint32_t bg_color) {
+    if (!is_graphics_mode) return;
+    render_glyph_to_surface(backbuffer, (int)g_width, (int)g_height, g_pitch, c, x, y, fg_color, bg_color, 0);
+}
+
+void bb_draw_char_transparent(char c, int x, int y, uint32_t fg_color) {
+    if (!is_graphics_mode) return;
+    render_glyph_to_surface(backbuffer, (int)g_width, (int)g_height, g_pitch, c, x, y, fg_color, 0, 1);
+}
+
+void bb_draw_string(const char* str, int x, int y, uint32_t fg_color, uint32_t bg_color) {
+    if (!is_graphics_mode || !str) return;
+    int current_x = x;
+    while (*str) {
+        bb_draw_char(*str, current_x, y, fg_color, bg_color);
+        current_x += 8;
+        str++;
+    }
+}
+
+void bb_draw_string_transparent(const char* str, int x, int y, uint32_t fg_color) {
+    if (!is_graphics_mode || !str) return;
+    int current_x = x;
+    while (*str) {
+        bb_draw_char_transparent(*str, current_x, y, fg_color);
+        current_x += 8;
+        str++;
+    }
+}
+
+void bb_draw_sprite(const uint32_t* sprite, uint32_t width, uint32_t height, int x, int y) {
+    if (!is_graphics_mode || !sprite) return;
+    uint32_t bpp_bytes = g_bpp / 8;
+
+    for (uint32_t sy = 0; sy < height; sy++) {
+        int dy = y + (int)sy;
+        if (dy < 0 || dy >= (int)g_height) continue;
+
+        for (uint32_t sx = 0; sx < width; sx++) {
+            int dx = x + (int)sx;
+            if (dx < 0 || dx >= (int)g_width) continue;
+
+            uint32_t src_color = sprite[sy * width + sx];
+            uint32_t a = (src_color >> 24) & 0xFF;
+
+            if (a == 255) {
+                bb_put_pixel(dx, dy, src_color);
+            } else if (a > 0) {
+                uint32_t offset = ((uint32_t)dy * g_pitch) + ((uint32_t)dx * bpp_bytes);
+                uint32_t bg_color = *(uint32_t*)((uint8_t*)backbuffer + offset);
+
+                uint32_t br = (bg_color >> 16) & 0xFF;
+                uint32_t bg = (bg_color >> 8) & 0xFF;
+                uint32_t bb = bg_color & 0xFF;
+
+                uint32_t sr = (src_color >> 16) & 0xFF;
+                uint32_t sg = (src_color >> 8) & 0xFF;
+                uint32_t sb = src_color & 0xFF;
+
+                uint32_t new_r = (sr * a + br * (255 - a)) / 255;
+                uint32_t new_g = (sg * a + bg * (255 - a)) / 255;
+                uint32_t new_b = (sb * a + bb * (255 - a)) / 255;
+
+                bb_put_pixel(dx, dy, (new_r << 16) | (new_g << 8) | new_b);
+            }
+        }
+    }
+}
+
+void bb_blit_surface(const uint32_t* src, int src_w, int src_h, int dst_x, int dst_y) {
+    if (!is_graphics_mode || !src || src_w <= 0 || src_h <= 0) return;
+
+    int src_x_start = 0;
+    int src_y_start = 0;
+    int copy_w = src_w;
+    int copy_h = src_h;
+
+    if (dst_x < 0) { src_x_start = -dst_x; copy_w += dst_x; dst_x = 0; }
+    if (dst_y < 0) { src_y_start = -dst_y; copy_h += dst_y; dst_y = 0; }
+    if (dst_x + copy_w > (int)g_width) copy_w = (int)g_width - dst_x;
+    if (dst_y + copy_h > (int)g_height) copy_h = (int)g_height - dst_y;
+    if (copy_w <= 0 || copy_h <= 0) return;
+
+    uint32_t bpp_bytes = g_bpp / 8;
+    for (int row = 0; row < copy_h; row++) {
+        const uint32_t* src_row = src + ((src_y_start + row) * src_w) + src_x_start;
+        uint8_t* dst_row = (uint8_t*)backbuffer + ((uint32_t)(dst_y + row) * g_pitch) + ((uint32_t)dst_x * bpp_bytes);
+        fast_memcpy(dst_row, src_row, (uint32_t)copy_w);
+    }
 }
 
 /* Optimized glyph rendering: writes scanlines directly without per-pixel call overhead */
@@ -94,7 +264,9 @@ void draw_char(char c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_co
         for (uint32_t cx = 0; cx < 8; cx++) {
             uint32_t color = (row_bits & (0x80 >> cx)) ? fg_color : bg_color;
             bb_row[cx] = color;
-            lfb_row[cx] = color;
+            if (!is_gui_mode) {
+                lfb_row[cx] = color;
+            }
         }
         row_offset += g_pitch;
     }
@@ -133,7 +305,7 @@ void update_cursor(int x, int y) {
 }
 
 void update_software_cursor(void) {
-    if (!is_graphics_mode) return;
+    if (!is_graphics_mode || is_gui_mode) return;
     static uint32_t last_cx = 0, last_cy = 0;
     uint32_t bytes_per_pixel = g_bpp / 8;
 
@@ -167,6 +339,10 @@ void write_vga(char c) {
         }
         
         if (is_graphics_mode) {
+            if (is_gui_mode) {
+                /* In GUI mode (before terminal window hook), do not overwrite desktop backbuffer/VRAM */
+                return;
+            }
             int term_cols = g_width / 8;
             if (c == '\n') {
                 cursor_x = 0;
@@ -300,6 +476,7 @@ void kputc(char c) {
 
 void clear_terminal(void) {
     if (is_graphics_mode) {
+        if (is_gui_mode) return;
         uint32_t total_pixels = (g_height * g_pitch) / 4;
         fast_memset(backbuffer, term_bg_color, total_pixels);
         cursor_x = 0; 
