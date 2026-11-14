@@ -109,15 +109,17 @@ void _start() {
         if (ev.type == GUI_EVENT_WINDOW_CLOSE) {
             break;
         } else if (ev.type == GUI_EVENT_KEY_PRESS) {
-            if (ev.key == 'q' || ev.key == 'Q' || ev.key == 27) {
-                break;
-            } else if (ev.key == 'c' || ev.key == 'C') {
-                clear_canvas(buf, active_idx);
-                dirty = 1;
-            } else if (ev.key >= '1' && ev.key <= '6') {
-                active_idx = ev.key - '1';
-                draw_toolbar(buf, active_idx);
-                dirty = 1;
+            if (!(ev.modifiers & (GUI_MOD_CTRL | GUI_MOD_ALT))) {
+                if (ev.key == 'q' || ev.key == 'Q' || ev.key == GUI_KEY_ESC) {
+                    break;
+                } else if (ev.key == 'c' || ev.key == 'C') {
+                    clear_canvas(buf, active_idx);
+                    dirty = 1;
+                } else if (ev.key >= '1' && ev.key <= '6') {
+                    active_idx = ev.key - '1';
+                    draw_toolbar(buf, active_idx);
+                    dirty = 1;
+                }
             }
         } else if (ev.type == GUI_EVENT_MOUSE_DOWN && ev.button == 1) {
             if (ev.y < TOOLBAR_H) {

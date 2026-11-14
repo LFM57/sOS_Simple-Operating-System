@@ -63,6 +63,24 @@ int send(int fd, const void* buf, unsigned int len);
 int recv(int fd, void* buf, unsigned int len);
 
 /* GUI System Calls (Ring 3) */
+#define GUI_MOD_SHIFT 0x01
+#define GUI_MOD_CTRL  0x02
+#define GUI_MOD_ALT   0x04
+
+#define GUI_KEY_HOME      1
+#define GUI_KEY_END       5
+#define GUI_KEY_BACKSPACE '\b'
+#define GUI_KEY_TAB       '\t'
+#define GUI_KEY_ENTER     '\n'
+#define GUI_KEY_UP        17
+#define GUI_KEY_DOWN      18
+#define GUI_KEY_LEFT      20
+#define GUI_KEY_RIGHT     21
+#define GUI_KEY_PAGE_UP   25
+#define GUI_KEY_PAGE_DOWN 26
+#define GUI_KEY_ESC       27
+#define GUI_KEY_DELETE    127
+
 typedef enum {
     GUI_EVENT_NONE = 0,
     GUI_EVENT_MOUSE_DOWN,
@@ -77,6 +95,8 @@ typedef struct {
     int x, y;
     unsigned char button;
     char key;
+    unsigned char modifiers;
+    unsigned char scancode;
 } gui_event_t;
 
 int win_create(const char* title, int w, int h);

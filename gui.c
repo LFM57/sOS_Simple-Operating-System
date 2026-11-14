@@ -524,25 +524,28 @@ void gui_on_mouse_packet(int x, int y, uint8_t buttons) {
 static int gui_compositor_tid = -1;
 
 /* Called from IRQ1 keyboard_handler() when GUI mode is active */
-void gui_on_key_press(char ascii) {
-    if (ascii == 0) return;
+void gui_on_key_press(char ascii, uint8_t modifiers, uint8_t scancode) {
+    if (ascii == 0 && scancode == 0) return;
     if (is_gui_login) {
-        gui_login_on_key_press(ascii);
+        if (ascii != 0) {
+            gui_login_on_key_press(ascii);
+        }
         return;
     }
     if (is_gui_locked) {
-        gui_lock_on_key_press(ascii);
+        if (ascii != 0) {
+            gui_lock_on_key_press(ascii);
+        }
         return;
     }
     window_t* top = gui_get_focused_window();
-    if (!top) return;
+    if (!top || top == gui_terminal_window) return;
 
-    gui_event_t ev;
+    gui_event_t ev = {0};
     ev.type = GUI_EVENT_KEY_PRESS;
-    ev.x = 0;
-    ev.y = 0;
-    ev.button = 0;
     ev.key = ascii;
+    ev.modifiers = modifiers;
+    ev.scancode = scancode;
     gui_push_event(top, &ev);
 }
 
@@ -847,12 +850,11 @@ static void deliver_captured_mouse_up(int mx, int my, uint8_t button) {
     if (rx >= target->width) rx = target->width - 1;
     if (ry >= target->height) ry = target->height - 1;
 
-    gui_event_t ev;
+    gui_event_t ev = {0};
     ev.type = GUI_EVENT_MOUSE_UP;
     ev.x = rx;
     ev.y = ry;
     ev.button = button;
-    ev.key = 0;
     gui_push_event(target, &ev);
 }
 
@@ -882,12 +884,11 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
             window_t* top = gui_get_focused_window();
             if (top && mx >= top->x && mx < top->x + top->width &&
                 my >= top->y && my < top->y + top->height) {
-                gui_event_t ev;
+                gui_event_t ev = {0};
                 ev.type = GUI_EVENT_MOUSE_MOVE;
                 ev.x = mx - top->x;
                 ev.y = my - top->y;
                 ev.button = buttons;
-                ev.key = 0;
                 gui_push_event(top, &ev);
             }
         }
@@ -996,12 +997,9 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
                                 gui_full_dirty = 1;
                                 gui_dirty = 1;
                             } else {
-                                gui_event_t ev;
+                                gui_event_t ev = {0};
                                 ev.type = GUI_EVENT_WINDOW_CLOSE;
-                                ev.x = 0;
-                                ev.y = 0;
                                 ev.button = 1;
-                                ev.key = 0;
                                 gui_push_event(w, &ev);
                             }
                             break;
@@ -1018,12 +1016,11 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
                         my >= w->y && my < w->y + w->height) {
                         mouse_capture_window = w;
                         mouse_capture_buttons |= 0x01;
-                        gui_event_t ev;
+                        gui_event_t ev = {0};
                         ev.type = GUI_EVENT_MOUSE_DOWN;
                         ev.x = mx - w->x;
                         ev.y = my - w->y;
                         ev.button = 1;
-                        ev.key = 0;
                         gui_push_event(w, &ev);
                     }
                     break;
@@ -1045,12 +1042,11 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
                 my >= top->y && my < top->y + top->height) {
                 mouse_capture_window = top;
                 mouse_capture_buttons |= 0x02;
-                gui_event_t ev;
+                gui_event_t ev = {0};
                 ev.type = GUI_EVENT_MOUSE_DOWN;
                 ev.x = mx - top->x;
                 ev.y = my - top->y;
                 ev.button = 2;
-                ev.key = 0;
                 gui_push_event(top, &ev);
             }
         }

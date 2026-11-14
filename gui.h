@@ -13,6 +13,24 @@
 #define WIN_DECORATED 0x02
 #define WIN_BUILTIN   0x04
 
+#define GUI_MOD_SHIFT 0x01
+#define GUI_MOD_CTRL  0x02
+#define GUI_MOD_ALT   0x04
+
+#define GUI_KEY_HOME      1
+#define GUI_KEY_END       5
+#define GUI_KEY_BACKSPACE '\b'
+#define GUI_KEY_TAB       '\t'
+#define GUI_KEY_ENTER     '\n'
+#define GUI_KEY_UP        17
+#define GUI_KEY_DOWN      18
+#define GUI_KEY_LEFT      20
+#define GUI_KEY_RIGHT     21
+#define GUI_KEY_PAGE_UP   25
+#define GUI_KEY_PAGE_DOWN 26
+#define GUI_KEY_ESC       27
+#define GUI_KEY_DELETE    127
+
 typedef enum {
     GUI_EVENT_NONE = 0,
     GUI_EVENT_MOUSE_DOWN,
@@ -26,7 +44,9 @@ typedef struct {
     gui_event_type_t type;
     int x, y;          /* Window-relative mouse coordinates */
     uint8_t button;    /* 1 = Left, 2 = Right */
-    char key;          /* ASCII key from keyboard */
+    char key;          /* ASCII / special key from keyboard */
+    uint8_t modifiers; /* GUI_MOD_SHIFT | GUI_MOD_CTRL | GUI_MOD_ALT */
+    uint8_t scancode;  /* Set-1 make scancode (0x80 bit set for E0-extended keys) */
 } gui_event_t;
 
 typedef struct window {
@@ -80,7 +100,7 @@ int gui_push_event(window_t* w, const gui_event_t* ev);
 int gui_pop_event(window_t* w, gui_event_t* out_ev);
 
 void gui_on_mouse_packet(int x, int y, uint8_t buttons);
-void gui_on_key_press(char ascii);
+void gui_on_key_press(char ascii, uint8_t modifiers, uint8_t scancode);
 void gui_mark_dirty(int full_redraw);
 void gui_process_input(void);
 void gui_render(void);

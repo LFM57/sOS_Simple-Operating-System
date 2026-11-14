@@ -925,38 +925,61 @@ void handle_input_char(char c) {
 }
 
 volatile int shift_active = 0; /* Follows Shift state in RAM */
+volatile int alt_active = 0;   /* Follows Alt state in RAM */
 
 void keyboard_handler() {
+    static int kbd_e0_prefix = 0;
     uint8_t scancode = inb(0x60);
-    
-    /* Detect left Ctrl key press (0x1D) */
+
+    if (scancode == 0xE0) {
+        kbd_e0_prefix = 1;
+        outb(0x20, 0x20);
+        return;
+    }
+
+    int is_e0 = kbd_e0_prefix;
+    kbd_e0_prefix = 0;
+
+    /* Ignore fake Shift sequences emitted around extended navigation/PrtSc keys */
+    if (is_e0 && (scancode == 0x2A || scancode == 0xAA || scancode == 0x36 || scancode == 0xB6)) {
+        outb(0x20, 0x20);
+        return;
+    }
+
+    /* Track Ctrl, Shift, and Alt state (both left and E0-prefixed right keys) */
     if (scancode == 0x1D) {
         ctrl_active = 1;
-    } 
-    else if (scancode == 0x9D) {
+    } else if (scancode == 0x9D) {
         ctrl_active = 0;
-    }
-    
-    if (scancode == 0x2A || scancode == 0x36) {
+    } else if (scancode == 0x2A || scancode == 0x36) {
         shift_active = 1;
-    } 
-    else if (scancode == 0xAA || scancode == 0xB6) { 
+    } else if (scancode == 0xAA || scancode == 0xB6) {
         shift_active = 0;
+    } else if (scancode == 0x38) {
+        alt_active = 1;
+    } else if (scancode == 0xB8) {
+        alt_active = 0;
     }
-    
-    if (!(scancode & 0x80)) { 
+
+    if (!(scancode & 0x80)) {
+        /* Do not emit key events for standalone modifier key presses */
+        if (scancode == 0x1D || scancode == 0x2A || scancode == 0x36 || scancode == 0x38) {
+            outb(0x20, 0x20);
+            return;
+        }
+
         char ascii = 0;
-        
+
         /* Direct mapping of navigation & editing keys */
-        if (scancode == 0x48) ascii = 17;       /* Up Arrow -> ASCII 17 */
-        else if (scancode == 0x50) ascii = 18;  /* Down Arrow -> ASCII 18 */
-        else if (scancode == 0x4B) ascii = 20;  /* Left Arrow -> ASCII 20 */
-        else if (scancode == 0x4D) ascii = 21;  /* Right Arrow -> ASCII 21 */
-        else if (scancode == 0x47) ascii = 1;   /* Home -> ASCII 1 */
-        else if (scancode == 0x4F) ascii = 5;   /* End -> ASCII 5 */
-        else if (scancode == 0x53) ascii = 127; /* Delete -> ASCII 127 */
-        else if (scancode == 0x49) ascii = 25;  /* Page Up -> ASCII 25 */
-        else if (scancode == 0x51) ascii = 26;  /* Page Down -> ASCII 26 */
+        if (scancode == 0x48) ascii = GUI_KEY_UP;           /* Up Arrow -> ASCII 17 */
+        else if (scancode == 0x50) ascii = GUI_KEY_DOWN;    /* Down Arrow -> ASCII 18 */
+        else if (scancode == 0x4B) ascii = GUI_KEY_LEFT;    /* Left Arrow -> ASCII 20 */
+        else if (scancode == 0x4D) ascii = GUI_KEY_RIGHT;   /* Right Arrow -> ASCII 21 */
+        else if (scancode == 0x47) ascii = GUI_KEY_HOME;    /* Home -> ASCII 1 */
+        else if (scancode == 0x4F) ascii = GUI_KEY_END;     /* End -> ASCII 5 */
+        else if (scancode == 0x53) ascii = GUI_KEY_DELETE;  /* Delete -> ASCII 127 */
+        else if (scancode == 0x49) ascii = GUI_KEY_PAGE_UP; /* Page Up -> ASCII 25 */
+        else if (scancode == 0x51) ascii = GUI_KEY_PAGE_DOWN; /* Page Down -> ASCII 26 */
         else if (ctrl_active) {
             /* Ctrl Shortcuts */
             if (scancode == 0x1F) ascii = 19;       /* Ctrl+S */
@@ -969,7 +992,7 @@ void keyboard_handler() {
         } else {
             ascii = kbd_us[scancode];
         }
-        
+
         if (is_gui_mode && is_gui_login) {
             if (ascii != 0) {
                 gui_login_on_key_press(ascii);
@@ -1000,22 +1023,38 @@ void keyboard_handler() {
             return;
         }
 
-        if (ascii != 0) {
-            if (is_gui_mode &&
-                !(gui_terminal_window && (gui_terminal_window->flags & WIN_VISIBLE) &&
-                  gui_get_focused_window() == gui_terminal_window)) {
-                gui_on_key_press(ascii);
+        if (is_gui_mode &&
+            !(gui_terminal_window && (gui_terminal_window->flags & WIN_VISIBLE) &&
+              gui_get_focused_window() == gui_terminal_window)) {
+            uint8_t modifiers = 0;
+            if (shift_active) modifiers |= GUI_MOD_SHIFT;
+            if (ctrl_active)  modifiers |= GUI_MOD_CTRL;
+            if (alt_active)   modifiers |= GUI_MOD_ALT;
+
+            char gui_key = ascii;
+            if (gui_key == 0 && ctrl_active) {
+                char base = shift_active ? kbd_us_shift[scancode] : kbd_us[scancode];
+                if (base >= 'a' && base <= 'z') {
+                    gui_key = (char)(base - 'a' + 1);
+                } else if (base >= 'A' && base <= 'Z') {
+                    gui_key = (char)(base - 'A' + 1);
+                } else {
+                    gui_key = base;
+                }
             }
+            uint8_t encoded_scancode = (uint8_t)(scancode | (is_e0 ? 0x80 : 0));
+            gui_on_key_press(gui_key, modifiers, encoded_scancode);
+        } else if (ascii != 0) {
             /* Scenario 1: A foreground task is running */
-            else if (ascii == 3 && fg_task != -1 && tasks[fg_task].state != 0) {
+            if (ascii == 3 && fg_task != -1 && tasks[fg_task].state != 0) {
                 kprintf("^C\n");
                 terminate_task(fg_task);
                 wake_up(&exit_queue);
-            } 
+            }
             /* Scenario 2: Active prompt or application (nano, wait_key, kernel_gets) */
             else if (!shell_input_enabled || is_kernel_gets_active) {
                 kbd_buf_put(ascii);
-            } 
+            }
             /* Scenario 3: Shell command line */
             else if (shell_input_enabled) {
                 handle_input_char(ascii);
@@ -1023,7 +1062,7 @@ void keyboard_handler() {
             wake_up(&console_queue);
         }
     }
-    outb(0x20, 0x20); 
+    outb(0x20, 0x20);
 }
 
 void init_serial() {
