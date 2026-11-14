@@ -1,7 +1,7 @@
 # sOS — Simple Operating System
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.6.0-blue.svg?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/version-3.0.0-blue.svg?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/arch-i686%20%7C%20x86__32-orange.svg?style=flat-square" alt="Architecture">
   <img src="https://img.shields.io/badge/display-VBE%201024x768x32-green.svg?style=flat-square" alt="Display">
   <img src="https://img.shields.io/badge/filesystem-FAT32-lightgrey.svg?style=flat-square" alt="Filesystem">

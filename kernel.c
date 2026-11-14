@@ -7,7 +7,7 @@
 #include "mouse.h"
 #include "gui.h"
 
-#define SOS_VERSION "2.6.0"
+#define SOS_VERSION "3.0.0"
 
 extern int fs_load_file(const char*, uint8_t**, uint32_t*);
 
