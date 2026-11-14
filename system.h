@@ -63,6 +63,8 @@ void bb_draw_string(const char* str, int x, int y, uint32_t fg_color, uint32_t b
 void bb_draw_string_transparent(const char* str, int x, int y, uint32_t fg_color);
 void bb_draw_sprite(const uint32_t* sprite, uint32_t width, uint32_t height, int x, int y);
 void bb_blit_surface(const uint32_t* src, int src_w, int src_h, int dst_x, int dst_y);
+void bb_set_clip(int x, int y, int w, int h);
+void bb_reset_clip(void);
 void surface_draw_char(uint32_t* surface, int surf_w, int surf_h, char c, int x, int y, uint32_t fg_color, uint32_t bg_color);
 extern int is_graphics_mode;
 extern int is_gui_mode;

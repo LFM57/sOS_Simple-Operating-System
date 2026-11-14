@@ -2125,7 +2125,12 @@ void draw_editor(const char* filename) {
         }
 
         if (is_gui_mode) {
-            gui_mark_dirty(1);
+            if (gui_terminal_window) {
+                gui_mark_window_dirty(gui_terminal_window, 0, 0,
+                                      gui_terminal_window->width, gui_terminal_window->height);
+            } else {
+                gui_mark_dirty(1);
+            }
         } else {
             swap_buffers();
         }

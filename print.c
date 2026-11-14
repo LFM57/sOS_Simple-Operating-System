@@ -99,18 +99,51 @@ void flush_rect(int x, int y, int w, int h) {
 
 /* --- BACKBUFFER-ONLY PRIMITIVES (GUI / COMPOSITOR) --- */
 
+static int bb_clip_active = 0;
+static int bb_clip_x = 0;
+static int bb_clip_y = 0;
+static int bb_clip_w = 0;
+static int bb_clip_h = 0;
+
+void bb_set_clip(int x, int y, int w, int h) {
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > (int)g_width) w = (int)g_width - x;
+    if (y + h > (int)g_height) h = (int)g_height - y;
+    if (w < 0) w = 0;
+    if (h < 0) h = 0;
+    bb_clip_x = x;
+    bb_clip_y = y;
+    bb_clip_w = w;
+    bb_clip_h = h;
+    bb_clip_active = 1;
+}
+
+void bb_reset_clip(void) {
+    bb_clip_active = 0;
+}
+
 void bb_put_pixel(int x, int y, uint32_t color) {
     if (!is_graphics_mode || x < 0 || y < 0 || x >= (int)g_width || y >= (int)g_height) return;
+    if (bb_clip_active) {
+        if (x < bb_clip_x || x >= bb_clip_x + bb_clip_w ||
+            y < bb_clip_y || y >= bb_clip_y + bb_clip_h) return;
+    }
     uint32_t offset = ((uint32_t)y * g_pitch) + ((uint32_t)x * (g_bpp / 8));
     *(uint32_t*)((uint8_t*)backbuffer + offset) = color;
 }
 
 void bb_fill_rect(int x, int y, int w, int h, uint32_t color) {
     if (!is_graphics_mode) return;
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > (int)g_width) w = (int)g_width - x;
-    if (y + h > (int)g_height) h = (int)g_height - y;
+    int cx0 = bb_clip_active ? bb_clip_x : 0;
+    int cy0 = bb_clip_active ? bb_clip_y : 0;
+    int cx1 = bb_clip_active ? (bb_clip_x + bb_clip_w) : (int)g_width;
+    int cy1 = bb_clip_active ? (bb_clip_y + bb_clip_h) : (int)g_height;
+
+    if (x < cx0) { w -= (cx0 - x); x = cx0; }
+    if (y < cy0) { h -= (cy0 - y); y = cy0; }
+    if (x + w > cx1) w = cx1 - x;
+    if (y + h > cy1) h = cy1 - y;
     if (w <= 0 || h <= 0) return;
 
     uint32_t bpp_bytes = g_bpp / 8;
@@ -134,14 +167,25 @@ static void render_glyph_to_surface(uint32_t* surface, int surf_w, int surf_h, u
     if (idx >= 128) idx = '?';
     const unsigned char* glyph = font8x16[idx];
 
+    int clip_x0 = 0;
+    int clip_y0 = 0;
+    int clip_x1 = surf_w;
+    int clip_y1 = surf_h;
+    if (surface == backbuffer && bb_clip_active) {
+        clip_x0 = bb_clip_x;
+        clip_y0 = bb_clip_y;
+        clip_x1 = bb_clip_x + bb_clip_w;
+        clip_y1 = bb_clip_y + bb_clip_h;
+    }
+
     for (int cy = 0; cy < 16; cy++) {
         int py = y + cy;
-        if (py < 0 || py >= surf_h) continue;
+        if (py < clip_y0 || py >= clip_y1) continue;
         uint32_t* row = (uint32_t*)((uint8_t*)surface + ((uint32_t)py * pitch_bytes));
         unsigned char row_bits = glyph[cy];
         for (int cx = 0; cx < 8; cx++) {
             int px = x + cx;
-            if (px < 0 || px >= surf_w) continue;
+            if (px < clip_x0 || px >= clip_x1) continue;
             if (row_bits & (0x80 >> cx)) {
                 row[px] = fg_color;
             } else if (!transparent_bg) {
@@ -228,15 +272,20 @@ void bb_draw_sprite(const uint32_t* sprite, uint32_t width, uint32_t height, int
 void bb_blit_surface(const uint32_t* src, int src_w, int src_h, int dst_x, int dst_y) {
     if (!is_graphics_mode || !src || src_w <= 0 || src_h <= 0) return;
 
+    int cx0 = bb_clip_active ? bb_clip_x : 0;
+    int cy0 = bb_clip_active ? bb_clip_y : 0;
+    int cx1 = bb_clip_active ? (bb_clip_x + bb_clip_w) : (int)g_width;
+    int cy1 = bb_clip_active ? (bb_clip_y + bb_clip_h) : (int)g_height;
+
     int src_x_start = 0;
     int src_y_start = 0;
     int copy_w = src_w;
     int copy_h = src_h;
 
-    if (dst_x < 0) { src_x_start = -dst_x; copy_w += dst_x; dst_x = 0; }
-    if (dst_y < 0) { src_y_start = -dst_y; copy_h += dst_y; dst_y = 0; }
-    if (dst_x + copy_w > (int)g_width) copy_w = (int)g_width - dst_x;
-    if (dst_y + copy_h > (int)g_height) copy_h = (int)g_height - dst_y;
+    if (dst_x < cx0) { src_x_start = cx0 - dst_x; copy_w -= src_x_start; dst_x = cx0; }
+    if (dst_y < cy0) { src_y_start = cy0 - dst_y; copy_h -= src_y_start; dst_y = cy0; }
+    if (dst_x + copy_w > cx1) copy_w = cx1 - dst_x;
+    if (dst_y + copy_h > cy1) copy_h = cy1 - dst_y;
     if (copy_w <= 0 || copy_h <= 0) return;
 
     uint32_t bpp_bytes = g_bpp / 8;
@@ -392,7 +441,13 @@ void write_vga(char c) {
         if (is_graphics_mode) {
             if (is_gui_mode) {
                 if (!gui_terminal_window || !gui_terminal_window->canvas) return;
+                int had_cursor = term_cursor_drawn;
+                int prev_cx = last_term_cx;
+                int prev_cy = last_term_cy;
                 gui_term_erase_cursor();
+                if (had_cursor) {
+                    gui_mark_window_dirty(gui_terminal_window, prev_cx * 8, prev_cy * 16 + 13, 8, 2);
+                }
                 int term_cols = gui_terminal_window->width / 8;
                 if (c == '\n') {
                     cursor_x = 0;
@@ -412,12 +467,15 @@ void write_vga(char c) {
                                       gui_terminal_window->height,
                                       c, cursor_x * 8, cursor_y * 16,
                                       term_fg_color, term_bg_color);
+                    gui_mark_window_dirty(gui_terminal_window, cursor_x * 8, cursor_y * 16, 8, 16);
                     cursor_x++;
                     if (cursor_x >= term_cols) { cursor_x = 0; cursor_y++; }
                 }
                 scroll();
                 gui_term_draw_cursor();
-                gui_mark_dirty(1);
+                if (term_cursor_drawn) {
+                    gui_mark_window_dirty(gui_terminal_window, cursor_x * 8, cursor_y * 16 + 13, 8, 2);
+                }
                 return;
             }
             int term_cols = g_width / 8;
@@ -507,7 +565,8 @@ void scroll(void) {
                 fast_memset(canvas + shift_dwords, term_bg_color, lines * row_dwords);
                 cursor_y = term_rows - 1;
             }
-            gui_mark_dirty(1);
+            gui_mark_window_dirty(gui_terminal_window, 0, 0,
+                                  gui_terminal_window->width, gui_terminal_window->height);
             return;
         }
 
@@ -584,7 +643,8 @@ void clear_terminal(void) {
                 cursor_x = 0;
                 cursor_y = 0;
                 gui_term_draw_cursor();
-                gui_mark_dirty(1);
+                gui_mark_window_dirty(gui_terminal_window, 0, 0,
+                                      gui_terminal_window->width, gui_terminal_window->height);
             }
             return;
         }

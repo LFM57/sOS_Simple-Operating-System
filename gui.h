@@ -60,6 +60,11 @@ typedef struct window {
     uint8_t owner_uid;
     uint32_t* canvas;      /* Pixel buffer: width * height * 4 bytes (kmalloc) */
 
+    /* Per-window dirty bounding box (client-relative) */
+    int dirty;
+    int dirty_x, dirty_y;
+    int dirty_w, dirty_h;
+
     /* Per-window event ring buffer + wait queue for blocking apps */
     gui_event_t events[GUI_EVENT_QUEUE_SIZE];
     int ev_head, ev_tail;
@@ -102,6 +107,7 @@ int gui_pop_event(window_t* w, gui_event_t* out_ev);
 void gui_on_mouse_packet(int x, int y, uint8_t buttons);
 void gui_on_key_press(char ascii, uint8_t modifiers, uint8_t scancode);
 void gui_mark_dirty(int full_redraw);
+void gui_mark_window_dirty(window_t* w, int x, int y, int width, int height);
 void gui_process_input(void);
 void gui_render(void);
 
