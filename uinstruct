@@ -4,4 +4,5 @@
 
 mkdir /bin/
 wget [ip]/app.sos /bin/app.sos
+wget [ip]/guidemo.sos /bin/guidemo.sos
 wget [ip]/kernel.bin /kernel.bin
