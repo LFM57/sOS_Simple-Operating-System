@@ -31,6 +31,14 @@ static inline uint32_t inl(uint16_t port) {
 static inline void outl(uint16_t port, uint32_t val) {
     __asm__ volatile ( "outl %0, %1" : : "a"(val), "Nd"(port) );
 }
+static inline uint32_t irq_save_disable(void) {
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    return eflags;
+}
+static inline void irq_restore(uint32_t eflags) {
+    __asm__ volatile("push %0; popf" :: "r"(eflags));
+}
 void ata_read_sector(uint32_t lba, uint8_t *buffer);
 
 /* --- Tools (Utilities) --- */
@@ -163,6 +171,10 @@ int get_user_info(const char* username, char* out_password, uint8_t* out_uid);
 int check_password(const char* input_pass, const char* stored_str);
 int kernel_gets(char* buffer, int max_len, int hidden, int allow_empty);
 uint8_t get_active_uid(void);
+void complete_user_login(const char* username, uint8_t uid);
+void reset_session_state(void);
+void system_reboot(void);
+void system_shutdown(void);
 
 /* --- File System Error Codes --- */
 extern int fs_error;
@@ -178,6 +190,9 @@ extern int ota_error_occurred;
 /* --- Task & Shell Helpers (kernel.c) --- */
 extern volatile int shell_input_enabled;
 extern volatile int fg_task;
+extern volatile int is_logging_out;
+extern volatile int session_reset;
+extern volatile int cmd_ready;
 void create_task(void (*entry_point)());
 int create_user_task(uint8_t* elf_buffer, uint32_t elf_size);
 void kill_current_task(void);

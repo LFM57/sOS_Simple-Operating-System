@@ -88,6 +88,11 @@ sos.iso:
 	@echo '    multiboot /kernel.bin' >> isodir/boot/grub/grub.cfg
 	@echo '    boot' >> isodir/boot/grub/grub.cfg
 	@echo '}' >> isodir/boot/grub/grub.cfg
+	@echo 'menuentry "sOS - Text Login Mode" {' >> isodir/boot/grub/grub.cfg
+	@echo '    search --file /kernel.bin --set root' >> isodir/boot/grub/grub.cfg
+	@echo '    multiboot /kernel.bin text' >> isodir/boot/grub/grub.cfg
+	@echo '    boot' >> isodir/boot/grub/grub.cfg
+	@echo '}' >> isodir/boot/grub/grub.cfg
 	@echo "Generating bootable ISO with grub-mkrescue..."
 	grub-mkrescue -o sos.iso isodir
 

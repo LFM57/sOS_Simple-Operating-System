@@ -33,6 +33,7 @@ volatile int is_logging_out = 0;
 volatile int shell_input_enabled = 1;
 volatile int session_reset = 0; 
 volatile int fg_task = -1; /* Tracks the currently blocking foreground task */
+static int boot_text_mode = 0;
 
 /* --- KEYBOARD INPUT RING BUFFER (FIFO) --- */
 #define KBD_BUFFER_SIZE 128
@@ -88,7 +89,7 @@ const char* system_commands[] = {
     "help", "clear", "uptime", "ram", "free", "ls", "cd", 
     "mkdir", "rm", "touch", "write", "cat", "echo",
     "loop", "run", "ps", "kill", "df", "about", "uname",
-    "shutdown", "whoami", "chown", "chmod", "su", "sudo",
+    "shutdown", "logout", "whoami", "chown", "chmod", "su", "sudo",
     "userlist", "nano", "passwd", "cp", "mv", "hex",
     "ifconfig", "wget", "update", "lock", "crash", "startgui"
 };
@@ -929,6 +930,14 @@ void keyboard_handler() {
             ascii = kbd_us[scancode];
         }
         
+        if (is_gui_mode && is_gui_login) {
+            if (ascii != 0) {
+                gui_login_on_key_press(ascii);
+            }
+            outb(0x20, 0x20);
+            return;
+        }
+
         if (is_gui_mode && is_gui_locked) {
             if (ascii != 0) {
                 gui_lock_on_key_press(ascii);
@@ -990,7 +999,7 @@ void init_serial() {
 void serial_handler() {
     if (inb(0x3f8 + 5) & 0x01) {
         char c = inb(0x3f8);
-        if (is_gui_mode && is_gui_locked) {
+        if (is_gui_mode && (is_gui_locked || is_gui_login)) {
             outb(0x20, 0x20);
             return;
         }
@@ -2182,6 +2191,9 @@ void run_nano(const char* filename) {
     while (1) {
         draw_editor(filename);
         char c = wait_key();
+        if (c == 0 && gui_logout_requested) {
+            break;
+        }
 
         if (c == 24) { /* Ctrl+X: Quit */
             if (is_modified) {
@@ -3350,12 +3362,7 @@ static void execute_single_command(int is_bg) {
             kprintf("%c\n", choice); 
             if (choice == 'y' || choice == 'Y') {
                 kprintf("Rebooting sOS cleanly...\n");
-                for (volatile int i = 0; i < 100000000; i++);
-                outb(0x64, 0xFE);
-                outb(0x92, 0x01);
-                outb(0xCF9, 0x06);
-                kprintf("\nReboot failed. You can safely turn off your computer.\n");
-                while(1) { __asm__ volatile("cli; hlt"); }
+                system_reboot();
             } else {
                 kprintf("Reboot aborted.\n");
             }
@@ -3365,12 +3372,7 @@ static void execute_single_command(int is_bg) {
             kprintf("%c\n", choice); 
             if (choice == 'y' || choice == 'Y') {
                 kprintf("Shutting down sOS cleanly...\n");
-                for (volatile int i = 0; i < 100000000; i++);
-                outw(0x4004, 0x3400);
-                outw(0x604, 0x2000);
-                outw(0xB004, 0x2000);
-                kprintf("\nPower off failed. You can safely turn off your computer.\n");
-                while(1) { __asm__ volatile("cli; hlt"); }
+                system_shutdown();
             } else {
                 kprintf("Shutdown aborted.\n");
             }
@@ -4275,6 +4277,21 @@ static void execute_single_command(int is_bg) {
             return;
         }
     }
+    else if (strcmp(cmd, "logout") == 0) {
+        if (is_gui_mode) {
+            gui_logout_to_login();
+            return;
+        } else if (is_graphics_mode && !boot_text_mode) {
+            clear_terminal();
+            reset_session_state();
+            gui_boot_login();
+            return;
+        } else {
+            clear_terminal();
+            logout_and_login("Logged out.");
+            return;
+        }
+    }
     else if (strcmp(cmd, "startgui") == 0 || strcmp(cmd, "desktop") == 0) {
         if (!is_graphics_mode) {
             kprintf("Error: VBE graphical framebuffer mode is required for GUI.\n");
@@ -4531,73 +4548,140 @@ void print_shell_prompt(void) {
     }
 }
 
-void logout_and_login(const char* message) {
+static int cmdline_has_flag(const char* cmdline, const char* token) {
+    if (!cmdline || !token) return 0;
+    int tlen = 0;
+    while (token[tlen]) tlen++;
+    if (tlen == 0) return 0;
+
+    int i = 0;
+    while (cmdline[i]) {
+        while (cmdline[i] == ' ' || cmdline[i] == '\t') i++;
+        if (!cmdline[i]) break;
+        int start = i;
+        while (cmdline[i] && cmdline[i] != ' ' && cmdline[i] != '\t') i++;
+        if (i - start == tlen && strncmp(cmdline + start, token, (uint32_t)tlen) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void system_reboot(void) {
+    for (volatile int i = 0; i < 100000000; i++);
+    outb(0x64, 0xFE);
+    outb(0x92, 0x01);
+    outb(0xCF9, 0x06);
+    kprintf("\nReboot failed. You can safely turn off your computer.\n");
+    while (1) { __asm__ volatile("cli; hlt"); }
+}
+
+void system_shutdown(void) {
+    for (volatile int i = 0; i < 100000000; i++);
+    outw(0x4004, 0x3400);
+    outw(0x604, 0x2000);
+    outw(0xB004, 0x2000);
+    kprintf("\nPower off failed. You can safely turn off your computer.\n");
+    while (1) { __asm__ volatile("cli; hlt"); }
+}
+
+void reset_session_state(void) {
+    uint32_t eflags = irq_save_disable();
     shell_input_enabled = 0;
     kbd_buf_clear();
-    session_reset = 1;   /* Invalidate current session */
-    is_logging_out = 1; /* Activate logout flag */
-    
+    session_reset = 1;
+    cmd_idx = 0;
+    cmd_buffer[0] = '\0';
+    cursor_pos = 0;
+    history_index = -1;
+    cmd_ready = 0;
+    current_uid = 0;
+    custom_strcpy(current_user, "root");
+
+    /* Terminate active Ring 3 user processes owned by the ending session */
+    for (int i = 1; i < IDLE_TASK_ID; i++) {
+        if (i == current_task) continue;
+        if (tasks[i].state != 0 && tasks[i].state != 3 &&
+            (tasks[i].page_directory != kernel_page_directory || tasks[i].code_page != NULL)) {
+            tasks[i].state = 3;
+        }
+    }
+    irq_restore(eflags);
+
+    fs_cd("/");
+    wake_up(&exit_queue);
+    wake_up(&console_queue);
+}
+
+void complete_user_login(const char* username, uint8_t uid) {
+    current_uid = uid;
+    custom_strcpy(current_user, username);
+
+    /* Temporarily elevate to root so permission checks allow home dir setup from any task */
+    uint8_t prev_task_uid = (current_task > 0) ? tasks[current_task].uid : 0;
+    current_uid = 0;
+    if (current_task > 0) {
+        tasks[current_task].uid = 0;
+    }
+    fs_chown("/home", 8);
+    fs_chmod("/home", 0x40);
+    if (uid != 0) {
+        char home_dir[64] = "/home/";
+        int hi = 6;
+        for (int i = 0; username[i] && hi < 60; i++) home_dir[hi++] = username[i];
+        home_dir[hi] = '\0';
+        fs_chown(home_dir, uid);
+        fs_chmod(home_dir, 0x30);
+    }
+    current_uid = uid;
+    if (current_task > 0) {
+        tasks[current_task].uid = prev_task_uid;
+    }
+
+    if (uid != 0) {
+        char home_dir[64] = "/home/";
+        int hi = 6;
+        for (int i = 0; username[i] && hi < 60; i++) home_dir[hi++] = username[i];
+        home_dir[hi] = '\0';
+        fs_cd(home_dir);
+    } else {
+        fs_cd("/");
+    }
+}
+
+void logout_and_login(const char* message) {
+    is_logging_out = 1;
+    reset_session_state();
+    gui_logout_requested = 0;
+
     if (message != NULL) {
         kprintf("%s\n", message);
     }
-    
-    /* Full Shell cleanup */
-    current_uid = 0;
-    custom_strcpy(current_user, "root");
-    cmd_idx = 0;
-    cmd_buffer[0] = '\0';
-    cmd_ready = 0;
-    
-    /* Back to root directory for security */
-    fs_cd("/");
-    
+
     /* Infinite login */
     while (1) {
         char user[32] = {0}; char pass[32] = {0}; uint8_t uid;
         kprintf("login: ");
-        kernel_gets(user, 32, 0, 0); 
-        
+        kernel_gets(user, 32, 0, 0);
+
         kprintf("password: ");
-        kernel_gets(pass, 32, 1, 1); 
-        
+        kernel_gets(pass, 32, 1, 1);
+
         char real_pass[32] = {0};
         if (get_user_info(user, real_pass, &uid) && check_password(pass, real_pass)) {
-            current_uid = uid; custom_strcpy(current_user, user);
+            complete_user_login(user, uid);
             kprintf("\nWelcome, %s!\n", current_user);
             kprintf("Type 'help' for a list of available commands.\n");
-            
-            /* Remap /home permissions: Owner UID 8, with read permissions for others */
-            uint8_t old_uid = current_uid;
-            current_uid = 0; /* Temporarly Root */
-            fs_chown("/home", 8);
-            fs_chmod("/home", 0x40);
-            current_uid = old_uid; /* Restores original identity */
-
-            /* Auto-CD to the user's personal home directory */
-            if (current_uid != 0) {
-                char home_dir[64] = "/home/";
-                int hi = 6;
-                for (int i = 0; user[i] && hi < 60; i++) home_dir[hi++] = user[i];
-                home_dir[hi] = '\0';
-
-                old_uid = current_uid;
-                current_uid = 0; /* Temporarly Root */
-                fs_chown(home_dir, uid);
-                fs_chmod(home_dir, 0x30); 
-                current_uid = old_uid; /* Restores original identity */
-                
-                fs_cd(home_dir);
-            }
             break;
         } else {
             kprintf("\nLogin incorrect.\n\n");
         }
     }
-    
+
     is_logging_out = 0; /* Deactivate the flag */
 
     kprintf("\033[32m%s@sOS\033[0m \033[34m%s\033[0m\033[33m%c\033[0m ", current_user, get_current_path(), current_uid == 0 ? '#' : '$');
-    shell_input_enabled = 1; 
+    shell_input_enabled = 1;
 }
 
 void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
@@ -4617,6 +4701,15 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
     if (magic == 0x2BADB002) {
         struct multiboot_info* mbi = (struct multiboot_info*)mb_info_addr;
         if (mbi->flags & 0x01) total_ram_kb = mbi->mem_lower + mbi->mem_upper;
+
+        if ((mbi->flags & (1 << 2)) && mbi->cmdline != 0) {
+            const char* cmdline = (const char*)mbi->cmdline;
+            if (cmdline_has_flag(cmdline, "text") ||
+                cmdline_has_flag(cmdline, "nogui") ||
+                cmdline_has_flag(cmdline, "textlogin")) {
+                boot_text_mode = 1;
+            }
+        }
         
         /* BIT 12 indicates that Framebuffer info is provided */
         if (mbi->flags & (1 << 12)) { 
@@ -4690,7 +4783,11 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
         while(timer_ticks < wait_ticks + 200) { __asm__ volatile("hlt"); }
     }
 
-    logout_and_login(NULL);
+    if (is_graphics_mode && !boot_text_mode) {
+        gui_boot_login();
+    } else {
+        logout_and_login(NULL);
+    }
 
     while(1) {
         while (!cmd_ready && !gui_logout_requested) {
@@ -4698,8 +4795,10 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
         }
         if (gui_logout_requested) {
             gui_logout_requested = 0;
-            clear_terminal();
-            logout_and_login("Logged out of GUI session.");
+            if (!is_gui_mode) {
+                clear_terminal();
+                logout_and_login("Logged out of GUI session.");
+            }
             continue;
         }
         session_reset = 0;

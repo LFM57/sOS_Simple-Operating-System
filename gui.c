@@ -12,8 +12,10 @@ volatile int gui_dirty = 0;
 volatile int gui_full_dirty = 0;
 volatile int gui_exit_requested = 0;
 volatile int is_gui_locked = 0;
+volatile int is_gui_login = 0;
 volatile int gui_logout_requested = 0;
 wait_queue_t gui_wait_queue = {0};
+static wait_queue_t gui_login_wait_queue = {0};
 window_t* gui_terminal_window = NULL;
 
 /* Lock screen state and IRQ1->compositor key ring buffer */
@@ -25,6 +27,20 @@ static char lock_pass_buf[32];
 static int lock_pass_len = 0;
 static char lock_error_msg[64];
 static volatile int pending_logout_after_teardown = 0;
+
+/* Graphical display manager (sOS Login) state */
+#define GUI_SESSION_DESKTOP 0
+#define GUI_SESSION_TEXT    1
+static char login_user_buf[32];
+static int login_user_len = 0;
+static char login_pass_buf[32];
+static int login_pass_len = 0;
+static int login_focus_field = 0;   /* 0 = Username, 1 = Password */
+static int login_session_mode = GUI_SESSION_DESKTOP;
+static char login_error_msg[64];
+static volatile int boot_login_done = 0;
+static volatile int login_to_text_shell = 0;
+static int power_menu_open = 0;
 
 /* Mouse packet ring buffer filled by IRQ12 and drained by gui_process_input() */
 #define MOUSE_Q_SIZE 32
@@ -77,16 +93,6 @@ static const uint32_t cursor_sprite[12 * 19] = {
 #undef C_B
 #undef C_W
 
-static uint32_t irq_save_disable(void) {
-    uint32_t eflags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
-    return eflags;
-}
-
-static void irq_restore(uint32_t eflags) {
-    __asm__ volatile("push %0; popf" :: "r"(eflags));
-}
-
 static void copy_title(char* dst, const char* src, int max_len) {
     int i = 0;
     if (src) {
@@ -122,13 +128,23 @@ void gui_init(void) {
     gui_full_dirty = 1;
     gui_exit_requested = 0;
     is_gui_locked = 0;
+    is_gui_login = 0;
     gui_logout_requested = 0;
     pending_logout_after_teardown = 0;
+    login_to_text_shell = 0;
+    power_menu_open = 0;
     lkq_head = 0;
     lkq_tail = 0;
     lock_pass_len = 0;
     lock_pass_buf[0] = '\0';
     lock_error_msg[0] = '\0';
+    login_user_len = 0;
+    login_user_buf[0] = '\0';
+    login_pass_len = 0;
+    login_pass_buf[0] = '\0';
+    login_focus_field = 0;
+    login_session_mode = GUI_SESSION_DESKTOP;
+    login_error_msg[0] = '\0';
     gui_terminal_window = NULL;
     mouse_set_callback(gui_on_mouse_packet);
     irq_restore(eflags);
@@ -136,15 +152,18 @@ void gui_init(void) {
 
 void gui_request_exit(void) {
     if (is_gui_locked && !pending_logout_after_teardown && !gui_logout_requested) return;
+    if (is_gui_login && !login_to_text_shell) return;
+    power_menu_open = 0;
     gui_exit_requested = 1;
     gui_dirty = 1;
     wake_up(&gui_wait_queue);
 }
 
 void gui_lock_screen(void) {
-    if (!is_graphics_mode || !is_gui_mode || is_gui_locked) return;
+    if (!is_graphics_mode || !is_gui_mode || is_gui_locked || is_gui_login) return;
     uint32_t eflags = irq_save_disable();
     is_gui_locked = 1;
+    power_menu_open = 0;
     dragging_window = NULL;
     lkq_head = 0;
     lkq_tail = 0;
@@ -157,8 +176,7 @@ void gui_lock_screen(void) {
     wake_up(&gui_wait_queue);
 }
 
-void gui_lock_on_key_press(char ascii) {
-    if (!is_gui_mode || !is_gui_locked || ascii == 0) return;
+static void push_modal_key(char ascii) {
     uint32_t eflags = irq_save_disable();
     int next = (lkq_head + 1) % LOCK_KEY_Q_SIZE;
     if (next != lkq_tail) {
@@ -168,6 +186,16 @@ void gui_lock_on_key_press(char ascii) {
     gui_dirty = 1;
     irq_restore(eflags);
     wake_up(&gui_wait_queue);
+}
+
+void gui_lock_on_key_press(char ascii) {
+    if (!is_gui_mode || !is_gui_locked || ascii == 0) return;
+    push_modal_key(ascii);
+}
+
+void gui_login_on_key_press(char ascii) {
+    if (!is_gui_mode || !is_gui_login || ascii == 0) return;
+    push_modal_key(ascii);
 }
 
 void gui_mark_dirty(int full_redraw) {
@@ -214,6 +242,11 @@ int gui_create_window(const char* title, int x, int y, int w, int h, uint32_t fl
     copy_title(win->title, title ? title : "Window", sizeof(win->title));
     win->flags = flags;
     win->owner_pid = owner_pid;
+    if (owner_pid > 0 && owner_pid < MAX_TASKS && tasks[owner_pid].state != 0) {
+        win->owner_uid = tasks[owner_pid].uid;
+    } else {
+        win->owner_uid = current_uid;
+    }
     win->canvas = canvas;
     win->ev_head = 0;
     win->ev_tail = 0;
@@ -365,6 +398,36 @@ void gui_destroy_windows_by_pid(uint32_t pid) {
     }
 }
 
+void gui_destroy_windows_by_uid(uint8_t uid) {
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (windows[i].is_used && windows[i].owner_uid == uid) {
+            uint32_t pid = windows[i].owner_pid;
+            if (&windows[i] == gui_terminal_window) {
+                gui_terminal_window = NULL;
+            }
+            gui_destroy_window(i);
+            if (pid > 0 && pid < (MAX_TASKS - 1) &&
+                tasks[pid].state != 0 &&
+                tasks[pid].page_directory != kernel_page_directory) {
+                tasks[pid].state = 3;
+            }
+        }
+    }
+    for (int pid = 1; pid < (MAX_TASKS - 1); pid++) {
+        if (tasks[pid].state != 0 &&
+            tasks[pid].uid == uid &&
+            tasks[pid].page_directory != kernel_page_directory) {
+            tasks[pid].state = 3;
+        }
+    }
+    if (fg_task > 0 && fg_task < (MAX_TASKS - 1) &&
+        tasks[fg_task].state != 0 &&
+        tasks[fg_task].uid == uid) {
+        tasks[fg_task].state = 3;
+    }
+    wake_up(&exit_queue);
+}
+
 window_t* gui_get_window(int win_id) {
     if (win_id < 0 || win_id >= MAX_WINDOWS) return NULL;
     if (!windows[win_id].is_used) return NULL;
@@ -445,9 +508,15 @@ void gui_on_mouse_packet(int x, int y, uint8_t buttons) {
     wake_up(&gui_wait_queue);
 }
 
+static int gui_compositor_tid = -1;
+
 /* Called from IRQ1 keyboard_handler() when GUI mode is active */
 void gui_on_key_press(char ascii) {
     if (ascii == 0) return;
+    if (is_gui_login) {
+        gui_login_on_key_press(ascii);
+        return;
+    }
     if (is_gui_locked) {
         gui_lock_on_key_press(ascii);
         return;
@@ -473,24 +542,112 @@ static void get_lock_dialog_rect(int* dx, int* dy, int* dw, int* dh) {
     *dy = ((int)g_height - h) / 2;
 }
 
-static void gui_close_user_windows_and_tasks(void) {
+static void get_login_dialog_rect(int* dx, int* dy, int* dw, int* dh) {
+    int w = 460;
+    int h = 324;
+    *dw = w;
+    *dh = h;
+    *dx = ((int)g_width - w) / 2;
+    *dy = ((int)g_height - TASKBAR_HEIGHT - h) / 2;
+}
+
+static void get_power_menu_rect(int* mx, int* my, int* mw, int* mh) {
+    int w = 136;
+    int h = 120;
+    *mw = w;
+    *mh = h;
+    *mx = (int)g_width - w - 8;
+    *my = (int)g_height - TASKBAR_HEIGHT - h - 4;
+}
+
+static int create_desktop_terminal_window(int with_prompt) {
+    int term_w = 640;
+    int term_h = 400;
+    int term_x = ((int)g_width - term_w) / 2;
+    int term_y = ((int)g_height - TASKBAR_HEIGHT - term_h) / 2 + (TITLEBAR_HEIGHT / 2);
+    if (term_x < 8) term_x = 8;
+    if (term_y < TITLEBAR_HEIGHT + 4) term_y = TITLEBAR_HEIGHT + 4;
+
+    int term_id = gui_create_window("Terminal", term_x, term_y, term_w, term_h,
+                                    WIN_VISIBLE | WIN_DECORATED | WIN_BUILTIN, 0);
+    if (term_id < 0) {
+        return -1;
+    }
+
+    gui_terminal_window = gui_get_window(term_id);
+    term_fg_color = 0x00FFFFFF;
+    term_bg_color = 0x00000000;
+    cursor_x = 0;
+    cursor_y = 0;
+
+    clear_terminal();
+    kprintf("==================================================\n");
+    kprintf("  sOS Desktop Terminal (80x25)                    \n");
+    kprintf("  Press Ctrl+L to lock, Ctrl+Q for Text Shell     \n");
+    kprintf("==================================================\n\n");
+    if (with_prompt) {
+        kprintf("Welcome, %s!\n", current_user);
+        kprintf("Type 'help' for a list of available commands.\n");
+        shell_input_enabled = 1;
+        print_shell_prompt();
+    }
+    return term_id;
+}
+
+void gui_show_login_screen(void) {
+    uint32_t eflags = irq_save_disable();
+    is_gui_locked = 0;
+    is_gui_login = 1;
+    power_menu_open = 0;
+    dragging_window = NULL;
+    login_to_text_shell = 0;
+    lkq_head = 0;
+    lkq_tail = 0;
+    for (int i = 0; i < (int)sizeof(login_user_buf); i++) {
+        login_user_buf[i] = '\0';
+        login_pass_buf[i] = '\0';
+    }
+    login_user_len = 0;
+    login_pass_len = 0;
+    login_focus_field = 0;
+    login_session_mode = GUI_SESSION_DESKTOP;
+    login_error_msg[0] = '\0';
+    gui_full_dirty = 1;
+    gui_dirty = 1;
+    irq_restore(eflags);
+    wake_up(&gui_wait_queue);
+}
+
+void gui_logout_to_login(void) {
+    uint8_t prev_uid = current_uid;
+    gui_destroy_windows_by_uid(prev_uid);
     for (int i = 0; i < MAX_WINDOWS; i++) {
-        if (windows[i].is_used && !(windows[i].flags & WIN_BUILTIN)) {
-            uint32_t pid = windows[i].owner_pid;
-            gui_destroy_window(i);
-            if (pid > 0 && pid < (MAX_TASKS - 1) &&
-                tasks[pid].state != 0 &&
-                tasks[pid].page_directory != kernel_page_directory) {
-                tasks[pid].state = 3;
+        if (windows[i].is_used) {
+            if (&windows[i] == gui_terminal_window) {
+                gui_terminal_window = NULL;
             }
+            gui_destroy_window(i);
         }
     }
-    if (fg_task > 0 && fg_task < (MAX_TASKS - 1) &&
-        tasks[fg_task].state != 0 &&
-        tasks[fg_task].uid == current_uid) {
-        tasks[fg_task].state = 3;
+    if (gui_compositor_tid > 0 && gui_compositor_tid < MAX_TASKS) {
+        tasks[gui_compositor_tid].uid = 0;
     }
-    wake_up(&exit_queue);
+    reset_session_state();
+    gui_logout_requested = 1;
+    gui_show_login_screen();
+    wake_up(&console_queue);
+}
+
+static void gui_perform_power_action(int is_reboot) {
+    bb_fill_rect(0, 0, (int)g_width, (int)g_height, 0x000B1120);
+    bb_draw_string_transparent(is_reboot ? "Rebooting sOS cleanly..." : "Shutting down sOS cleanly...",
+                               (int)g_width / 2 - 104, (int)g_height / 2 - 8, 0x00F8FAFC);
+    swap_buffers();
+    if (is_reboot) {
+        system_reboot();
+    } else {
+        system_shutdown();
+    }
 }
 
 static void attempt_gui_unlock(void) {
@@ -513,6 +670,112 @@ static void attempt_gui_unlock(void) {
     }
     gui_full_dirty = 1;
     gui_dirty = 1;
+}
+
+static void attempt_gui_login(void) {
+    if (login_user_len == 0) {
+        copy_title(login_error_msg, "Please enter a username.", sizeof(login_error_msg));
+        login_focus_field = 0;
+        gui_full_dirty = 1;
+        gui_dirty = 1;
+        return;
+    }
+
+    char real_pass[32] = {0};
+    uint8_t uid = 0;
+    int ok = get_user_info(login_user_buf, real_pass, &uid) &&
+             check_password(login_pass_buf, real_pass);
+
+    for (int i = 0; i < (int)sizeof(login_pass_buf); i++) {
+        login_pass_buf[i] = '\0';
+        real_pass[i] = '\0';
+    }
+    login_pass_len = 0;
+
+    if (!ok) {
+        copy_title(login_error_msg, "Login incorrect. Please try again.", sizeof(login_error_msg));
+        login_focus_field = 1;
+        gui_full_dirty = 1;
+        gui_dirty = 1;
+        return;
+    }
+
+    complete_user_login(login_user_buf, uid);
+    if (gui_compositor_tid > 0 && gui_compositor_tid < MAX_TASKS) {
+        tasks[gui_compositor_tid].uid = uid;
+    }
+
+    for (int i = 0; i < (int)sizeof(login_user_buf); i++) {
+        login_user_buf[i] = '\0';
+    }
+    login_user_len = 0;
+    login_error_msg[0] = '\0';
+
+    if (login_session_mode == GUI_SESSION_TEXT) {
+        login_to_text_shell = 1;
+        boot_login_done = 1;
+        gui_request_exit();
+        wake_up(&gui_login_wait_queue);
+    } else {
+        is_gui_login = 0;
+        create_desktop_terminal_window(1);
+        boot_login_done = 1;
+        gui_full_dirty = 1;
+        gui_dirty = 1;
+        wake_up(&gui_login_wait_queue);
+    }
+}
+
+static void handle_login_mouse_step(int mx, int my, uint8_t buttons) {
+    uint8_t prev_left = prev_buttons & 0x01;
+    uint8_t curr_left = buttons & 0x01;
+
+    if (mx != prev_mouse_x || my != prev_mouse_y) {
+        gui_dirty = 1;
+    }
+
+    if (!prev_left && curr_left) {
+        int dx, dy, dw, dh;
+        get_login_dialog_rect(&dx, &dy, &dw, &dh);
+
+        int user_x = dx + 28, user_y = dy + 70, field_w = dw - 56, field_h = 28;
+        int pass_x = dx + 28, pass_y = dy + 130;
+        int sess_gui_x = dx + 108, sess_y = dy + 174, sess_w = 148, sess_h = 28;
+        int sess_txt_x = dx + 268;
+        int signin_x = dx + 28, signin_y = dy + 250, signin_w = dw - 56, signin_h = 34;
+
+        int bar_y = (int)g_height - TASKBAR_HEIGHT;
+        int shut_x = (int)g_width - 84;
+        int reb_x = shut_x - 74;
+
+        if (mx >= user_x && mx < user_x + field_w && my >= user_y && my < user_y + field_h) {
+            login_focus_field = 0;
+            gui_full_dirty = 1;
+            gui_dirty = 1;
+        } else if (mx >= pass_x && mx < pass_x + field_w && my >= pass_y && my < pass_y + field_h) {
+            login_focus_field = 1;
+            gui_full_dirty = 1;
+            gui_dirty = 1;
+        } else if (mx >= sess_gui_x && mx < sess_gui_x + sess_w && my >= sess_y && my < sess_y + sess_h) {
+            login_session_mode = GUI_SESSION_DESKTOP;
+            gui_full_dirty = 1;
+            gui_dirty = 1;
+        } else if (mx >= sess_txt_x && mx < sess_txt_x + sess_w && my >= sess_y && my < sess_y + sess_h) {
+            login_session_mode = GUI_SESSION_TEXT;
+            gui_full_dirty = 1;
+            gui_dirty = 1;
+        } else if (mx >= signin_x && mx < signin_x + signin_w && my >= signin_y && my < signin_y + signin_h) {
+            attempt_gui_login();
+        } else if (my >= bar_y && mx >= reb_x && mx < reb_x + 68) {
+            gui_perform_power_action(1);
+        } else if (my >= bar_y && mx >= shut_x && mx < shut_x + 76) {
+            gui_perform_power_action(0);
+        }
+    }
+
+    prev_mouse_x = mx;
+    prev_mouse_y = my;
+    prev_buttons = buttons;
 }
 
 static void handle_locked_mouse_step(int mx, int my, uint8_t buttons) {
@@ -542,9 +805,7 @@ static void handle_locked_mouse_step(int mx, int my, uint8_t buttons) {
             attempt_gui_unlock();
         } else if (mx >= switch_x && mx < switch_x + switch_w &&
                    my >= switch_y && my < switch_y + switch_h) {
-            gui_close_user_windows_and_tasks();
-            pending_logout_after_teardown = 1;
-            gui_request_exit();
+            gui_logout_to_login();
         }
     }
 
@@ -570,7 +831,7 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
             dragging_window->x = new_x;
             dragging_window->y = new_y;
             gui_full_dirty = 1;
-        } else {
+        } else if (!power_menu_open) {
             window_t* top = gui_get_focused_window();
             if (top && mx >= top->x && mx < top->x + top->width &&
                 my >= top->y && my < top->y + top->height) {
@@ -587,12 +848,55 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
     }
 
     if (!prev_left && curr_left) {
+        /* Handle open Power popup menu first */
+        if (power_menu_open) {
+            int pmx, pmy, pmw, pmh;
+            get_power_menu_rect(&pmx, &pmy, &pmw, &pmh);
+            int power_x = (int)g_width - 74;
+
+            if (mx >= pmx && mx < pmx + pmw && my >= pmy + 4 && my < pmy + pmh - 4) {
+                int item = (my - (pmy + 4)) / 28;
+                power_menu_open = 0;
+                gui_full_dirty = 1;
+                gui_dirty = 1;
+                if (item == 0) {
+                    /* Text Shell */
+                    gui_request_exit();
+                } else if (item == 1) {
+                    /* Log Out */
+                    gui_logout_to_login();
+                } else if (item == 2) {
+                    /* Reboot */
+                    gui_perform_power_action(1);
+                } else if (item == 3) {
+                    /* Shutdown */
+                    gui_perform_power_action(0);
+                }
+                prev_mouse_x = mx;
+                prev_mouse_y = my;
+                prev_buttons = buttons;
+                return;
+            }
+
+            power_menu_open = 0;
+            gui_full_dirty = 1;
+            gui_dirty = 1;
+            if (my >= (int)g_height - TASKBAR_HEIGHT && mx >= power_x && mx < power_x + 66) {
+                prev_mouse_x = mx;
+                prev_mouse_y = my;
+                prev_buttons = buttons;
+                return;
+            }
+        }
+
         /* Left click: check taskbar buttons and window chips first */
         if (my >= (int)g_height - TASKBAR_HEIGHT) {
-            int exit_x = (int)g_width - 68;
-            int lock_x = exit_x - 66;
-            if (mx >= exit_x && mx < exit_x + 60) {
-                gui_request_exit();
+            int power_x = (int)g_width - 74;
+            int lock_x = power_x - 66;
+            if (mx >= power_x && mx < power_x + 66) {
+                power_menu_open = !power_menu_open;
+                gui_full_dirty = 1;
+                gui_dirty = 1;
             } else if (mx >= lock_x && mx < lock_x + 60) {
                 gui_lock_screen();
             } else {
@@ -726,6 +1030,71 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
     prev_buttons = buttons;
 }
 
+static void handle_login_key(char c) {
+    if (c == '\t' || c == 9) {
+        login_focus_field = (login_focus_field == 0) ? 1 : 0;
+        gui_full_dirty = 1;
+        gui_dirty = 1;
+        return;
+    }
+    if (c == '\n' || c == '\r') {
+        if (login_focus_field == 0) {
+            if (login_user_len > 0) {
+                login_focus_field = 1;
+                login_error_msg[0] = '\0';
+                gui_full_dirty = 1;
+                gui_dirty = 1;
+            }
+        } else {
+            attempt_gui_login();
+        }
+        return;
+    }
+
+    char* buf = (login_focus_field == 0) ? login_user_buf : login_pass_buf;
+    int* len = (login_focus_field == 0) ? &login_user_len : &login_pass_len;
+
+    if (c == '\b' || c == 127) {
+        if (*len > 0) {
+            (*len)--;
+            buf[*len] = '\0';
+            login_error_msg[0] = '\0';
+            gui_full_dirty = 1;
+            gui_dirty = 1;
+        }
+    } else if (c >= 32 && c <= 126) {
+        if (*len < 31) {
+            buf[(*len)++] = c;
+            buf[*len] = '\0';
+            login_error_msg[0] = '\0';
+            gui_full_dirty = 1;
+            gui_dirty = 1;
+        }
+    }
+}
+
+static void handle_lock_key(char c) {
+    if (c == '\n' || c == '\r') {
+        attempt_gui_unlock();
+    } else if (c == '\b' || c == 127) {
+        if (lock_pass_len > 0) {
+            lock_pass_len--;
+            lock_pass_buf[lock_pass_len] = '\0';
+            lock_error_msg[0] = '\0';
+            gui_full_dirty = 1;
+            gui_dirty = 1;
+        }
+    } else if (c >= 32 && c <= 126) {
+        if (lock_pass_len < (int)sizeof(lock_pass_buf) - 1) {
+            lock_pass_buf[lock_pass_len++] = c;
+            lock_pass_buf[lock_pass_len] = '\0';
+            lock_error_msg[0] = '\0';
+            gui_full_dirty = 1;
+            gui_dirty = 1;
+        }
+    }
+}
+
 void gui_process_input(void) {
     while (1) {
         uint32_t eflags = irq_save_disable();
@@ -737,7 +1106,9 @@ void gui_process_input(void) {
         mq_tail = (mq_tail + 1) % MOUSE_Q_SIZE;
         irq_restore(eflags);
 
-        if (is_gui_locked) {
+        if (is_gui_login) {
+            handle_login_mouse_step(pkt.x, pkt.y, pkt.buttons);
+        } else if (is_gui_locked) {
             handle_locked_mouse_step(pkt.x, pkt.y, pkt.buttons);
         } else {
             handle_mouse_step(pkt.x, pkt.y, pkt.buttons);
@@ -754,27 +1125,29 @@ void gui_process_input(void) {
         lkq_tail = (lkq_tail + 1) % LOCK_KEY_Q_SIZE;
         irq_restore(eflags);
 
-        if (!is_gui_locked) continue;
-
-        if (c == '\n' || c == '\r') {
-            attempt_gui_unlock();
-        } else if (c == '\b' || c == 127) {
-            if (lock_pass_len > 0) {
-                lock_pass_len--;
-                lock_pass_buf[lock_pass_len] = '\0';
-                lock_error_msg[0] = '\0';
-                gui_full_dirty = 1;
-                gui_dirty = 1;
-            }
-        } else if (c >= 32 && c <= 126) {
-            if (lock_pass_len < (int)sizeof(lock_pass_buf) - 1) {
-                lock_pass_buf[lock_pass_len++] = c;
-                lock_pass_buf[lock_pass_len] = '\0';
-                lock_error_msg[0] = '\0';
-                gui_full_dirty = 1;
-                gui_dirty = 1;
-            }
+        if (is_gui_login) {
+            handle_login_key(c);
+        } else if (is_gui_locked) {
+            handle_lock_key(c);
         }
+    }
+}
+
+static void draw_power_menu(void) {
+    int pmx, pmy, pmw, pmh;
+    get_power_menu_rect(&pmx, &pmy, &pmw, &pmh);
+
+    bb_fill_rect(pmx, pmy, pmw, pmh, 0x000F172A);
+    bb_draw_rect_outline(pmx, pmy, pmw, pmh, 0x00475569);
+
+    const char* items[4] = { "Text Shell", "Log Out", "Reboot", "Shutdown" };
+    uint32_t colors[4] = { 0x00F8FAFC, 0x00FBBF24, 0x0060A5FA, 0x00F87171 };
+    for (int i = 0; i < 4; i++) {
+        int iy = pmy + 4 + i * 28;
+        if (i > 0) {
+            bb_fill_rect(pmx + 8, iy, pmw - 16, 1, 0x001E293B);
+        }
+        bb_draw_string_transparent(items[i], pmx + 14, iy + 6, colors[i]);
     }
 }
 
@@ -801,8 +1174,8 @@ static void draw_taskbar(window_t* focused) {
     bb_draw_string_transparent("Paint", chip_x + 24, bar_y + 6, 0x00F8FAFC);
     chip_x += demo_btn_w + 10;
 
-    int exit_x = (int)g_width - 68;
-    int lock_x = exit_x - 66;
+    int power_x = (int)g_width - 74;
+    int lock_x = power_x - 66;
 
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (!windows[i].is_used || !(windows[i].flags & WIN_VISIBLE)) continue;
@@ -826,9 +1199,13 @@ static void draw_taskbar(window_t* focused) {
     bb_draw_rect_outline(lock_x, bar_y + 4, 60, TASKBAR_HEIGHT - 8, 0x00F59E0B);
     bb_draw_string_transparent("Lock", lock_x + 14, bar_y + 6, 0x00FFFFFF);
 
-    bb_fill_rect(exit_x, bar_y + 4, 60, TASKBAR_HEIGHT - 8, 0x00991B1B);
-    bb_draw_rect_outline(exit_x, bar_y + 4, 60, TASKBAR_HEIGHT - 8, 0x00EF4444);
-    bb_draw_string_transparent("Exit", exit_x + 14, bar_y + 6, 0x00FFFFFF);
+    bb_fill_rect(power_x, bar_y + 4, 66, TASKBAR_HEIGHT - 8, power_menu_open ? 0x00B91C1C : 0x00991B1B);
+    bb_draw_rect_outline(power_x, bar_y + 4, 66, TASKBAR_HEIGHT - 8, 0x00EF4444);
+    bb_draw_string_transparent("Power", power_x + 13, bar_y + 6, 0x00FFFFFF);
+
+    if (power_menu_open) {
+        draw_power_menu();
+    }
 }
 
 static void draw_window_title_clipped(window_t* w) {
@@ -840,6 +1217,92 @@ static void draw_window_title_clipped(window_t* w) {
     for (int i = 0; w->title[i] && i < max_chars; i++) {
         bb_draw_char_transparent(w->title[i], x + i * 8, y, 0x00FFFFFF);
     }
+}
+
+static void draw_login_screen_overlay(void) {
+    bb_fill_rect(0, 0, (int)g_width, (int)g_height, 0x000B1120);
+    bb_fill_rect(0, 0, (int)g_width, 4, 0x002563EB);
+
+    int dx, dy, dw, dh;
+    get_login_dialog_rect(&dx, &dy, &dw, &dh);
+
+    bb_fill_rect(dx, dy, dw, dh, 0x001E293B);
+    bb_draw_rect_outline(dx, dy, dw, dh, 0x003B82F6);
+
+    bb_fill_rect(dx + 1, dy + 1, dw - 2, 36, 0x000F172A);
+    bb_draw_string_transparent("sOS Login", dx + 18, dy + 11, 0x00F8FAFC);
+
+    /* Username field */
+    bb_draw_string_transparent("Username:", dx + 28, dy + 50, 0x0094A3B8);
+    int user_x = dx + 28, user_y = dy + 70, field_w = dw - 56, field_h = 28;
+    bb_fill_rect(user_x, user_y, field_w, field_h, 0x000F172A);
+    bb_draw_rect_outline(user_x, user_y, field_w, field_h,
+                         (login_focus_field == 0) ? 0x003B82F6 : 0x00475569);
+    bb_draw_string_transparent(login_user_buf, user_x + 8, user_y + 6, 0x00F8FAFC);
+    if (login_focus_field == 0) {
+        int cx = user_x + 8 + login_user_len * 8;
+        if (cx < user_x + field_w - 10) {
+            bb_draw_char_transparent('_', cx, user_y + 6, 0x0060A5FA);
+        }
+    }
+
+    /* Password field */
+    bb_draw_string_transparent("Password:", dx + 28, dy + 110, 0x0094A3B8);
+    int pass_x = dx + 28, pass_y = dy + 130;
+    bb_fill_rect(pass_x, pass_y, field_w, field_h, 0x000F172A);
+    bb_draw_rect_outline(pass_x, pass_y, field_w, field_h,
+                         (login_focus_field == 1) ? 0x003B82F6 : 0x00475569);
+    char masked[34];
+    int m = 0;
+    int max_show = (field_w - 24) / 8;
+    int count = login_pass_len;
+    if (count > max_show) count = max_show;
+    for (int i = 0; i < count && m < 31; i++) masked[m++] = '*';
+    if (login_focus_field == 1) masked[m++] = '_';
+    masked[m] = '\0';
+    bb_draw_string_transparent(masked, pass_x + 8, pass_y + 6, 0x00F8FAFC);
+
+    /* Session selector */
+    bb_draw_string_transparent("Session:", dx + 28, dy + 180, 0x0094A3B8);
+    int sess_gui_x = dx + 108, sess_y = dy + 174, sess_w = 148, sess_h = 28;
+    int sess_txt_x = dx + 268;
+    int is_desk = (login_session_mode == GUI_SESSION_DESKTOP);
+    bb_fill_rect(sess_gui_x, sess_y, sess_w, sess_h, is_desk ? 0x002563EB : 0x000F172A);
+    bb_draw_rect_outline(sess_gui_x, sess_y, sess_w, sess_h, is_desk ? 0x0060A5FA : 0x00475569);
+    bb_draw_string_transparent("GUI Desktop", sess_gui_x + 30, sess_y + 6, 0x00F8FAFC);
+
+    bb_fill_rect(sess_txt_x, sess_y, sess_w, sess_h, !is_desk ? 0x002563EB : 0x000F172A);
+    bb_draw_rect_outline(sess_txt_x, sess_y, sess_w, sess_h, !is_desk ? 0x0060A5FA : 0x00475569);
+    bb_draw_string_transparent("Text Shell", sess_txt_x + 34, sess_y + 6, 0x00F8FAFC);
+
+    /* Error / hint message */
+    if (login_error_msg[0] != '\0') {
+        bb_draw_string_transparent(login_error_msg, dx + 28, dy + 218, 0x00F87171);
+    } else {
+        bb_draw_string_transparent("Tab: switch field   Enter: next / sign in", dx + 28, dy + 218, 0x0064748B);
+    }
+
+    /* Sign In button */
+    int signin_x = dx + 28, signin_y = dy + 250, signin_w = dw - 56, signin_h = 34;
+    bb_fill_rect(signin_x, signin_y, signin_w, signin_h, 0x002563EB);
+    bb_draw_rect_outline(signin_x, signin_y, signin_w, signin_h, 0x0060A5FA);
+    bb_draw_string_transparent("Sign In", signin_x + (signin_w - 56) / 2, signin_y + 9, 0x00FFFFFF);
+
+    /* Bottom Display Manager bar with Reboot / Shutdown */
+    int bar_y = (int)g_height - TASKBAR_HEIGHT;
+    bb_fill_rect(0, bar_y, (int)g_width, TASKBAR_HEIGHT, 0x000F172A);
+    bb_fill_rect(0, bar_y, (int)g_width, 1, 0x00334155);
+    bb_draw_string_transparent("sOS Display Manager", 12, bar_y + 6, 0x0094A3B8);
+
+    int shut_x = (int)g_width - 84;
+    int reb_x = shut_x - 74;
+    bb_fill_rect(reb_x, bar_y + 4, 68, TASKBAR_HEIGHT - 8, 0x00334155);
+    bb_draw_rect_outline(reb_x, bar_y + 4, 68, TASKBAR_HEIGHT - 8, 0x0064748B);
+    bb_draw_string_transparent("Reboot", reb_x + 10, bar_y + 6, 0x00F8FAFC);
+
+    bb_fill_rect(shut_x, bar_y + 4, 76, TASKBAR_HEIGHT - 8, 0x00991B1B);
+    bb_draw_rect_outline(shut_x, bar_y + 4, 76, TASKBAR_HEIGHT - 8, 0x00EF4444);
+    bb_draw_string_transparent("Shutdown", shut_x + 6, bar_y + 6, 0x00FFFFFF);
 }
 
 static void draw_lock_screen_overlay(void) {
@@ -921,7 +1384,9 @@ void gui_render(void) {
     gui_dirty = 0;
     gui_full_dirty = 0;
 
-    if (is_gui_locked) {
+    if (is_gui_login) {
+        draw_login_screen_overlay();
+    } else if (is_gui_locked) {
         draw_lock_screen_overlay();
     } else {
         /* 1. Desktop background */
@@ -981,9 +1446,12 @@ static void gui_teardown(void) {
     uint32_t eflags = irq_save_disable();
     is_gui_mode = 0;
     is_gui_locked = 0;
+    is_gui_login = 0;
+    power_menu_open = 0;
     gui_exit_requested = 0;
     gui_terminal_window = NULL;
     dragging_window = NULL;
+    gui_compositor_tid = -1;
     mouse_set_callback(NULL);
     irq_restore(eflags);
 
@@ -1000,15 +1468,26 @@ static void gui_teardown(void) {
         pending_logout_after_teardown = 0;
         gui_logout_requested = 1;
         wake_up(&console_queue);
+    } else if (login_to_text_shell) {
+        login_to_text_shell = 0;
+        kprintf("Welcome, %s!\n", current_user);
+        kprintf("Type 'help' for a list of available commands.\n");
+        shell_input_enabled = 1;
+        if (fg_task == -1) {
+            print_shell_prompt();
+        }
+        wake_up(&console_queue);
     } else {
         kprintf("[GUI] Exited to text shell.\n");
         if (shell_input_enabled && fg_task == -1) {
             print_shell_prompt();
         }
     }
+    wake_up(&gui_login_wait_queue);
 }
 
 static void gui_compositor_task(void) {
+    gui_compositor_tid = current_task;
     if (current_task > 0) {
         tasks[current_task].is_background = 1;
     }
@@ -1040,32 +1519,38 @@ void gui_start(void) {
 
     gui_init();
 
-    int term_w = 640;
-    int term_h = 400;
-    int term_x = ((int)g_width - term_w) / 2;
-    int term_y = ((int)g_height - TASKBAR_HEIGHT - term_h) / 2 + (TITLEBAR_HEIGHT / 2);
-    if (term_x < 8) term_x = 8;
-    if (term_y < TITLEBAR_HEIGHT + 4) term_y = TITLEBAR_HEIGHT + 4;
+    uint32_t eflags = irq_save_disable();
+    is_gui_login = 0;
+    is_gui_locked = 0;
+    power_menu_open = 0;
+    is_gui_mode = 1;
+    irq_restore(eflags);
 
-    int term_id = gui_create_window("Terminal", term_x, term_y, term_w, term_h,
-                                    WIN_VISIBLE | WIN_DECORATED | WIN_BUILTIN, 0);
-    if (term_id < 0) {
+    if (create_desktop_terminal_window(0) < 0) {
+        is_gui_mode = 0;
+        mouse_set_callback(NULL);
         kprintf("[GUI] Error: Failed to allocate Terminal window.\n");
         return;
     }
 
-    gui_terminal_window = gui_get_window(term_id);
-    term_fg_color = 0x00FFFFFF;
-    term_bg_color = 0x00000000;
-    cursor_x = 0;
-    cursor_y = 0;
-    is_gui_mode = 1;
+    create_task(gui_compositor_task);
+}
 
-    clear_terminal();
-    kprintf("==================================================\n");
-    kprintf("  sOS Desktop Terminal (80x25)                    \n");
-    kprintf("  Press Ctrl+Q or click [Exit] to return to shell \n");
-    kprintf("==================================================\n\n");
+void gui_boot_login(void) {
+    if (!is_graphics_mode || is_gui_mode) return;
+
+    gui_init();
+    gui_show_login_screen();
+
+    uint32_t eflags = irq_save_disable();
+    is_gui_mode = 1;
+    boot_login_done = 0;
+    shell_input_enabled = 0;
+    irq_restore(eflags);
 
     create_task(gui_compositor_task);
+
+    while (is_gui_mode && (!boot_login_done || login_to_text_shell)) {
+        sleep_on(&gui_login_wait_queue);
+    }
 }
