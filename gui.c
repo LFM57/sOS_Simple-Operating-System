@@ -868,14 +868,19 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
         if (dragging_window && dragging_window->is_used) {
             int new_x = mx - drag_offset_x;
             int new_y = my - drag_offset_y;
+            int keep_visible = (dragging_window->width < 48) ? dragging_window->width : 48;
+            int min_x = keep_visible - dragging_window->width;
+            int max_x = (int)g_width - keep_visible;
             int min_y = TITLEBAR_HEIGHT + 2;
             int max_y = (int)g_height - TASKBAR_HEIGHT - 4;
+            if (new_x < min_x) new_x = min_x;
+            if (new_x > max_x) new_x = max_x;
             if (new_y < min_y) new_y = min_y;
             if (new_y > max_y) new_y = max_y;
             dragging_window->x = new_x;
             dragging_window->y = new_y;
             gui_full_dirty = 1;
-        } else if (!power_menu_open) {
+        } else if (!power_menu_open && my < (int)g_height - TASKBAR_HEIGHT) {
             window_t* top = gui_get_focused_window();
             if (top && mx >= top->x && mx < top->x + top->width &&
                 my >= top->y && my < top->y + top->height) {
