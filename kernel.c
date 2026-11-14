@@ -5,6 +5,7 @@
 #include "e1000.h"
 #include "crypto.h" 
 #include "mouse.h"
+#include "gui.h"
 
 #define SOS_VERSION "2.6.0"
 
@@ -920,8 +921,11 @@ void keyboard_handler() {
         }
         
         if (ascii != 0) {
+            if (is_gui_mode) {
+                gui_on_key_press(ascii);
+            }
             /* Scenario 1: A foreground task is running */
-            if (ascii == 3 && fg_task != -1 && tasks[fg_task].state != 0) {
+            else if (ascii == 3 && fg_task != -1 && tasks[fg_task].state != 0) {
                 kprintf("^C\n");
                 tasks[fg_task].state = 3;
             } 
