@@ -1009,7 +1009,8 @@ void keyboard_handler() {
             /* Scenario 1: A foreground task is running */
             else if (ascii == 3 && fg_task != -1 && tasks[fg_task].state != 0) {
                 kprintf("^C\n");
-                tasks[fg_task].state = 3;
+                terminate_task(fg_task);
+                wake_up(&exit_queue);
             } 
             /* Scenario 2: Active prompt or application (nano, wait_key, kernel_gets) */
             else if (!shell_input_enabled || is_kernel_gets_active) {
