@@ -26,7 +26,6 @@ static volatile int lkq_tail = 0;
 static char lock_pass_buf[32];
 static int lock_pass_len = 0;
 static char lock_error_msg[64];
-static volatile int pending_logout_after_teardown = 0;
 
 /* Graphical display manager (sOS Login) state */
 #define GUI_SESSION_DESKTOP 0
@@ -139,7 +138,6 @@ void gui_init(void) {
     is_gui_locked = 0;
     is_gui_login = 0;
     gui_logout_requested = 0;
-    pending_logout_after_teardown = 0;
     login_to_text_shell = 0;
     power_menu_open = 0;
     lkq_head = 0;
@@ -160,7 +158,7 @@ void gui_init(void) {
 }
 
 void gui_request_exit(void) {
-    if (is_gui_locked && !pending_logout_after_teardown && !gui_logout_requested) return;
+    if (is_gui_locked && !gui_logout_requested) return;
     if (is_gui_login && !login_to_text_shell) return;
     power_menu_open = 0;
     gui_exit_requested = 1;
@@ -1539,11 +1537,7 @@ static void gui_teardown(void) {
     term_fg_color = 0x00FFFFFF;
     term_bg_color = 0x00000000;
     clear_terminal();
-    if (pending_logout_after_teardown) {
-        pending_logout_after_teardown = 0;
-        gui_logout_requested = 1;
-        wake_up(&console_queue);
-    } else if (login_to_text_shell) {
+    if (login_to_text_shell) {
         login_to_text_shell = 0;
         kprintf("Welcome, %s!\n", current_user);
         kprintf("Type 'help' for a list of available commands.\n");
