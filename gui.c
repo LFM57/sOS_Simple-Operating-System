@@ -59,6 +59,10 @@ static int prev_mouse_y = -1;
 static uint8_t prev_buttons = 0;
 static int rendered_cursor_x = -1;
 static int rendered_cursor_y = -1;
+#define CURSOR_W 12
+#define CURSOR_H 19
+static uint32_t cursor_bg[CURSOR_W * CURSOR_H];
+static int cursor_bg_valid = 0;
 
 static window_t* dragging_window = NULL;
 static int drag_offset_x = 0;
@@ -124,6 +128,7 @@ void gui_init(void) {
     prev_buttons = mouse_buttons;
     rendered_cursor_x = -1;
     rendered_cursor_y = -1;
+    cursor_bg_valid = 0;
     gui_dirty = 1;
     gui_full_dirty = 1;
     gui_exit_requested = 0;
@@ -1372,9 +1377,43 @@ static void draw_lock_screen_overlay(void) {
     bb_draw_string_transparent("Switch User / Logout", switch_x + 24, switch_y + 8, 0x00F8FAFC);
 }
 
+static void save_cursor_bg(int x, int y) {
+    if (!is_graphics_mode || g_bpp == 0) return;
+    uint32_t bpp_bytes = g_bpp / 8;
+    for (int sy = 0; sy < CURSOR_H; sy++) {
+        int dy = y + sy;
+        for (int sx = 0; sx < CURSOR_W; sx++) {
+            int dx = x + sx;
+            if (dx >= 0 && dx < (int)g_width && dy >= 0 && dy < (int)g_height) {
+                uint32_t offset = ((uint32_t)dy * g_pitch) + ((uint32_t)dx * bpp_bytes);
+                cursor_bg[sy * CURSOR_W + sx] = *(uint32_t*)((uint8_t*)backbuffer + offset);
+            } else {
+                cursor_bg[sy * CURSOR_W + sx] = 0;
+            }
+        }
+    }
+    cursor_bg_valid = 1;
+}
+
+static void restore_cursor_bg(int x, int y) {
+    if (!is_graphics_mode || !cursor_bg_valid || g_bpp == 0) return;
+    uint32_t bpp_bytes = g_bpp / 8;
+    for (int sy = 0; sy < CURSOR_H; sy++) {
+        int dy = y + sy;
+        if (dy < 0 || dy >= (int)g_height) continue;
+        for (int sx = 0; sx < CURSOR_W; sx++) {
+            int dx = x + sx;
+            if (dx < 0 || dx >= (int)g_width) continue;
+            uint32_t offset = ((uint32_t)dy * g_pitch) + ((uint32_t)dx * bpp_bytes);
+            *(uint32_t*)((uint8_t*)backbuffer + offset) = cursor_bg[sy * CURSOR_W + sx];
+        }
+    }
+}
+
 void gui_render(void) {
     if (!is_graphics_mode || !is_gui_mode) return;
 
+    uint32_t eflags = irq_save_disable();
     int full = gui_full_dirty;
     int old_cx = rendered_cursor_x;
     int old_cy = rendered_cursor_y;
@@ -1383,59 +1422,63 @@ void gui_render(void) {
 
     gui_dirty = 0;
     gui_full_dirty = 0;
+    irq_restore(eflags);
 
-    if (is_gui_login) {
-        draw_login_screen_overlay();
-    } else if (is_gui_locked) {
-        draw_lock_screen_overlay();
-    } else {
-        /* 1. Desktop background */
-        bb_fill_rect(0, 0, (int)g_width, (int)g_height - TASKBAR_HEIGHT, 0x001E293B);
+    if (full || old_cx < 0 || old_cy < 0 || !cursor_bg_valid) {
+        if (is_gui_login) {
+            draw_login_screen_overlay();
+        } else if (is_gui_locked) {
+            draw_lock_screen_overlay();
+        } else {
+            /* 1. Desktop background */
+            bb_fill_rect(0, 0, (int)g_width, (int)g_height - TASKBAR_HEIGHT, 0x001E293B);
 
-        /* 2. Painter's algorithm: render windows from bottom to top */
-        window_t* focused = gui_get_focused_window();
-        for (int i = 0; i < window_count; i++) {
-            window_t* w = z_order[i];
-            if (!w || !w->is_used || !(w->flags & WIN_VISIBLE)) continue;
+            /* 2. Painter's algorithm: render windows from bottom to top */
+            window_t* focused = gui_get_focused_window();
+            for (int i = 0; i < window_count; i++) {
+                window_t* w = z_order[i];
+                if (!w || !w->is_used || !(w->flags & WIN_VISIBLE)) continue;
 
-            int is_focused = (w == focused);
-            if (w->flags & WIN_DECORATED) {
-                uint32_t border_col = is_focused ? 0x003B82F6 : 0x00334155;
-                uint32_t title_col = is_focused ? 0x002563EB : 0x00475569;
+                int is_focused = (w == focused);
+                if (w->flags & WIN_DECORATED) {
+                    uint32_t border_col = is_focused ? 0x003B82F6 : 0x00334155;
+                    uint32_t title_col = is_focused ? 0x002563EB : 0x00475569;
 
-                /* Outer border & frame */
-                bb_fill_rect(w->x - 2, w->y - TITLEBAR_HEIGHT - 2,
-                             w->width + 4, w->height + TITLEBAR_HEIGHT + 4, border_col);
+                    /* Outer border & frame */
+                    bb_fill_rect(w->x - 2, w->y - TITLEBAR_HEIGHT - 2,
+                                 w->width + 4, w->height + TITLEBAR_HEIGHT + 4, border_col);
 
-                /* Titlebar */
-                bb_fill_rect(w->x, w->y - TITLEBAR_HEIGHT, w->width, TITLEBAR_HEIGHT, title_col);
-                draw_window_title_clipped(w);
+                    /* Titlebar */
+                    bb_fill_rect(w->x, w->y - TITLEBAR_HEIGHT, w->width, TITLEBAR_HEIGHT, title_col);
+                    draw_window_title_clipped(w);
 
-                /* Close [X] button */
-                int close_x = w->x + w->width - 20;
-                int close_y = w->y - TITLEBAR_HEIGHT + 4;
-                bb_fill_rect(close_x, close_y, 16, 16, 0x00EF4444);
-                bb_draw_char_transparent('X', close_x + 4, close_y, 0x00FFFFFF);
+                    /* Close [X] button */
+                    int close_x = w->x + w->width - 20;
+                    int close_y = w->y - TITLEBAR_HEIGHT + 4;
+                    bb_fill_rect(close_x, close_y, 16, 16, 0x00EF4444);
+                    bb_draw_char_transparent('X', close_x + 4, close_y, 0x00FFFFFF);
+                }
+
+                if (w->canvas) {
+                    bb_blit_surface(w->canvas, w->width, w->height, w->x, w->y);
+                }
             }
 
-            if (w->canvas) {
-                bb_blit_surface(w->canvas, w->width, w->height, w->x, w->y);
-            }
+            /* 3. Bottom taskbar */
+            draw_taskbar(focused);
         }
 
-        /* 3. Bottom taskbar */
-        draw_taskbar(focused);
-    }
-
-    /* 4. Mouse cursor on top */
-    bb_draw_sprite(cursor_sprite, 12, 19, cur_cx, cur_cy);
-
-    /* 5. Flush to VRAM (full swap on window changes, dirty rects on cursor-only move) */
-    if (full || old_cx < 0 || old_cy < 0) {
+        /* 4. Save clean patch under cursor, draw cursor, and flush full frame */
+        save_cursor_bg(cur_cx, cur_cy);
+        bb_draw_sprite(cursor_sprite, CURSOR_W, CURSOR_H, cur_cx, cur_cy);
         swap_buffers();
     } else {
-        flush_rect(old_cx, old_cy, 12, 19);
-        flush_rect(cur_cx, cur_cy, 12, 19);
+        /* Cursor-only move: restore previous 12x19 patch, save new patch, draw cursor, flush dirty rects */
+        restore_cursor_bg(old_cx, old_cy);
+        save_cursor_bg(cur_cx, cur_cy);
+        bb_draw_sprite(cursor_sprite, CURSOR_W, CURSOR_H, cur_cx, cur_cy);
+        flush_rect(old_cx, old_cy, CURSOR_W, CURSOR_H);
+        flush_rect(cur_cx, cur_cy, CURSOR_W, CURSOR_H);
     }
 
     rendered_cursor_x = cur_cx;
