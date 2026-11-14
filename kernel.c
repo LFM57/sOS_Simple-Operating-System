@@ -2880,7 +2880,7 @@ static void execute_single_command(int is_bg) {
             kprintf("  Physical Total : %d MB (%d KB, %d pages)\n", total_kb / 1024, total_kb, total_kb / 4);
             kprintf("  Physical Used  : %d MB (%d KB) [%d%%]\n", used_kb / 1024, used_kb, pct);
             kprintf("  Physical Free  : %d MB (%d KB) [%d%%]\n", free_kb / 1024, free_kb, 100 - pct);
-            kprintf("  Kernel Heap    : %d KB total (4 MB at 0x10000000)\n", heap_kb);
+            kprintf("  Kernel Heap    : %d KB total (%d MB at 0x10000000)\n", heap_kb, heap_kb / 1024);
             kprintf("    - Used       : %d KB\n", heap_used / 1024);
             kprintf("    - Free       : %d KB\n", heap_free / 1024);
             kprintf("  Page Directory : 32-bit x86 Two-Level Paging (Identity-mapped 64 MB)\n");

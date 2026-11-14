@@ -159,7 +159,7 @@ extern int ota_force_mode;
 extern int ota_error_occurred;
 
 /* --- Multitasking --- */
-#define MAX_TASKS 8
+#define MAX_TASKS 16
 #define MAX_OPEN_FILES 16
 
 /* --- File descriptor types (VFS) --- */

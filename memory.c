@@ -100,6 +100,8 @@ void map_page(uint32_t virt, uint32_t phys) {
 /* --- HEAP --- */
 /* Addition of an integrity signature Magic Number */
 #define HEAP_MAGIC 0xDEADBEEF
+#define KERNEL_HEAP_START 0x10000000 /* Safe kernel virtual address (256 MB mark) */
+#define KERNEL_HEAP_SIZE  (1024 * 1024 * 16) /* 16 MB Heap for GUI window surfaces */
 
 typedef struct heap_block {
     uint32_t magic;
@@ -111,12 +113,16 @@ typedef struct heap_block {
 heap_block_t *heap_head = NULL;
 
 void init_heap() {
-    uint32_t heap_start = 0x10000000; /* Safe kernel virtual address (256 MB mark) */
-    uint32_t heap_size = 1024 * 1024 * 4; /* 4 MB Heap */
+    uint32_t heap_start = KERNEL_HEAP_START;
+    uint32_t heap_size = KERNEL_HEAP_SIZE;
     
     /* Dynamically allocate and map the physical pages to our virtual heap */
     for (uint32_t i = 0; i < heap_size; i += 4096) {
         void* phys = pmm_alloc_page();
+        if (!phys) {
+            heap_size = i;
+            break;
+        }
         map_page(heap_start + i, (uint32_t)phys);
     }
     
@@ -206,7 +212,7 @@ void get_pmm_stats(uint32_t* out_total_kb, uint32_t* out_used_kb, uint32_t* out_
 }
 
 void get_heap_stats(uint32_t* out_total_bytes, uint32_t* out_used_bytes, uint32_t* out_free_bytes) {
-    uint32_t total = 4 * 1024 * 1024;
+    uint32_t total = KERNEL_HEAP_SIZE;
     uint32_t used = 0;
     uint32_t free_b = 0;
     heap_block_t* curr = heap_head;
