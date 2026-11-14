@@ -12,6 +12,7 @@
 #define WIN_VISIBLE   0x01
 #define WIN_DECORATED 0x02
 #define WIN_BUILTIN   0x04
+#define WIN_MINIMIZED 0x08
 
 #define GUI_MOD_SHIFT 0x01
 #define GUI_MOD_CTRL  0x02
@@ -37,7 +38,8 @@ typedef enum {
     GUI_EVENT_MOUSE_UP,
     GUI_EVENT_MOUSE_MOVE,
     GUI_EVENT_KEY_PRESS,
-    GUI_EVENT_WINDOW_CLOSE
+    GUI_EVENT_WINDOW_CLOSE,
+    GUI_EVENT_MOUSE_SCROLL
 } gui_event_type_t;
 
 typedef struct {
@@ -47,6 +49,7 @@ typedef struct {
     char key;          /* ASCII / special key from keyboard */
     uint8_t modifiers; /* GUI_MOD_SHIFT | GUI_MOD_CTRL | GUI_MOD_ALT */
     uint8_t scancode;  /* Set-1 make scancode (0x80 bit set for E0-extended keys) */
+    int dz;            /* Scroll wheel delta */
 } gui_event_t;
 
 typedef struct window {
@@ -104,7 +107,7 @@ void gui_focus_window(window_t* w);
 int gui_push_event(window_t* w, const gui_event_t* ev);
 int gui_pop_event(window_t* w, gui_event_t* out_ev);
 
-void gui_on_mouse_packet(int x, int y, uint8_t buttons);
+void gui_on_mouse_packet(int x, int y, uint8_t buttons, int dz);
 void gui_on_key_press(char ascii, uint8_t modifiers, uint8_t scancode);
 void gui_mark_dirty(int full_redraw);
 void gui_mark_window_dirty(window_t* w, int x, int y, int width, int height);

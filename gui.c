@@ -41,12 +41,23 @@ static volatile int boot_login_done = 0;
 static volatile int login_to_text_shell = 0;
 static int power_menu_open = 0;
 
+#define CTX_MENU_NONE    0
+#define CTX_MENU_DESKTOP 1
+#define CTX_MENU_WINDOW  2
+#define CTX_MENU_W       148
+#define CTX_ITEM_H       26
+static int ctx_menu_type = CTX_MENU_NONE;
+static int ctx_menu_x = 0;
+static int ctx_menu_y = 0;
+static int ctx_menu_win_id = -1;
+
 /* Mouse packet ring buffer filled by IRQ12 and drained by gui_process_input() */
 #define MOUSE_Q_SIZE 32
 typedef struct {
     int x;
     int y;
     uint8_t buttons;
+    int dz;
 } mouse_pkt_t;
 
 static volatile mouse_pkt_t mouse_queue[MOUSE_Q_SIZE];
@@ -185,9 +196,40 @@ static void gui_dirty_window_frame_locked(const window_t* w) {
     gui_dirty_screen_rect_locked(fx, fy, fw, fh);
 }
 
+static int is_window_shown(const window_t* w) {
+    return w && w->is_used && (w->flags & WIN_VISIBLE) && !(w->flags & WIN_MINIMIZED);
+}
+
+static void get_context_menu_rect(int* mx, int* my, int* mw, int* mh) {
+    int items = (ctx_menu_type == CTX_MENU_WINDOW) ? 4 : 3;
+    int w = CTX_MENU_W;
+    int h = items * CTX_ITEM_H + 8;
+    int x = ctx_menu_x;
+    int y = ctx_menu_y;
+    int max_x = (int)g_width - w - 4;
+    int max_y = (int)g_height - TASKBAR_HEIGHT - h - 4;
+    if (x > max_x) x = max_x;
+    if (y > max_y) y = max_y;
+    if (x < 4) x = 4;
+    if (y < 4) y = 4;
+    *mx = x;
+    *my = y;
+    *mw = w;
+    *mh = h;
+}
+
 static void gui_dirty_taskbar_locked(void) {
     if (g_height == 0 || g_width == 0) return;
     gui_dirty_screen_rect_locked(0, (int)g_height - TASKBAR_HEIGHT, (int)g_width, TASKBAR_HEIGHT);
+}
+
+static void close_context_menu(void) {
+    if (ctx_menu_type == CTX_MENU_NONE) return;
+    int cx, cy, cw, ch;
+    get_context_menu_rect(&cx, &cy, &cw, &ch);
+    ctx_menu_type = CTX_MENU_NONE;
+    ctx_menu_win_id = -1;
+    gui_dirty_screen_rect(cx, cy, cw, ch);
 }
 
 void gui_init(void) {
@@ -227,6 +269,8 @@ void gui_init(void) {
     gui_logout_requested = 0;
     login_to_text_shell = 0;
     power_menu_open = 0;
+    ctx_menu_type = CTX_MENU_NONE;
+    ctx_menu_win_id = -1;
     lkq_head = 0;
     lkq_tail = 0;
     lock_pass_len = 0;
@@ -248,6 +292,8 @@ void gui_request_exit(void) {
     if (is_gui_locked && !gui_logout_requested) return;
     if (is_gui_login && !login_to_text_shell) return;
     power_menu_open = 0;
+    ctx_menu_type = CTX_MENU_NONE;
+    ctx_menu_win_id = -1;
     gui_exit_requested = 1;
     gui_dirty = 1;
     wake_up(&gui_wait_queue);
@@ -258,6 +304,8 @@ void gui_lock_screen(void) {
     uint32_t eflags = irq_save_disable();
     is_gui_locked = 1;
     power_menu_open = 0;
+    ctx_menu_type = CTX_MENU_NONE;
+    ctx_menu_win_id = -1;
     dragging_window = NULL;
     mouse_capture_window = NULL;
     mouse_capture_buttons = 0;
@@ -528,8 +576,18 @@ void gui_destroy_window(int win_id) {
         mouse_capture_window = NULL;
         mouse_capture_buttons = 0;
     }
+    if (ctx_menu_type == CTX_MENU_WINDOW && ctx_menu_win_id == win_id) {
+        int cmx, cmy, cmw, cmh;
+        get_context_menu_rect(&cmx, &cmy, &cmw, &cmh);
+        ctx_menu_type = CTX_MENU_NONE;
+        ctx_menu_win_id = -1;
+        if (!is_gui_login && !is_gui_locked) {
+            gui_dirty_screen_rect_locked(cmx, cmy, cmw, cmh);
+        }
+    }
 
-    int was_visible = (win->flags & WIN_VISIBLE) != 0;
+    int was_visible = is_window_shown(win);
+    int was_in_taskbar = (win->flags & (WIN_VISIBLE | WIN_MINIMIZED)) != 0;
     int was_focused = (win == gui_get_focused_window());
     int fx = 0, fy = 0, fw = 0, fh = 0;
     if (was_visible) {
@@ -564,6 +622,8 @@ void gui_destroy_window(int win_id) {
     } else {
         if (was_visible) {
             gui_dirty_screen_rect_locked(fx, fy, fw, fh);
+        }
+        if (was_in_taskbar) {
             gui_dirty_taskbar_locked();
         }
         if (was_focused) {
@@ -628,7 +688,7 @@ window_t* gui_get_window(int win_id) {
 
 window_t* gui_get_focused_window(void) {
     for (int i = window_count - 1; i >= 0; i--) {
-        if (z_order[i] && z_order[i]->is_used && (z_order[i]->flags & WIN_VISIBLE)) {
+        if (is_window_shown(z_order[i])) {
             return z_order[i];
         }
     }
@@ -695,7 +755,7 @@ int gui_pop_event(window_t* w, gui_event_t* out_ev) {
 }
 
 /* Called from IRQ12 mouse_handler() */
-void gui_on_mouse_packet(int x, int y, uint8_t buttons) {
+void gui_on_mouse_packet(int x, int y, uint8_t buttons, int dz) {
     int next = (mq_head + 1) % MOUSE_Q_SIZE;
     if (next == mq_tail) {
         mq_tail = (mq_tail + 1) % MOUSE_Q_SIZE;
@@ -703,6 +763,7 @@ void gui_on_mouse_packet(int x, int y, uint8_t buttons) {
     mouse_queue[mq_head].x = x;
     mouse_queue[mq_head].y = y;
     mouse_queue[mq_head].buttons = buttons;
+    mouse_queue[mq_head].dz = dz;
     mq_head = next;
 
     gui_dirty = 1;
@@ -803,6 +864,8 @@ void gui_show_login_screen(void) {
     is_gui_locked = 0;
     is_gui_login = 1;
     power_menu_open = 0;
+    ctx_menu_type = CTX_MENU_NONE;
+    ctx_menu_win_id = -1;
     dragging_window = NULL;
     mouse_capture_window = NULL;
     mouse_capture_buttons = 0;
@@ -1047,7 +1110,62 @@ static void deliver_captured_mouse_up(int mx, int my, uint8_t button) {
     gui_push_event(target, &ev);
 }
 
-static void handle_mouse_step(int mx, int my, uint8_t buttons) {
+static void gui_minimize_window(window_t* w) {
+    if (!w || !w->is_used) return;
+    uint32_t eflags = irq_save_disable();
+    int was_focused = (w == gui_get_focused_window());
+    int fx, fy, fw, fh;
+    get_window_frame_rect(w, &fx, &fy, &fw, &fh);
+    w->flags &= ~WIN_VISIBLE;
+    w->flags |= WIN_MINIMIZED;
+    if (dragging_window == w) {
+        dragging_window = NULL;
+    }
+    if (mouse_capture_window == w) {
+        mouse_capture_window = NULL;
+        mouse_capture_buttons = 0;
+    }
+    if (is_gui_login || is_gui_locked) {
+        gui_full_dirty = 1;
+    } else {
+        gui_dirty_screen_rect_locked(fx, fy, fw, fh);
+        gui_dirty_taskbar_locked();
+        if (was_focused) {
+            window_t* new_top = gui_get_focused_window();
+            if (new_top) {
+                gui_dirty_window_frame_locked(new_top);
+            }
+        }
+    }
+    gui_dirty = 1;
+    irq_restore(eflags);
+    wake_up(&gui_wait_queue);
+}
+
+static void gui_restore_and_focus_window(window_t* w) {
+    if (!w || !w->is_used) return;
+    uint32_t eflags = irq_save_disable();
+    int was_hidden = !(w->flags & WIN_VISIBLE) || (w->flags & WIN_MINIMIZED);
+    w->flags |= WIN_VISIBLE;
+    w->flags &= ~WIN_MINIMIZED;
+    if (was_hidden && !is_gui_login && !is_gui_locked) {
+        gui_dirty_window_frame_locked(w);
+        gui_dirty_taskbar_locked();
+    }
+    gui_dirty = 1;
+    irq_restore(eflags);
+    gui_focus_window(w);
+}
+
+static void gui_show_or_create_terminal(void) {
+    if (gui_terminal_window && gui_terminal_window->is_used) {
+        gui_restore_and_focus_window(gui_terminal_window);
+    } else {
+        create_desktop_terminal_window(1);
+    }
+}
+
+static void handle_mouse_step(int mx, int my, uint8_t buttons, int dz) {
     uint8_t prev_left = prev_buttons & 0x01;
     uint8_t curr_left = buttons & 0x01;
     uint8_t prev_right = prev_buttons & 0x02;
@@ -1077,7 +1195,8 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
                 gui_dirty_screen_rect(old_fx, old_fy, old_fw, old_fh);
                 gui_dirty_screen_rect(new_fx, new_fy, new_fw, new_fh);
             }
-        } else if (!power_menu_open && my < (int)g_height - TASKBAR_HEIGHT) {
+        } else if (!power_menu_open && ctx_menu_type == CTX_MENU_NONE &&
+                   my < (int)g_height - TASKBAR_HEIGHT) {
             window_t* top = gui_get_focused_window();
             if (top && mx >= top->x && mx < top->x + top->width &&
                 my >= top->y && my < top->y + top->height) {
@@ -1092,8 +1211,75 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
         gui_dirty = 1;
     }
 
+    if (dz != 0 && !power_menu_open && ctx_menu_type == CTX_MENU_NONE &&
+        my < (int)g_height - TASKBAR_HEIGHT) {
+        for (int i = window_count - 1; i >= 0; i--) {
+            window_t* w = z_order[i];
+            if (!is_window_shown(w)) continue;
+            int fx, fy, fw, fh;
+            get_window_frame_rect(w, &fx, &fy, &fw, &fh);
+            if (mx >= fx && mx < fx + fw && my >= fy && my < fy + fh) {
+                if (mx >= w->x && mx < w->x + w->width &&
+                    my >= w->y && my < w->y + w->height) {
+                    gui_event_t ev = {0};
+                    ev.type = GUI_EVENT_MOUSE_SCROLL;
+                    ev.x = mx - w->x;
+                    ev.y = my - w->y;
+                    ev.button = buttons;
+                    ev.dz = dz;
+                    gui_push_event(w, &ev);
+                }
+                break;
+            }
+        }
+    }
+
     if (!prev_left && curr_left) {
-        /* Handle open Power popup menu first */
+        /* Handle open desktop/titlebar context menu first */
+        if (ctx_menu_type != CTX_MENU_NONE) {
+            int cmx, cmy, cmw, cmh;
+            get_context_menu_rect(&cmx, &cmy, &cmw, &cmh);
+            int mtype = ctx_menu_type;
+            int target_id = ctx_menu_win_id;
+            close_context_menu();
+
+            if (mx >= cmx && mx < cmx + cmw && my >= cmy + 4 && my < cmy + cmh - 4) {
+                int item = (my - (cmy + 4)) / CTX_ITEM_H;
+                if (mtype == CTX_MENU_DESKTOP) {
+                    if (item == 0) {
+                        gui_show_or_create_terminal();
+                    } else if (item == 1) {
+                        gui_launch_demo_app();
+                    } else if (item == 2) {
+                        gui_lock_screen();
+                    }
+                } else if (mtype == CTX_MENU_WINDOW) {
+                    window_t* tw = gui_get_window(target_id);
+                    if (item == 0 && tw) {
+                        gui_restore_and_focus_window(tw);
+                    } else if (item == 1 && tw) {
+                        gui_minimize_window(tw);
+                    } else if (item == 2 && tw) {
+                        if (tw == gui_terminal_window) {
+                            gui_minimize_window(tw);
+                        } else {
+                            gui_event_t ev = {0};
+                            ev.type = GUI_EVENT_WINDOW_CLOSE;
+                            ev.button = 1;
+                            gui_push_event(tw, &ev);
+                        }
+                    } else if (item == 3) {
+                        gui_show_or_create_terminal();
+                    }
+                }
+                prev_mouse_x = mx;
+                prev_mouse_y = my;
+                prev_buttons = buttons;
+                return;
+            }
+        }
+
+        /* Handle open Power popup menu */
         if (power_menu_open) {
             int pmx, pmy, pmw, pmh;
             get_power_menu_rect(&pmx, &pmy, &pmw, &pmh);
@@ -1151,22 +1337,19 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
                 int term_btn_w = 88;
                 int demo_btn_w = 88;
                 if (gui_terminal_window && mx >= chip_x && mx < chip_x + term_btn_w) {
-                    int fx, fy, fw, fh;
-                    get_window_frame_rect(gui_terminal_window, &fx, &fy, &fw, &fh);
-                    gui_terminal_window->flags |= WIN_VISIBLE;
-                    gui_focus_window(gui_terminal_window);
-                    gui_dirty_screen_rect(fx, fy, fw, fh);
-                    gui_dirty_screen_rect(0, (int)g_height - TASKBAR_HEIGHT, (int)g_width, TASKBAR_HEIGHT);
+                    gui_show_or_create_terminal();
                 } else if (mx >= chip_x + term_btn_w + 6 && mx < chip_x + term_btn_w + 6 + demo_btn_w) {
                     gui_launch_demo_app();
                 } else {
                     chip_x += term_btn_w + 6 + demo_btn_w + 10;
                     for (int i = 0; i < MAX_WINDOWS; i++) {
-                        if (!windows[i].is_used || !(windows[i].flags & WIN_VISIBLE)) continue;
+                        if (!windows[i].is_used) continue;
+                        if (!(windows[i].flags & (WIN_VISIBLE | WIN_MINIMIZED))) continue;
                         if (&windows[i] == gui_terminal_window) continue;
                         int chip_w = 120;
+                        if (chip_x + chip_w > lock_x - 10) break;
                         if (mx >= chip_x && mx < chip_x + chip_w) {
-                            gui_focus_window(&windows[i]);
+                            gui_restore_and_focus_window(&windows[i]);
                             break;
                         }
                         chip_x += chip_w + 6;
@@ -1177,13 +1360,11 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
             /* Hit-test windows top-to-bottom */
             for (int i = window_count - 1; i >= 0; i--) {
                 window_t* w = z_order[i];
-                if (!w || !w->is_used || !(w->flags & WIN_VISIBLE)) continue;
+                if (!is_window_shown(w)) continue;
 
+                int fx, fy, fw, fh;
+                get_window_frame_rect(w, &fx, &fy, &fw, &fh);
                 int decorated = (w->flags & WIN_DECORATED) != 0;
-                int fx = decorated ? (w->x - 2) : w->x;
-                int fy = decorated ? (w->y - TITLEBAR_HEIGHT - 2) : w->y;
-                int fw = decorated ? (w->width + 4) : w->width;
-                int fh = decorated ? (w->height + TITLEBAR_HEIGHT + 4) : w->height;
 
                 if (mx >= fx && mx < fx + fw && my >= fy && my < fy + fh) {
                     gui_focus_window(w);
@@ -1194,17 +1375,7 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
                         if (mx >= close_x && mx < close_x + 16 &&
                             my >= close_y && my < close_y + 16) {
                             if (w == gui_terminal_window) {
-                                int tfx, tfy, tfw, tfh;
-                                get_window_frame_rect(w, &tfx, &tfy, &tfw, &tfh);
-                                w->flags &= ~WIN_VISIBLE;
-                                gui_dirty_screen_rect(tfx, tfy, tfw, tfh);
-                                gui_dirty_screen_rect(0, (int)g_height - TASKBAR_HEIGHT, (int)g_width, TASKBAR_HEIGHT);
-                                window_t* new_top = gui_get_focused_window();
-                                if (new_top) {
-                                    int nfx, nfy, nfw, nfh;
-                                    get_window_frame_rect(new_top, &nfx, &nfy, &nfw, &nfh);
-                                    gui_dirty_screen_rect(nfx, nfy, nfw, nfh);
-                                }
+                                gui_minimize_window(w);
                             } else {
                                 gui_event_t ev = {0};
                                 ev.type = GUI_EVENT_WINDOW_CLOSE;
@@ -1245,18 +1416,57 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
     }
 
     if (!prev_right && curr_right) {
-        if (!power_menu_open && my < (int)g_height - TASKBAR_HEIGHT) {
-            window_t* top = gui_get_focused_window();
-            if (top && mx >= top->x && mx < top->x + top->width &&
-                my >= top->y && my < top->y + top->height) {
-                mouse_capture_window = top;
-                mouse_capture_buttons |= 0x02;
-                gui_event_t ev = {0};
-                ev.type = GUI_EVENT_MOUSE_DOWN;
-                ev.x = mx - top->x;
-                ev.y = my - top->y;
-                ev.button = 2;
-                gui_push_event(top, &ev);
+        if (power_menu_open) {
+            int pmx, pmy, pmw, pmh;
+            get_power_menu_rect(&pmx, &pmy, &pmw, &pmh);
+            power_menu_open = 0;
+            gui_dirty_screen_rect(pmx, pmy, pmw, pmh);
+            gui_dirty_screen_rect(0, (int)g_height - TASKBAR_HEIGHT, (int)g_width, TASKBAR_HEIGHT);
+        }
+        close_context_menu();
+
+        if (my < (int)g_height - TASKBAR_HEIGHT) {
+            int hit_window = 0;
+            for (int i = window_count - 1; i >= 0; i--) {
+                window_t* w = z_order[i];
+                if (!is_window_shown(w)) continue;
+
+                int fx, fy, fw, fh;
+                get_window_frame_rect(w, &fx, &fy, &fw, &fh);
+                if (mx >= fx && mx < fx + fw && my >= fy && my < fy + fh) {
+                    hit_window = 1;
+                    if (mx >= w->x && mx < w->x + w->width &&
+                        my >= w->y && my < w->y + w->height) {
+                        gui_focus_window(w);
+                        mouse_capture_window = w;
+                        mouse_capture_buttons |= 0x02;
+                        gui_event_t ev = {0};
+                        ev.type = GUI_EVENT_MOUSE_DOWN;
+                        ev.x = mx - w->x;
+                        ev.y = my - w->y;
+                        ev.button = 2;
+                        gui_push_event(w, &ev);
+                    } else {
+                        ctx_menu_type = CTX_MENU_WINDOW;
+                        ctx_menu_x = mx;
+                        ctx_menu_y = my;
+                        ctx_menu_win_id = w->id;
+                        int cmx, cmy, cmw, cmh;
+                        get_context_menu_rect(&cmx, &cmy, &cmw, &cmh);
+                        gui_dirty_screen_rect(cmx, cmy, cmw, cmh);
+                    }
+                    break;
+                }
+            }
+
+            if (!hit_window) {
+                ctx_menu_type = CTX_MENU_DESKTOP;
+                ctx_menu_x = mx;
+                ctx_menu_y = my;
+                ctx_menu_win_id = -1;
+                int cmx, cmy, cmw, cmh;
+                get_context_menu_rect(&cmx, &cmy, &cmw, &cmh);
+                gui_dirty_screen_rect(cmx, cmy, cmw, cmh);
             }
         }
     } else if (prev_right && !curr_right) {
@@ -1349,7 +1559,7 @@ void gui_process_input(void) {
         } else if (is_gui_locked) {
             handle_locked_mouse_step(pkt.x, pkt.y, pkt.buttons);
         } else {
-            handle_mouse_step(pkt.x, pkt.y, pkt.buttons);
+            handle_mouse_step(pkt.x, pkt.y, pkt.buttons, pkt.dz);
         }
     }
 
@@ -1389,6 +1599,37 @@ static void draw_power_menu(void) {
     }
 }
 
+static void draw_context_menu(void) {
+    if (ctx_menu_type == CTX_MENU_NONE) return;
+    int cmx, cmy, cmw, cmh;
+    get_context_menu_rect(&cmx, &cmy, &cmw, &cmh);
+
+    bb_fill_rect(cmx, cmy, cmw, cmh, 0x000F172A);
+    bb_draw_rect_outline(cmx, cmy, cmw, cmh, 0x00475569);
+
+    if (ctx_menu_type == CTX_MENU_WINDOW) {
+        const char* items[4] = { "Bring to Front", "Minimize", "Close", "New Terminal" };
+        uint32_t colors[4] = { 0x00F8FAFC, 0x00FBBF24, 0x00F87171, 0x0060A5FA };
+        for (int i = 0; i < 4; i++) {
+            int iy = cmy + 4 + i * CTX_ITEM_H;
+            if (i > 0) {
+                bb_fill_rect(cmx + 8, iy, cmw - 16, 1, 0x001E293B);
+            }
+            bb_draw_string_transparent(items[i], cmx + 12, iy + 5, colors[i]);
+        }
+    } else {
+        const char* items[3] = { "New Terminal", "Open Paint", "Lock Screen" };
+        uint32_t colors[3] = { 0x0060A5FA, 0x005EEAD4, 0x00FBBF24 };
+        for (int i = 0; i < 3; i++) {
+            int iy = cmy + 4 + i * CTX_ITEM_H;
+            if (i > 0) {
+                bb_fill_rect(cmx + 8, iy, cmw - 16, 1, 0x001E293B);
+            }
+            bb_draw_string_transparent(items[i], cmx + 12, iy + 5, colors[i]);
+        }
+    }
+}
+
 static void draw_taskbar(window_t* focused) {
     int bar_y = (int)g_height - TASKBAR_HEIGHT;
     bb_fill_rect(0, bar_y, (int)g_width, TASKBAR_HEIGHT, 0x000F172A);
@@ -1397,12 +1638,13 @@ static void draw_taskbar(window_t* focused) {
     int chip_x = 8;
     if (gui_terminal_window) {
         int term_btn_w = 88;
-        int is_term_act = (gui_terminal_window == focused && (gui_terminal_window->flags & WIN_VISIBLE));
+        int is_term_act = (gui_terminal_window == focused && is_window_shown(gui_terminal_window));
         uint32_t bg = is_term_act ? 0x002563EB : 0x001E293B;
         bb_fill_rect(chip_x, bar_y + 4, term_btn_w, TASKBAR_HEIGHT - 8, bg);
         bb_draw_rect_outline(chip_x, bar_y + 4, term_btn_w, TASKBAR_HEIGHT - 8,
                              is_term_act ? 0x0060A5FA : 0x00334155);
-        bb_draw_string_transparent("Terminal", chip_x + 12, bar_y + 6, 0x00F8FAFC);
+        bb_draw_string_transparent("Terminal", chip_x + 12, bar_y + 6,
+                                   is_window_shown(gui_terminal_window) ? 0x00F8FAFC : 0x0094A3B8);
         chip_x += term_btn_w + 6;
     }
 
@@ -1416,20 +1658,23 @@ static void draw_taskbar(window_t* focused) {
     int lock_x = power_x - 66;
 
     for (int i = 0; i < MAX_WINDOWS; i++) {
-        if (!windows[i].is_used || !(windows[i].flags & WIN_VISIBLE)) continue;
+        if (!windows[i].is_used) continue;
+        if (!(windows[i].flags & (WIN_VISIBLE | WIN_MINIMIZED))) continue;
         if (&windows[i] == gui_terminal_window) continue;
         int chip_w = 120;
         if (chip_x + chip_w > lock_x - 10) break;
 
-        int is_act = (&windows[i] == focused);
-        uint32_t bg = is_act ? 0x002563EB : 0x001E293B;
+        int is_min = (windows[i].flags & WIN_MINIMIZED) != 0;
+        int is_act = (!is_min && &windows[i] == focused);
+        uint32_t bg = is_act ? 0x002563EB : (is_min ? 0x000F172A : 0x001E293B);
+        uint32_t border = is_act ? 0x0060A5FA : (is_min ? 0x00475569 : 0x00334155);
+        uint32_t fg = is_min ? 0x0094A3B8 : 0x00F8FAFC;
         bb_fill_rect(chip_x, bar_y + 4, chip_w, TASKBAR_HEIGHT - 8, bg);
-        bb_draw_rect_outline(chip_x, bar_y + 4, chip_w, TASKBAR_HEIGHT - 8,
-                             is_act ? 0x0060A5FA : 0x00334155);
+        bb_draw_rect_outline(chip_x, bar_y + 4, chip_w, TASKBAR_HEIGHT - 8, border);
 
         char label[14];
         copy_title(label, windows[i].title, sizeof(label));
-        bb_draw_string_transparent(label, chip_x + 6, bar_y + 6, 0x00F8FAFC);
+        bb_draw_string_transparent(label, chip_x + 6, bar_y + 6, fg);
         chip_x += chip_w + 6;
     }
 
@@ -1684,7 +1929,7 @@ static void render_desktop_region(int rx, int ry, int rw, int rh, window_t* focu
         /* Skip background & occluded lower windows if an opaque window covers the region */
         for (int i = window_count - 1; i >= 0; i--) {
             window_t* w = z_order[i];
-            if (!w || !w->is_used || !(w->flags & WIN_VISIBLE)) continue;
+            if (!is_window_shown(w)) continue;
             int fx, fy, fw, fh;
             get_window_frame_rect(w, &fx, &fy, &fw, &fh);
             if (fx <= rx && fy <= ry &&
@@ -1701,7 +1946,7 @@ static void render_desktop_region(int rx, int ry, int rw, int rh, window_t* focu
 
         for (int i = start_idx; i < window_count; i++) {
             window_t* w = z_order[i];
-            if (!w || !w->is_used || !(w->flags & WIN_VISIBLE)) continue;
+            if (!is_window_shown(w)) continue;
 
             int fx, fy, fw, fh;
             get_window_frame_rect(w, &fx, &fy, &fw, &fh);
@@ -1722,6 +1967,15 @@ static void render_desktop_region(int rx, int ry, int rw, int rh, window_t* focu
         gui_rect_t pmr = { pmx, pmy, pmw, pmh };
         if (rects_overlap_or_touch(&region, &pmr)) {
             draw_power_menu();
+        }
+    }
+
+    if (ctx_menu_type != CTX_MENU_NONE) {
+        int cmx, cmy, cmw, cmh;
+        get_context_menu_rect(&cmx, &cmy, &cmw, &cmh);
+        gui_rect_t cmr = { cmx, cmy, cmw, cmh };
+        if (rects_overlap_or_touch(&region, &cmr)) {
+            draw_context_menu();
         }
     }
 
@@ -1753,7 +2007,7 @@ void gui_render(void) {
         for (int i = 0; i < window_count; i++) {
             window_t* w = z_order[i];
             if (!w || !w->is_used || !w->dirty) continue;
-            if (w->flags & WIN_VISIBLE) {
+            if (is_window_shown(w)) {
                 add_rect_to_list(rects, &rects_count, MAX_DIRTY_RECTS,
                                  w->x + w->dirty_x, w->y + w->dirty_y,
                                  w->dirty_w, w->dirty_h);
@@ -1819,6 +2073,8 @@ static void gui_teardown(void) {
     is_gui_locked = 0;
     is_gui_login = 0;
     power_menu_open = 0;
+    ctx_menu_type = CTX_MENU_NONE;
+    ctx_menu_win_id = -1;
     screen_dirty_count = 0;
     bb_reset_clip();
     gui_exit_requested = 0;

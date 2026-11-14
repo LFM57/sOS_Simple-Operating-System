@@ -153,6 +153,11 @@ void _start() {
             }
         } else if (ev.type == GUI_EVENT_MOUSE_UP && ev.button == 1) {
             is_drawing = 0;
+        } else if (ev.type == GUI_EVENT_MOUSE_SCROLL && ev.dz != 0) {
+            int delta = (ev.dz > 0) ? 1 : -1;
+            active_idx = (active_idx + delta + 6) % 6;
+            draw_toolbar(buf, active_idx);
+            dirty = 1;
         }
 
         if (dirty) {

@@ -87,7 +87,8 @@ typedef enum {
     GUI_EVENT_MOUSE_UP,
     GUI_EVENT_MOUSE_MOVE,
     GUI_EVENT_KEY_PRESS,
-    GUI_EVENT_WINDOW_CLOSE
+    GUI_EVENT_WINDOW_CLOSE,
+    GUI_EVENT_MOUSE_SCROLL
 } gui_event_type_t;
 
 typedef struct {
@@ -97,6 +98,7 @@ typedef struct {
     char key;
     unsigned char modifiers;
     unsigned char scancode;
+    int dz;
 } gui_event_t;
 
 int win_create(const char* title, int w, int h);

@@ -4,9 +4,11 @@
 volatile int mouse_x = 512;
 volatile int mouse_y = 384;
 volatile uint8_t mouse_buttons = 0;
+volatile int mouse_has_wheel = 0;
 
 static uint8_t mouse_cycle = 0;
-static uint8_t mouse_byte[3];
+static uint8_t mouse_byte[4];
+static uint8_t mouse_dev_id = 0;
 static mouse_callback_t mouse_cb = NULL;
 
 void mouse_set_callback(mouse_callback_t cb) {
@@ -72,13 +74,57 @@ void init_mouse(void) {
     mouse_write(0xF6);
     (void)mouse_read();
 
-    /* 4. Enable packet streaming (0xF4) and wait for ACK (0xFA) */
+    /* 4. Probe 4-byte IntelliMouse scroll wheel extension (sample rates 200, 100, 80) */
+    mouse_write(0xF3);
+    (void)mouse_read();
+    mouse_write(200);
+    (void)mouse_read();
+    mouse_write(0xF3);
+    (void)mouse_read();
+    mouse_write(100);
+    (void)mouse_read();
+    mouse_write(0xF3);
+    (void)mouse_read();
+    mouse_write(80);
+    (void)mouse_read();
+
+    /* Query device ID: 3 = IntelliMouse (wheel), 4 = IntelliMouse Explorer */
+    mouse_write(0xF2);
+    (void)mouse_read();
+    mouse_dev_id = mouse_read();
+    mouse_has_wheel = (mouse_dev_id == 3 || mouse_dev_id == 4) ? 1 : 0;
+
+    /* 5. Enable packet streaming (0xF4) and wait for ACK (0xFA) */
     mouse_write(0xF4);
     (void)mouse_read();
 
-    /* 5. Unmask IRQ2 (Slave cascade) and IRQ12 (PS/2 Mouse) on the PIC */
+    /* 6. Unmask IRQ2 (Slave cascade) and IRQ12 (PS/2 Mouse) on the PIC */
     pic_enable_irq(2);
     pic_enable_irq(12);
+}
+
+static void emit_mouse_packet(int dz) {
+    /* Discard packets with X or Y overflow flags set */
+    if (mouse_byte[0] & 0xC0) return;
+
+    int dx = (mouse_byte[0] & 0x10) ? ((int)mouse_byte[1] - 256) : (int)mouse_byte[1];
+    int dy = (mouse_byte[0] & 0x20) ? ((int)mouse_byte[2] - 256) : (int)mouse_byte[2];
+
+    mouse_x += dx;
+    mouse_y -= dy; /* PS/2 Y-axis is inverted relative to screen coordinates */
+
+    int max_x = (g_width > 0) ? ((int)g_width - 1) : 1023;
+    int max_y = (g_height > 0) ? ((int)g_height - 1) : 767;
+    if (mouse_x < 0) mouse_x = 0;
+    if (mouse_y < 0) mouse_y = 0;
+    if (mouse_x > max_x) mouse_x = max_x;
+    if (mouse_y > max_y) mouse_y = max_y;
+
+    mouse_buttons = mouse_byte[0] & 0x07;
+
+    if (mouse_cb) {
+        mouse_cb(mouse_x, mouse_y, mouse_buttons, dz);
+    }
 }
 
 void mouse_handler(void) {
@@ -112,30 +158,27 @@ void mouse_handler(void) {
 
         case 2:
             mouse_byte[2] = data;
-            mouse_cycle = 0;
-
-            /* Discard packets with X or Y overflow flags set */
-            if (mouse_byte[0] & 0xC0) break;
-
-            int dx = (mouse_byte[0] & 0x10) ? ((int)mouse_byte[1] - 256) : (int)mouse_byte[1];
-            int dy = (mouse_byte[0] & 0x20) ? ((int)mouse_byte[2] - 256) : (int)mouse_byte[2];
-
-            mouse_x += dx;
-            mouse_y -= dy; /* PS/2 Y-axis is inverted relative to screen coordinates */
-
-            int max_x = (g_width > 0) ? ((int)g_width - 1) : 1023;
-            int max_y = (g_height > 0) ? ((int)g_height - 1) : 767;
-            if (mouse_x < 0) mouse_x = 0;
-            if (mouse_y < 0) mouse_y = 0;
-            if (mouse_x > max_x) mouse_x = max_x;
-            if (mouse_y > max_y) mouse_y = max_y;
-
-            mouse_buttons = mouse_byte[0] & 0x07;
-
-            if (mouse_cb) {
-                mouse_cb(mouse_x, mouse_y, mouse_buttons);
+            if (mouse_has_wheel) {
+                mouse_cycle = 3;
+            } else {
+                mouse_cycle = 0;
+                emit_mouse_packet(0);
             }
             break;
+
+        case 3: {
+            mouse_byte[3] = data;
+            mouse_cycle = 0;
+            int dz = 0;
+            if (mouse_dev_id == 4) {
+                int z4 = (int)(data & 0x0F);
+                dz = (z4 & 0x08) ? (z4 - 16) : z4;
+            } else {
+                dz = (int)(int8_t)data;
+            }
+            emit_mouse_packet(dz);
+            break;
+        }
     }
 
     /* Send EOI to both Slave and Master PICs */
