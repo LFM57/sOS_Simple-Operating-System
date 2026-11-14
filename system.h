@@ -178,6 +178,7 @@ extern int ota_error_occurred;
 extern volatile int shell_input_enabled;
 extern volatile int fg_task;
 void create_task(void (*entry_point)());
+int create_user_task(uint8_t* elf_buffer, uint32_t elf_size);
 void kill_current_task(void);
 void print_shell_prompt(void);
 

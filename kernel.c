@@ -421,6 +421,8 @@ void cleanup_task_memory(int id) {
     tasks[id].page_directory = NULL;
 
     __asm__ volatile("push %0; popf" :: "r"(eflags));
+
+    gui_destroy_windows_by_pid((uint32_t)id);
 }
 
 void kill_current_task() {
@@ -1371,14 +1373,15 @@ int sys_fork(syscall_frame_t* frame) {
         *(--top) = frame->cs;
         *(--top) = frame->eip;
 
-        *(--top) = frame->edi;
-        *(--top) = frame->esi;
-        *(--top) = frame->ebp;
-        *(--top) = 0;
-        *(--top) = frame->ebx;
-        *(--top) = frame->edx;
+        /* pusha order (highest addr -> lowest addr): EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI */
+        *(--top) = 0; /* Child returns 0 in EAX */
         *(--top) = frame->ecx;
-        *(--top) = 0;
+        *(--top) = frame->edx;
+        *(--top) = frame->ebx;
+        *(--top) = 0; /* Ignored ESP slot */
+        *(--top) = frame->ebp;
+        *(--top) = frame->esi;
+        *(--top) = frame->edi;
 
         *(--top) = frame->ds;
         *(--top) = frame->es;
@@ -1392,14 +1395,15 @@ int sys_fork(syscall_frame_t* frame) {
         *(--top) = 0x08;
         *(--top) = caller_eip;
 
-        *(--top) = frame ? frame->edi : 0;
-        *(--top) = frame ? frame->esi : 0;
-        *(--top) = caller_ebp;
-        *(--top) = 0;
-        *(--top) = frame ? frame->ebx : 0;
-        *(--top) = frame ? frame->edx : 0;
+        /* pusha order (highest addr -> lowest addr): EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI */
+        *(--top) = 0; /* Child returns 0 in EAX */
         *(--top) = frame ? frame->ecx : 0;
-        *(--top) = 0;
+        *(--top) = frame ? frame->edx : 0;
+        *(--top) = frame ? frame->ebx : 0;
+        *(--top) = 0; /* Ignored ESP slot */
+        *(--top) = caller_ebp;
+        *(--top) = frame ? frame->esi : 0;
+        *(--top) = frame ? frame->edi : 0;
 
         *(--top) = 0x10;
         *(--top) = 0x10;
@@ -2744,6 +2748,31 @@ static void util_format_human_size(uint32_t kb, char* out) {
 
 static void execute_command_with_redirection(char* stage_cmd, int is_bg);
 
+static void launch_user_binary(const char* target_binary, int is_bg) {
+    if (current_task != 0) {
+        sys_execve(target_binary, NULL, NULL);
+        kprintf("Error: Failed to exec '%s'.\n", target_binary);
+        kill_current_task();
+    } else {
+        uint8_t* file_buf = NULL;
+        uint32_t file_size = 0;
+        if (fs_load_file(target_binary, &file_buf, &file_size)) {
+            int task_id = create_user_task(file_buf, file_size);
+            kfree(file_buf);
+            if (task_id != -1) {
+                tasks[task_id].is_background = is_bg;
+                if (is_bg) {
+                    kprintf("[Process %d launched in background]\n", task_id);
+                } else {
+                    fg_task = task_id;
+                    sys_waitpid(task_id, NULL, 0);
+                    fg_task = -1;
+                }
+            }
+        }
+    }
+}
+
 static void execute_single_command(int is_bg) {
     /* Save of the parsed buffer */
     char raw_buf[256];
@@ -3136,32 +3165,7 @@ static void execute_single_command(int is_bg) {
         if (arg1 != NULL) {
             char target_binary[128];
             if (resolve_binary_path(arg1, target_binary, sizeof(target_binary))) {
-                if (current_task != 0) {
-                    sys_execve(target_binary, NULL, NULL);
-                    kprintf("Error: Failed to exec '%s'.\n", target_binary);
-                    kill_current_task();
-                } else {
-                    uint8_t* file_buf;
-                    uint32_t file_size;
-                    if (fs_load_file(target_binary, &file_buf, &file_size)) {
-                        int task_id = create_user_task(file_buf, file_size);
-                        kfree(file_buf);
-                        if (task_id != -1) {
-                            /* Associate the background status with the task */
-                            tasks[task_id].is_background = is_bg; 
-                            
-                            if (is_bg) {
-                                kprintf("[Process %d launched in background]\n", task_id);
-                                /* Prompt is given back instantly to the user */
-                            } else {
-                                /* Classic blocking synchronous mode */
-                                fg_task = task_id;
-                                sys_waitpid(task_id, NULL, 0);
-                                fg_task = -1;
-                            }
-                        }
-                    }
-                }
+                launch_user_binary(target_binary, is_bg);
             } else {
                 if (fs_error == FS_ERR_PERMISSION) {
                     kprintf("Error: Permission denied.\n");
@@ -3236,6 +3240,8 @@ static void execute_single_command(int is_bg) {
                     kprintf("Error: Operation not permitted.\n");
                 } else {
                     tasks[pid].state = 3;
+                    gui_destroy_windows_by_pid((uint32_t)pid);
+                    wake_up(&exit_queue);
                     kprintf("Process %d terminated and memory freed.\n", pid);
                 }
             }
@@ -4242,27 +4248,7 @@ static void execute_single_command(int is_bg) {
         int found = resolve_binary_path(cmd, possible_file, sizeof(possible_file));
 
         if (found) {
-            if (current_task != 0) {
-                sys_execve(possible_file, NULL, NULL);
-                kprintf("Error: Failed to exec '%s'.\n", possible_file);
-                kill_current_task();
-            } else {
-                int child_pid = sys_fork(NULL);
-                if (child_pid == 0) {
-                    sys_execve(possible_file, NULL, NULL);
-                    kprintf("Error: Failed to exec '%s'.\n", possible_file);
-                    kill_current_task();
-                } else if (child_pid > 0) {
-                    tasks[child_pid].is_background = is_bg;
-                    if (is_bg) {
-                        kprintf("[Process %d launched in background]\n", child_pid);
-                    } else {
-                        fg_task = child_pid;
-                        sys_waitpid(child_pid, NULL, 0);
-                        fg_task = -1;
-                    }
-                }
-            }
+            launch_user_binary(possible_file, is_bg);
         } else {
             kprintf("Unknown command: '%s'\n", cmd);
             const char* suggest_cmd = NULL;

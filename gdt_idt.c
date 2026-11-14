@@ -1,5 +1,6 @@
 #include "system.h"
 #include "net.h"
+#include "gui.h"
 
 extern void gdt_flush(uint32_t);
 extern void idt_flush(uint32_t);
@@ -133,7 +134,7 @@ void fault_handler(registers_t *regs) {
     if (regs->int_no < 32) {
         // The CS register contains the privilege level in its 2 least significant bits.
         if ((regs->cs & 0x03) == 3) {
-            kprintf("\n[OS] User app crashed! (Exception %d: %s). Killing task...\n", regs->int_no, exception_messages[regs->int_no]);
+            kprintf("\n[OS] User app crashed! (Ex %d: %s). Killing...\n", regs->int_no, exception_messages[regs->int_no]);
             extern void kill_current_task();
             kill_current_task(); // Kills app and goes back to shell
             return;
@@ -679,6 +680,39 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         int options = (int)arg3;
         if (status && !is_valid_user_range((uint32_t)status, sizeof(int))) return (uint32_t)-1;
         return (uint32_t)sys_waitpid(pid, status, options);
+    }
+    else if (syscall_num == 25) {
+        /* Syscall 25: int win_create(const char* title, int w, int h) */
+        const char* title = (const char*)arg1;
+        int w = (int)arg2;
+        int h = (int)arg3;
+        if (!is_valid_user_string(title)) return (uint32_t)-1;
+        return (uint32_t)gui_create_user_window(title, w, h, (uint32_t)current_task);
+    }
+    else if (syscall_num == 26) {
+        /* Syscall 26: int win_present(int win_id, const uint32_t* buf) */
+        int win_id = (int)arg1;
+        const uint32_t* buf = (const uint32_t*)arg2;
+        window_t* win = gui_get_window(win_id);
+        if (!win || win->width <= 0 || win->height <= 0) return (uint32_t)-1;
+        uint32_t pixels = (uint32_t)win->width * (uint32_t)win->height;
+        if (pixels > 0xFFFFFFFFU / 4U) return (uint32_t)-1;
+        uint32_t byte_size = pixels * 4U;
+        if (!is_valid_user_range((uint32_t)buf, byte_size)) return (uint32_t)-1;
+        return (uint32_t)gui_present_window(win_id, buf, (uint32_t)current_task);
+    }
+    else if (syscall_num == 27) {
+        /* Syscall 27: int win_get_event(int win_id, gui_event_t* out_ev, int blocking) */
+        int win_id = (int)arg1;
+        gui_event_t* out_ev = (gui_event_t*)arg2;
+        int blocking = (int)arg3;
+        if (!is_valid_user_range((uint32_t)out_ev, sizeof(gui_event_t))) return (uint32_t)-1;
+        return (uint32_t)gui_get_window_event(win_id, out_ev, (uint32_t)current_task, blocking);
+    }
+    else if (syscall_num == 28) {
+        /* Syscall 28: int win_destroy(int win_id) */
+        int win_id = (int)arg1;
+        return (uint32_t)gui_destroy_user_window(win_id, (uint32_t)current_task);
     }
     
     return (uint32_t)-1;

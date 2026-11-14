@@ -178,6 +178,93 @@ int gui_create_window(const char* title, int x, int y, int w, int h, uint32_t fl
     return slot;
 }
 
+static int window_cascade = 0;
+
+int gui_create_user_window(const char* title, int w, int h, uint32_t owner_pid) {
+    if (!is_gui_mode || w <= 0 || h <= 0 || w > (int)g_width || h > (int)g_height) {
+        return -1;
+    }
+    int x = 60 + ((window_cascade * 32) % 240);
+    int y = 52 + ((window_cascade * 28) % 160);
+    if (x + w > (int)g_width - 8) x = (int)g_width - w - 8;
+    if (y + h > (int)g_height - TASKBAR_HEIGHT - 8) y = (int)g_height - TASKBAR_HEIGHT - h - 8;
+    if (x < 8) x = 8;
+    if (y < TITLEBAR_HEIGHT + 4) y = TITLEBAR_HEIGHT + 4;
+
+    int win_id = gui_create_window(title, x, y, w, h, WIN_VISIBLE | WIN_DECORATED, owner_pid);
+    if (win_id >= 0) {
+        window_cascade++;
+    }
+    return win_id;
+}
+
+int gui_present_window(int win_id, const uint32_t* buf, uint32_t owner_pid) {
+    if (!is_gui_mode || !buf) return -1;
+    window_t* win = gui_get_window(win_id);
+    if (!win || win->owner_pid != owner_pid || (win->flags & WIN_BUILTIN) || !win->canvas) {
+        return -1;
+    }
+
+    uint32_t dwords = (uint32_t)win->width * (uint32_t)win->height;
+    uint32_t eflags = irq_save_disable();
+    for (uint32_t i = 0; i < dwords; i++) {
+        win->canvas[i] = buf[i];
+    }
+    gui_full_dirty = 1;
+    gui_dirty = 1;
+    irq_restore(eflags);
+
+    wake_up(&gui_wait_queue);
+    return 0;
+}
+
+int gui_get_window_event(int win_id, gui_event_t* out_ev, uint32_t owner_pid, int blocking) {
+    if (!out_ev) return -1;
+    window_t* win = gui_get_window(win_id);
+    if (!win || win->owner_pid != owner_pid || (win->flags & WIN_BUILTIN)) {
+        return -1;
+    }
+
+    if (gui_pop_event(win, out_ev)) {
+        return 1;
+    }
+    if (!blocking) {
+        out_ev->type = GUI_EVENT_NONE;
+        return 0;
+    }
+
+    __asm__ volatile("sti");
+    while (1) {
+        if (!is_gui_mode) return -1;
+        win = gui_get_window(win_id);
+        if (!win || win->owner_pid != owner_pid) return -1;
+        if (gui_pop_event(win, out_ev)) return 1;
+        sleep_on(&win->event_queue);
+    }
+}
+
+int gui_destroy_user_window(int win_id, uint32_t owner_pid) {
+    window_t* win = gui_get_window(win_id);
+    if (!win || win->owner_pid != owner_pid || (win->flags & WIN_BUILTIN)) {
+        return -1;
+    }
+    gui_destroy_window(win_id);
+    return 0;
+}
+
+static void gui_launch_demo_app(void) {
+    uint8_t* file_buf = NULL;
+    uint32_t file_size = 0;
+    if (!fs_load_file("/bin/guidemo.sos", &file_buf, &file_size)) {
+        return;
+    }
+    int task_id = create_user_task(file_buf, file_size);
+    kfree(file_buf);
+    if (task_id != -1) {
+        tasks[task_id].is_background = 1;
+    }
+}
+
 void gui_destroy_window(int win_id) {
     if (win_id < 0 || win_id >= MAX_WINDOWS) return;
 
@@ -365,13 +452,16 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
             } else {
                 int chip_x = 8;
                 int term_btn_w = 88;
+                int demo_btn_w = 88;
                 if (gui_terminal_window && mx >= chip_x && mx < chip_x + term_btn_w) {
                     gui_terminal_window->flags |= WIN_VISIBLE;
                     gui_focus_window(gui_terminal_window);
                     gui_full_dirty = 1;
                     gui_dirty = 1;
+                } else if (mx >= chip_x + term_btn_w + 6 && mx < chip_x + term_btn_w + 6 + demo_btn_w) {
+                    gui_launch_demo_app();
                 } else {
-                    chip_x += term_btn_w + 8;
+                    chip_x += term_btn_w + 6 + demo_btn_w + 10;
                     for (int i = 0; i < MAX_WINDOWS; i++) {
                         if (!windows[i].is_used || !(windows[i].flags & WIN_VISIBLE)) continue;
                         if (&windows[i] == gui_terminal_window) continue;
@@ -519,8 +609,14 @@ static void draw_taskbar(window_t* focused) {
         bb_draw_rect_outline(chip_x, bar_y + 4, term_btn_w, TASKBAR_HEIGHT - 8,
                              is_term_act ? 0x0060A5FA : 0x00334155);
         bb_draw_string_transparent("Terminal", chip_x + 12, bar_y + 6, 0x00F8FAFC);
-        chip_x += term_btn_w + 8;
+        chip_x += term_btn_w + 6;
     }
+
+    int demo_btn_w = 88;
+    bb_fill_rect(chip_x, bar_y + 4, demo_btn_w, TASKBAR_HEIGHT - 8, 0x000F766E);
+    bb_draw_rect_outline(chip_x, bar_y + 4, demo_btn_w, TASKBAR_HEIGHT - 8, 0x0014B8A6);
+    bb_draw_string_transparent("Paint", chip_x + 24, bar_y + 6, 0x00F8FAFC);
+    chip_x += demo_btn_w + 10;
 
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (!windows[i].is_used || !(windows[i].flags & WIN_VISIBLE)) continue;

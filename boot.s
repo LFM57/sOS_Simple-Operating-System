@@ -323,12 +323,12 @@ isr128:
     push %fs
     push %gs
     
-    /* Load Kernel Data Segment (0x10) */
-    mov $0x10, %bx
-    mov %bx, %ds
-    mov %bx, %es
-    mov %bx, %fs
-    mov %bx, %gs
+    /* Load Kernel Data Segment (0x10) without clobbering %ebx (arg1) */
+    mov $0x10, %si
+    mov %si, %ds
+    mov %si, %es
+    mov %si, %fs
+    mov %si, %gs
     
     /* Push arguments for C */
     push %esp  /* Pointer to saved frame */

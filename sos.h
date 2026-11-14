@@ -62,4 +62,27 @@ int connect(int fd, const unsigned char* dest_ip, unsigned short port);
 int send(int fd, const void* buf, unsigned int len);
 int recv(int fd, void* buf, unsigned int len);
 
+/* GUI System Calls (Ring 3) */
+typedef enum {
+    GUI_EVENT_NONE = 0,
+    GUI_EVENT_MOUSE_DOWN,
+    GUI_EVENT_MOUSE_UP,
+    GUI_EVENT_MOUSE_MOVE,
+    GUI_EVENT_KEY_PRESS,
+    GUI_EVENT_WINDOW_CLOSE
+} gui_event_type_t;
+
+typedef struct {
+    gui_event_type_t type;
+    int x, y;
+    unsigned char button;
+    char key;
+} gui_event_t;
+
+int win_create(const char* title, int w, int h);
+int win_present(int win_id, const unsigned int* buf);
+int win_get_event(int win_id, gui_event_t* out_ev);
+int win_poll_event(int win_id, gui_event_t* out_ev);
+int win_destroy(int win_id);
+
 #endif

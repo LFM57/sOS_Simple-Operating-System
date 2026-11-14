@@ -33,15 +33,23 @@ app.sos: app.c sos.c
 	$(USER_LD) -T app_linker.ld app.o sos.o -o app.sos
 	rm -f app.o sos.o
 
+# User-space guidemo.sos target
+guidemo.sos: guidemo.c sos.c sos.h
+	@echo "Compiling GUI demo application (guidemo.sos)..."
+	$(USER_CC) -ffreestanding -nostdlib -fno-pie -c sos.c -o sos.o
+	$(USER_CC) -ffreestanding -nostdlib -fno-pie -c guidemo.c -o guidemo.o
+	$(USER_LD) -T app_linker.ld guidemo.o sos.o -o guidemo.sos
+	rm -f guidemo.o sos.o
+
 # Automatic OTA signing: signs uinstruct, kernel.bin, and all files ordered by instructions
-sign: kernel.bin app.sos
+sign: kernel.bin app.sos guidemo.sos
 	@if [ -f sign_update.py ]; then \
 		echo "Generating automatic OTA signatures..."; \
 		python3 sign_update.py; \
 	fi
 
 # Creation of the 64 MB raw FAT32 disk
-drive.img: app.sos kernel.bin
+drive.img: app.sos guidemo.sos kernel.bin
 	@echo "Creation of the 64 MB disk..."
 	dd if=/dev/zero of=drive.img bs=1M count=64 status=none
 	@echo "Formatting in FAT32..."
@@ -65,6 +73,7 @@ drive.img: app.sos kernel.bin
 	
 	@echo "Populating /bin with binaries..."
 	mcopy -i drive.img app.sos ::/bin/
+	mcopy -i drive.img guidemo.sos ::/bin/
 	
 	rm -f passwd
 
@@ -88,5 +97,5 @@ drive.vdi: drive.img
 	qemu-img convert -f raw -O vdi drive.img drive.vdi
 
 clean:
-	rm -f *.o kernel.bin drive.img test.txt app.sos app.bin sos.iso drive.vdi *.sig
+	rm -f *.o kernel.bin drive.img test.txt app.sos guidemo.sos app.bin sos.iso drive.vdi *.sig
 	rm -rf isodir

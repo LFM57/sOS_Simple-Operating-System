@@ -416,3 +416,33 @@ int send(int fd, const void* buf, unsigned int len) {
 int recv(int fd, void* buf, unsigned int len) {
     return read(fd, buf, len);
 }
+
+int win_create(const char* title, int w, int h) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(25), "b"(title), "c"(w), "d"(h) : "memory");
+    return ret;
+}
+
+int win_present(int win_id, const unsigned int* buf) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(26), "b"(win_id), "c"(buf) : "memory");
+    return ret;
+}
+
+int win_get_event(int win_id, gui_event_t* out_ev) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(27), "b"(win_id), "c"(out_ev), "d"(1) : "memory");
+    return ret;
+}
+
+int win_poll_event(int win_id, gui_event_t* out_ev) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(27), "b"(win_id), "c"(out_ev), "d"(0) : "memory");
+    return ret;
+}
+
+int win_destroy(int win_id) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(28), "b"(win_id));
+    return ret;
+}
