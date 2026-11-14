@@ -67,6 +67,8 @@ static int cursor_bg_valid = 0;
 static window_t* dragging_window = NULL;
 static int drag_offset_x = 0;
 static int drag_offset_y = 0;
+static window_t* mouse_capture_window = NULL;
+static uint8_t mouse_capture_buttons = 0;
 
 /* 12x19 32-bit ARGB arrow cursor sprite (0xFF... opaque, 0x00... transparent) */
 #define C_T 0x00000000
@@ -121,6 +123,8 @@ void gui_init(void) {
     }
     window_count = 0;
     dragging_window = NULL;
+    mouse_capture_window = NULL;
+    mouse_capture_buttons = 0;
     mq_head = 0;
     mq_tail = 0;
     prev_mouse_x = mouse_x;
@@ -170,6 +174,8 @@ void gui_lock_screen(void) {
     is_gui_locked = 1;
     power_menu_open = 0;
     dragging_window = NULL;
+    mouse_capture_window = NULL;
+    mouse_capture_buttons = 0;
     lkq_head = 0;
     lkq_tail = 0;
     lock_pass_len = 0;
@@ -365,6 +371,10 @@ void gui_destroy_window(int win_id) {
 
     if (dragging_window == win) {
         dragging_window = NULL;
+    }
+    if (mouse_capture_window == win) {
+        mouse_capture_window = NULL;
+        mouse_capture_buttons = 0;
     }
 
     for (int i = 0; i < window_count; i++) {
@@ -605,6 +615,8 @@ void gui_show_login_screen(void) {
     is_gui_login = 1;
     power_menu_open = 0;
     dragging_window = NULL;
+    mouse_capture_window = NULL;
+    mouse_capture_buttons = 0;
     login_to_text_shell = 0;
     lkq_head = 0;
     lkq_tail = 0;
@@ -819,6 +831,33 @@ static void handle_locked_mouse_step(int mx, int my, uint8_t buttons) {
     prev_buttons = buttons;
 }
 
+static void deliver_captured_mouse_up(int mx, int my, uint8_t button) {
+    uint8_t mask = (button == 1) ? 0x01 : 0x02;
+    if (!(mouse_capture_buttons & mask)) return;
+    mouse_capture_buttons &= (uint8_t)~mask;
+
+    window_t* target = mouse_capture_window;
+    if (mouse_capture_buttons == 0) {
+        mouse_capture_window = NULL;
+    }
+    if (!target || !target->is_used) return;
+
+    int rx = mx - target->x;
+    int ry = my - target->y;
+    if (rx < 0) rx = 0;
+    if (ry < 0) ry = 0;
+    if (rx >= target->width) rx = target->width - 1;
+    if (ry >= target->height) ry = target->height - 1;
+
+    gui_event_t ev;
+    ev.type = GUI_EVENT_MOUSE_UP;
+    ev.x = rx;
+    ev.y = ry;
+    ev.button = button;
+    ev.key = 0;
+    gui_push_event(target, &ev);
+}
+
 static void handle_mouse_step(int mx, int my, uint8_t buttons) {
     uint8_t prev_left = prev_buttons & 0x01;
     uint8_t curr_left = buttons & 0x01;
@@ -974,6 +1013,8 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
 
                     if (mx >= w->x && mx < w->x + w->width &&
                         my >= w->y && my < w->y + w->height) {
+                        mouse_capture_window = w;
+                        mouse_capture_buttons |= 0x01;
                         gui_event_t ev;
                         ev.type = GUI_EVENT_MOUSE_DOWN;
                         ev.x = mx - w->x;
@@ -990,44 +1031,28 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons) {
         if (dragging_window) {
             dragging_window = NULL;
         } else {
-            window_t* top = gui_get_focused_window();
-            if (top && mx >= top->x && mx < top->x + top->width &&
-                my >= top->y && my < top->y + top->height) {
-                gui_event_t ev;
-                ev.type = GUI_EVENT_MOUSE_UP;
-                ev.x = mx - top->x;
-                ev.y = my - top->y;
-                ev.button = 1;
-                ev.key = 0;
-                gui_push_event(top, &ev);
-            }
+            deliver_captured_mouse_up(mx, my, 1);
         }
     }
 
     if (!prev_right && curr_right) {
-        window_t* top = gui_get_focused_window();
-        if (top && mx >= top->x && mx < top->x + top->width &&
-            my >= top->y && my < top->y + top->height) {
-            gui_event_t ev;
-            ev.type = GUI_EVENT_MOUSE_DOWN;
-            ev.x = mx - top->x;
-            ev.y = my - top->y;
-            ev.button = 2;
-            ev.key = 0;
-            gui_push_event(top, &ev);
+        if (!power_menu_open && my < (int)g_height - TASKBAR_HEIGHT) {
+            window_t* top = gui_get_focused_window();
+            if (top && mx >= top->x && mx < top->x + top->width &&
+                my >= top->y && my < top->y + top->height) {
+                mouse_capture_window = top;
+                mouse_capture_buttons |= 0x02;
+                gui_event_t ev;
+                ev.type = GUI_EVENT_MOUSE_DOWN;
+                ev.x = mx - top->x;
+                ev.y = my - top->y;
+                ev.button = 2;
+                ev.key = 0;
+                gui_push_event(top, &ev);
+            }
         }
     } else if (prev_right && !curr_right) {
-        window_t* top = gui_get_focused_window();
-        if (top && mx >= top->x && mx < top->x + top->width &&
-            my >= top->y && my < top->y + top->height) {
-            gui_event_t ev;
-            ev.type = GUI_EVENT_MOUSE_UP;
-            ev.x = mx - top->x;
-            ev.y = my - top->y;
-            ev.button = 2;
-            ev.key = 0;
-            gui_push_event(top, &ev);
-        }
+        deliver_captured_mouse_up(mx, my, 2);
     }
 
     prev_mouse_x = mx;
@@ -1494,6 +1519,8 @@ static void gui_teardown(void) {
     gui_exit_requested = 0;
     gui_terminal_window = NULL;
     dragging_window = NULL;
+    mouse_capture_window = NULL;
+    mouse_capture_buttons = 0;
     gui_compositor_tid = -1;
     mouse_set_callback(NULL);
     irq_restore(eflags);
