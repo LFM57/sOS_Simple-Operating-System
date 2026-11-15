@@ -107,6 +107,8 @@ int arp_resolve(uint8_t* dest_ip, uint8_t* out_mac) {
     }
 
     /* 2. Not in cache: Send ARP Request and wait */
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0" : "=r"(eflags));
     arp_request(target_ip);
     __asm__ volatile ("sti"); /* Important: Enable interrupts so E1000 can receive the reply! */
     
@@ -117,11 +119,13 @@ int arp_resolve(uint8_t* dest_ip, uint8_t* out_mac) {
                 arp_cache[i].ip[0] == target_ip[0] && arp_cache[i].ip[1] == target_ip[1] &&
                 arp_cache[i].ip[2] == target_ip[2] && arp_cache[i].ip[3] == target_ip[3]) {
                 for(int j=0; j<6; j++) out_mac[j] = arp_cache[i].mac[j];
+                __asm__ volatile("push %0; popf" : : "r"(eflags));
                 return 1;
             }
         }
         __asm__ volatile ("hlt");
     }
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
     return 0; /* Timeout */
 }
 /* ------------------------- */
@@ -353,7 +357,25 @@ void net_handle_packet(uint8_t* packet, uint16_t length) {
     
     /* Handle IPv4 */
     else if (raw_type == 0x0800) {
+        if (length < sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t)) return;
         ipv4_hdr_t* ip = (ipv4_hdr_t*)(packet + sizeof(eth_hdr_t));
+
+        /* Refresh ARP cache from incoming IPv4 frames so IRQ replies don't block on ARP */
+        if (sOS_ip[0] != 0 && ip->src_ip[0] != 0 &&
+            !(ip->src_ip[0] == 255 && ip->src_ip[1] == 255 && ip->src_ip[2] == 255 && ip->src_ip[3] == 255)) {
+            int src_is_local = 1;
+            for (int i = 0; i < 4; i++) {
+                if ((ip->src_ip[i] & sOS_subnet[i]) != (sOS_ip[i] & sOS_subnet[i])) {
+                    src_is_local = 0;
+                    break;
+                }
+            }
+            if (src_is_local) {
+                arp_update(ip->src_ip, eth->src_mac);
+            } else if (sOS_router[0] != 0 || sOS_router[1] != 0 || sOS_router[2] != 0 || sOS_router[3] != 0) {
+                arp_update(sOS_router, eth->src_mac);
+            }
+        }
         
         /* Allow Broadcast Packets (Required for DHCP) */
         int is_broadcast = (ip->dst_ip[0] == 255 && ip->dst_ip[1] == 255 && ip->dst_ip[2] == 255 && ip->dst_ip[3] == 255);

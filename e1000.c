@@ -107,9 +107,11 @@ void e1000_transmit(uint8_t* payload, uint16_t length) {
 
 /* This function is called by the boot.s irq_nic assembly wrapper */
 void e1000_handler(void) {
+    /* Acknowledge the interrupt on the Master/Slave PICs before handling packets */
+    if (e1000_irq_line >= 8) outb(0xA0, 0x20);
+    outb(0x20, 0x20);
+
     if (!e1000_installed || !rx_descs) {
-        if (e1000_irq_line >= 8) outb(0xA0, 0x20);
-        outb(0x20, 0x20);
         return;
     }
 
@@ -119,20 +121,30 @@ void e1000_handler(void) {
     /* Loop through descriptors to see if any are marked DONE (0x01) */
     while ((rx_descs[rx_curr].status & 0x01)) { 
         uint16_t len = rx_descs[rx_curr].length;
-
-        /* Call our Network Stack */
         uint8_t* packet_data = (uint8_t*)(uint32_t)rx_descs[rx_curr].addr;
-        net_handle_packet(packet_data, len);
-        
-        /* Tell the card we have consumed the packet */
-        rx_descs[rx_curr].status = 0;
-        e1000_write_reg(0x2818, rx_curr); /* Update Tail */
-        rx_curr = (rx_curr + 1) % NUM_RX_DESC;
+        uint8_t* pkt_copy = (len > 0) ? (uint8_t*)kmalloc(len) : NULL;
+
+        if (pkt_copy) {
+            for (uint16_t i = 0; i < len; i++) {
+                pkt_copy[i] = packet_data[i];
+            }
+
+            /* Tell the card we have consumed the packet before calling network stack */
+            rx_descs[rx_curr].status = 0;
+            e1000_write_reg(0x2818, rx_curr); /* Update Tail */
+            rx_curr = (rx_curr + 1) % NUM_RX_DESC;
+
+            net_handle_packet(pkt_copy, len);
+            kfree(pkt_copy);
+        } else {
+            net_handle_packet(packet_data, len);
+
+            /* Tell the card we have consumed the packet */
+            rx_descs[rx_curr].status = 0;
+            e1000_write_reg(0x2818, rx_curr); /* Update Tail */
+            rx_curr = (rx_curr + 1) % NUM_RX_DESC;
+        }
     }
-    
-    /* Acknowledge the interrupt on the Master/Slave PICs */
-    if (e1000_irq_line >= 8) outb(0xA0, 0x20);
-    outb(0x20, 0x20);
 }
 
 void init_e1000(void) {
