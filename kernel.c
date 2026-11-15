@@ -234,6 +234,11 @@ void sleep_on(wait_queue_t* queue) {
     uint32_t eflags = irq_save_disable();
 
     task_t* t = &tasks[current_task];
+    if (t->state == 3) {
+        irq_restore(eflags);
+        kill_current_task();
+    }
+
     t->wait_node.task = t;
     t->wait_node.next = queue->head;
     queue->head = &t->wait_node;
@@ -247,6 +252,11 @@ void sleep_on(wait_queue_t* queue) {
         remove_wait_node(queue, &t->wait_node);
         t->waiting_on = NULL;
         t->wait_node.next = NULL;
+    }
+
+    if (t->state == 3) {
+        irq_restore(eflags);
+        kill_current_task();
     }
 
     irq_restore(eflags);
