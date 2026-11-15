@@ -10,4 +10,6 @@ wget [ip]/paint.sos /bin/paint.sos
 chmod 70 /bin/paint.sos
 wget [ip]/files.sos /bin/files.sos
 chmod 70 /bin/files.sos
+wget [ip]/sysmon.sos /bin/sysmon.sos
+chmod 70 /bin/sysmon.sos
 wget [ip]/kernel.bin /kernel.bin
