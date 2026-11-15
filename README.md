@@ -31,7 +31,7 @@ sudo apt install build-essential make gcc-i686-linux-gnu binutils-i686-linux-gnu
 
 ### 2. Build the System
 
-A single `make` command compiles the kernel, assembles boot stubs, builds the Ring 3 ELF applications (`app.sos` and `guidemo.sos`), creates and formats a 64 MB FAT32 disk image (`drive.img`) with `/bin` permissions initialized, builds `sos.iso`, exports a VirtualBox-ready virtual disk (`drive.vdi`), and generates OTA signatures when `sign_update.py` is present:
+A single `make` command compiles the kernel, assembles boot stubs, builds the Ring 3 ELF applications in `userland/` (`app.sos`, `paint.sos`, `files.sos`, `sysmon.sos`, `edit.sos`, `calc.sos`), creates and formats a 64 MB FAT32 disk image (`drive.img`) with `/bin` permissions initialized, builds `sos.iso`, exports a VirtualBox-ready virtual disk (`drive.vdi`), and generates OTA signatures when `sign_update.py` is present:
 
 ```bash
 make
@@ -102,13 +102,13 @@ On boot in VBE graphics mode, sOS presents the **sOS Display Manager** (`sOS Log
 * **Graphical Display Manager (`sOS Login`):** Boot and logout screen with username/password fields (`Tab` to switch fields, `Enter` to advance/sign in), session selector (**GUI Desktop** vs **Text Shell**), and **Reboot** / **Shutdown** controls.
 * **Window Manager & Dirty-Rect Compositor (`gui.c`):** Z-order compositor supporting up to `MAX_WINDOWS` (`16`) windows with titlebars, focus switching, cascading Ring 3 window placement, screen-clamped dragging, minimize/restore via taskbar chips, and **dirty-rectangle compositing** with `12x19` cursor save-under (avoiding full 3 MB swaps on cursor-only moves and partial window updates).
 * **Desktop Shell & Controls:**
-  * Built-in draggable **Terminal** (`80x25` characters, `640x400` client area) and taskbar launcher for **Paint** (`/bin/guidemo.sos`).
+  * Built-in draggable **Terminal** (`80x25` characters, `640x400` client area) and dynamic Start Menu / context menu launchers for Ring 3 apps including **Paint** (`/bin/paint.sos`).
   * Taskbar with active/minimized window chips, **`[Lock]`** button, and **`[Power]`** menu (**Text Shell**, **Log Out**, **Reboot**, **Shutdown**).
   * Right-click context menus on the desktop (**New Terminal**, **Open Paint**, **Lock Screen**) and on window titlebars (**Bring to Front**, **Minimize**, **Close**, **New Terminal**).
   * GUI keyboard shortcuts: `Ctrl+L` locks the session; `Ctrl+Q` exits GUI mode to the text shell (blocked while locked).
 * **Compositor-Level Lock Screen:** Full-screen lock overlay drawn above all windows and the taskbar, blocking all window/taskbar interaction and Ring 3 event delivery until the active user's password is verified against `/passwd`, or until **Switch User / Logout** terminates and cleans up all windows and tasks owned by the outgoing UID.
 * **PS/2 Mouse Driver (`mouse.c`):** Interrupt-driven IRQ12 driver with automatic 4-byte IntelliMouse scroll-wheel probing (`mouse_has_wheel`) and 3-byte PS/2 fallback, left/right/middle button tracking, scroll deltas (`dz`), and mouse capture across drags and clicks.
-* **Ring 3 GUI Input & Demo App:** Routes mouse events (move, down, up, scroll) and focused keyboard events (ASCII, special navigation keys `GUI_KEY_*`, `Shift`/`Ctrl`/`Alt` modifiers, and raw Set-1 scancodes) to user-space windows. Ships with `/bin/guidemo.sos` (**sOS Paint**), supporting 6 color swatches, brush drawing, scroll-wheel color cycling, and keyboard shortcuts (`1`–`6`, `C`, `Q`/`Esc`).
+* **Ring 3 GUI Input & Native Apps:** Routes mouse events (move, down, up, scroll) and focused keyboard events (ASCII, special navigation keys `GUI_KEY_*`, `Shift`/`Ctrl`/`Alt` modifiers, and raw Set-1 scancodes) to user-space windows. Ships with `/bin/paint.sos` (**sOS Paint**), `/bin/files.sos` (two-pane FAT32 browser), `/bin/sysmon.sos` (live RAM/heap/task/network monitor with task kill), `/bin/edit.sos` (mouse + keyboard GUI text editor), and `/bin/calc.sos` (GUI calculator).
 
 ### 🌐 Network Stack & Hardware Driver
 * **Intel E1000 Driver:** Direct Memory Mapped I/O (MMIO) and circular DMA descriptor ring buffers (RX/TX) for the Intel PRO/1000 MT Desktop (`82540EM`, `0x8086:0x100E`), acknowledging the PIC cleanly before packet handling.
@@ -125,7 +125,7 @@ On boot in VBE graphics mode, sOS presents the **sOS Display Manager** (`sOS Log
 
 ### 🔒 Cryptographic Over-The-Air (OTA) Updates
 * Native in-kernel implementation of **SHA-256** and **HMAC-SHA256**.
-* Modern command-based update model: fetches an update instructions file (`uinstruct` and `uinstruct.sig`) containing update commands (e.g. `mkdir /bin/`, `wget [ip]/app.sos /bin/app.sos`, `wget [ip]/guidemo.sos /bin/guidemo.sos`, `wget [ip]/kernel.bin /kernel.bin`, `chmod`).
+* Modern command-based update model: fetches an update instructions file (`uinstruct` and `uinstruct.sig`) containing update commands (e.g. `mkdir /bin/`, `wget [ip]/app.sos /bin/app.sos`, `wget [ip]/paint.sos /bin/paint.sos`, `wget [ip]/kernel.bin /kernel.bin`, `chmod`).
 * Automatic HMAC-SHA256 signing (`sign_update.py`) and in-kernel verification for every downloaded file to prevent corruption and tampering.
 * Run `sudo update <server:port>` to download instructions, verify signatures, execute filesystem modifications and payload downloads, create `/updt.flg`, and trigger an automated hardware reboot via the PS/2 controller (`0x64`).
 * Fallback support for legacy single `kernel.bin`/`kernel.sig` updates.
@@ -134,7 +134,7 @@ On boot in VBE graphics mode, sOS presents the **sOS Display Manager** (`sOS Log
 * **Modular VFS Layer:** Unified abstraction routing all file descriptors, standard I/O streams, pipelines, and disk storage through a common `vfs_node_t` interface.
 * **Structured Hierarchy:**
   * `/home/[username]/`: Personal user home directories (`/home/user`, `/home/guest`, etc.) with ownership isolation (`0x30` permissions).
-  * `/bin/`: User application binaries (`/bin/app.sos`, `/bin/guidemo.sos`) initialized with `0x70` permissions at image creation so all users can execute them globally from the shell.
+  * `/bin/`: User application binaries (`/bin/app.sos`, `/bin/paint.sos`, `/bin/files.sos`, `/bin/sysmon.sos`, `/bin/edit.sos`, `/bin/calc.sos`) initialized with `0x70` permissions at image creation so all users can execute them globally from the shell.
   * `/dev/`: Virtual device filesystem (`devfs`) exposing character device nodes:
     * `/dev/null`: Data sink / discard stream.
     * `/dev/zero`: Infinite zero-byte generator.
@@ -310,17 +310,17 @@ void _start() {
 }
 ```
 
-For graphical Ring 3 apps (see `guidemo.c`), create a window with `win_create()`, render into an `unsigned int` ARGB buffer, present updates with `win_present()`, and process mouse/keyboard/close events via `win_get_event()` or `win_poll_event()`.
+For graphical Ring 3 apps (see `userland/paint.c`), create a window with `win_create()`, render into an `unsigned int` ARGB buffer, present updates with `win_present()`, and process mouse/keyboard/close events via `win_get_event()` or `win_poll_event()`.
 
 Compile and run your application:
 ```bash
-# Compilation (handled automatically by the Makefile for app.c and guidemo.c)
+# Compilation (handled automatically by the Makefile for sources in userland/)
 make app.sos
-make guidemo.sos
+make paint.sos
 
 # Run inside sOS:
 run app.sos
-run guidemo.sos
+run paint.sos
 ```
 
 ---
