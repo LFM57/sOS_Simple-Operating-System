@@ -1027,7 +1027,6 @@ typedef struct {
     uint32_t net_col;
     char user_str[20];
     uint32_t user_col;
-    char up_str[20];
     char clk_str[12];
     int total_chars;
 } taskbar_tray_info_t;
@@ -1052,23 +1051,6 @@ static void build_taskbar_tray_info(taskbar_tray_info_t* info) {
     copy_title(info->user_str, current_user[0] ? current_user : "user", sizeof(info->user_str));
     info->user_col = (current_uid == 0) ? 0x00FBBF24 : 0x0038BDF8;
 
-    uint32_t total_sec = timer_ticks / 100;
-    uint32_t hours = total_sec / 3600;
-    uint32_t mins = (total_sec % 3600) / 60;
-    uint32_t secs = total_sec % 60;
-    int up = 0;
-    info->up_str[up++] = 'u';
-    info->up_str[up++] = 'p';
-    info->up_str[up++] = ' ';
-    if (hours > 0) {
-        up += fmt_uint_str(info->up_str + up, hours);
-        info->up_str[up++] = ':';
-    }
-    fmt_2digits(info->up_str + up, (int)mins);
-    up += 2;
-    info->up_str[up++] = ':';
-    fmt_2digits(info->up_str + up, (int)secs);
-
     int h = 0, m = 0, s = 0;
     read_rtc_hms(&h, &m, &s);
     fmt_2digits(info->clk_str, h);
@@ -1080,7 +1062,6 @@ static void build_taskbar_tray_info(taskbar_tray_info_t* info) {
 
     info->total_chars = str_len_local(info->net_str) + 3 +
                         str_len_local(info->user_str) + 3 +
-                        str_len_local(info->up_str) + 3 +
                         str_len_local(info->clk_str);
 }
 
@@ -2355,7 +2336,7 @@ static void draw_taskbar(window_t* focused) {
         chip_x += chip_w + 6;
     }
 
-    /* Right-aligned status tray: Network | User | Uptime | RTC Clock */
+    /* Right-aligned status tray: Network | User | RTC Clock */
     bb_fill_rect(tray_x, bar_y + 4, tray_w, TASKBAR_HEIGHT - 8, 0x001E293B);
     bb_draw_rect_outline(tray_x, bar_y + 4, tray_w, TASKBAR_HEIGHT - 8, 0x00334155);
 
@@ -2367,10 +2348,6 @@ static void draw_taskbar(window_t* focused) {
     tx += 24;
     bb_draw_string_transparent(tray.user_str, tx, ty, tray.user_col);
     tx += str_len_local(tray.user_str) * 8;
-    bb_draw_string_transparent(" | ", tx, ty, 0x00475569);
-    tx += 24;
-    bb_draw_string_transparent(tray.up_str, tx, ty, 0x00CBD5E1);
-    tx += str_len_local(tray.up_str) * 8;
     bb_draw_string_transparent(" | ", tx, ty, 0x00475569);
     tx += 24;
     bb_draw_string_transparent(tray.clk_str, tx, ty, 0x00F8FAFC);
