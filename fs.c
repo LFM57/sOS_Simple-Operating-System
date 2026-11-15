@@ -1130,6 +1130,33 @@ void free_fat_chain(uint32_t cluster) {
     }
 }
 
+static int is_fat_kernel_bin(const uint8_t* fat_name) {
+    static const char expected[11] = "KERNEL  BIN";
+    for (int i = 0; i < 11; i++) {
+        if ((char)fat_name[i] != expected[i]) return 0;
+    }
+    return 1;
+}
+
+static int confirm_kernel_bin_deletion(uint32_t dir_cluster, const fat_dir_entry_t* entry, const char* cancel_msg) {
+    if ((dir_cluster != root_cluster && dir_cluster != 0) ||
+        (entry->attributes & 0x10) ||
+        !is_fat_kernel_bin((const uint8_t*)entry->name)) {
+        return 1;
+    }
+    kprintf("\n[WARNING] You are about to delete the system kernel (/kernel.bin)!\n");
+    kprintf("This is irreversible and will brick the OS upon reboot.\n");
+    kprintf("Proceed? [y/N]: ");
+    extern char wait_key(void);
+    char choice = wait_key();
+    kprintf("%c\n", choice);
+    if (choice != 'y' && choice != 'Y') {
+        kprintf("%s\n", cancel_msg);
+        return 0;
+    }
+    return 1;
+}
+
 void fs_rm(const char* arg1, const char* arg2) {
     int recursive = 0;
     const char* filename = arg1;
@@ -1158,7 +1185,8 @@ void fs_rm(const char* arg1, const char* arg2) {
             return;
         }
 
-        uint32_t cluster = (current_dir_cluster == 0) ? root_cluster : current_dir_cluster;
+        uint32_t dir_cluster = (current_dir_cluster == 0) ? root_cluster : current_dir_cluster;
+        uint32_t cluster = dir_cluster;
         uint32_t sec = data_start + ((cluster - 2) * sectors_per_cluster);
         uint32_t sec_offset = 0;
         uint8_t* sector = (uint8_t*)kmalloc(512);
@@ -1180,22 +1208,10 @@ void fs_rm(const char* arg1, const char* arg2) {
                 format_fat_name(dir[i].name, entry_name);
                 if (entry_name[0] == '.') continue; /* Ignore '.' and '..' */
 
-                /* --- KERNEL.BIN PROTECTION --- */
-                if (entry_name[0]=='k' && entry_name[1]=='e' && entry_name[2]=='r' && entry_name[3]=='n' && 
-                    entry_name[4]=='e' && entry_name[5]=='l' && entry_name[6]=='.' && entry_name[7]=='b' && 
-                    entry_name[8]=='i' && entry_name[9]=='n' && entry_name[10]=='\0') {
-                    kprintf("\n[WARNING] You are about to delete the system kernel (kernel.bin)!\n");
-                    kprintf("This is irreversible and will brick the OS upon reboot.\n");
-                    kprintf("Proceed? [y/N]: ");
-                    extern char wait_key(void);
-                    char choice = wait_key();
-                    kprintf("%c\n", choice);
-                    if (choice != 'y' && choice != 'Y') {
-                        kprintf("Skipped kernel.bin.\n");
-                        continue;
-                    }
+                /* --- KERNEL.BIN PROTECTION (root regular file only) --- */
+                if (!confirm_kernel_bin_deletion(dir_cluster, &dir[i], "Skipped kernel.bin.")) {
+                    continue;
                 }
-                /* -------------------------------------- */
 
                 if (dir[i].attributes & 0x10) {
                     uint32_t sub_cluster = get_cluster(dir[i]);
@@ -1267,23 +1283,6 @@ void fs_rm(const char* arg1, const char* arg2) {
         return;
     }
 
-    /* --- KERNEL.BIN PROTECTION --- */
-    if (target_fat[0]=='K' && target_fat[1]=='E' && target_fat[2]=='R' && target_fat[3]=='N' && 
-        target_fat[4]=='E' && target_fat[5]=='L' && target_fat[6]==' ' && target_fat[7]==' ' && 
-        target_fat[8]=='B' && target_fat[9]=='I' && target_fat[10]=='N') {
-        kprintf("\n[WARNING] You are about to delete the system kernel (kernel.bin)!\n");
-        kprintf("This is irreversible and will brick the OS upon reboot.\n");
-        kprintf("Proceed? [y/N]: ");
-        extern char wait_key(void);
-        char choice = wait_key();
-        kprintf("%c\n", choice);
-        if (choice != 'y' && choice != 'Y') {
-            kprintf("Aborted.\n");
-            return;
-        }
-    }
-    /* -------------------------------------- */
-
     if (!check_current_dir_permission_in(parent_cluster, 1)) {
         kprintf("Error: Permission denied.\n");
         return;
@@ -1299,6 +1298,11 @@ void fs_rm(const char* arg1, const char* arg2) {
     int dir_idx;
     if (!find_entry_in(parent_cluster, target_fat, &entry, &dir_sec, &dir_idx)) {
         kprintf("Error: '%s': No such file or directory.\n", filename);
+        return;
+    }
+
+    /* --- KERNEL.BIN PROTECTION (after security & existence checks, root regular file only) --- */
+    if (!confirm_kernel_bin_deletion(parent_cluster, &entry, "Aborted.")) {
         return;
     }
 
