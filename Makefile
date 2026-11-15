@@ -11,7 +11,7 @@ USER_CC = i686-linux-gnu-gcc
 USER_LD = i686-linux-gnu-ld
 USER_CFLAGS = -ffreestanding -nostdlib -fno-pie -Wall -Wextra -I.
 
-GUI_APPS = paint.sos files.sos sysmon.sos edit.sos
+GUI_APPS = paint.sos files.sos sysmon.sos edit.sos calc.sos
 USER_APPS = app.sos $(GUI_APPS)
 
 OBJS = boot.o print.o memory.o gdt_idt.o disk.o fs.o vfs.o kernel.o pci.o e1000.o net.o crypto.o mouse.o gui.o
