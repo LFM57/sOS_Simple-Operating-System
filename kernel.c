@@ -1513,16 +1513,6 @@ int sys_fork(syscall_frame_t* frame) {
             if (child->open_files[f].node != vfs_get_tty_node()) {
                 child->open_files[f].node->ref_count++;
             }
-            if (child->open_files[f].type == TYPE_PIPE && child->open_files[f].node->private_data) {
-                uint8_t* pdata = (uint8_t*)child->open_files[f].node->private_data;
-                int* readers = (int*)(pdata + 4108);
-                int* writers = (int*)(pdata + 4112);
-                if ((child->open_files[f].flags & 0x03) == O_RDONLY) {
-                    (*readers)++;
-                } else if ((child->open_files[f].flags & 0x03) == O_WRONLY) {
-                    (*writers)++;
-                }
-            }
         }
     }
 
