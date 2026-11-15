@@ -232,7 +232,7 @@ static int is_window_shown(const window_t* w) {
 }
 
 static void get_context_menu_rect(int* mx, int* my, int* mw, int* mh) {
-    int items = (ctx_menu_type == CTX_MENU_WINDOW) ? 4 : 3;
+    int items = (ctx_menu_type == CTX_MENU_WINDOW) ? 3 : 2;
     int w = CTX_MENU_W;
     int h = items * CTX_ITEM_H + 8;
     int x = ctx_menu_x;
@@ -1752,10 +1752,8 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons, int dz) {
                 int item = (my - (cmy + 4)) / CTX_ITEM_H;
                 if (mtype == CTX_MENU_DESKTOP) {
                     if (item == 0) {
-                        gui_show_or_create_terminal();
-                    } else if (item == 1) {
                         gui_launch_demo_app();
-                    } else if (item == 2) {
+                    } else if (item == 1) {
                         gui_lock_screen();
                     }
                 } else if (mtype == CTX_MENU_WINDOW) {
@@ -1773,8 +1771,6 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons, int dz) {
                             ev.button = 1;
                             gui_push_event(tw, &ev);
                         }
-                    } else if (item == 3) {
-                        gui_show_or_create_terminal();
                     }
                 }
                 prev_mouse_x = mx;
@@ -2148,9 +2144,9 @@ static void draw_context_menu(void) {
     bb_draw_rect_outline(cmx, cmy, cmw, cmh, 0x00475569);
 
     if (ctx_menu_type == CTX_MENU_WINDOW) {
-        const char* items[4] = { "Bring to Front", "Minimize", "Close", "New Terminal" };
-        uint32_t colors[4] = { 0x00F8FAFC, 0x00FBBF24, 0x00F87171, 0x0060A5FA };
-        for (int i = 0; i < 4; i++) {
+        const char* items[3] = { "Bring to Front", "Minimize", "Close" };
+        uint32_t colors[3] = { 0x00F8FAFC, 0x00FBBF24, 0x00F87171 };
+        for (int i = 0; i < 3; i++) {
             int iy = cmy + 4 + i * CTX_ITEM_H;
             if (i > 0) {
                 bb_fill_rect(cmx + 8, iy, cmw - 16, 1, 0x001E293B);
@@ -2158,9 +2154,9 @@ static void draw_context_menu(void) {
             bb_draw_string_transparent(items[i], cmx + 12, iy + 5, colors[i]);
         }
     } else {
-        const char* items[3] = { "New Terminal", "Open Paint", "Lock Screen" };
-        uint32_t colors[3] = { 0x0060A5FA, 0x005EEAD4, 0x00FBBF24 };
-        for (int i = 0; i < 3; i++) {
+        const char* items[2] = { "Open Paint", "Lock Screen" };
+        uint32_t colors[2] = { 0x005EEAD4, 0x00FBBF24 };
+        for (int i = 0; i < 2; i++) {
             int iy = cmy + 4 + i * CTX_ITEM_H;
             if (i > 0) {
                 bb_fill_rect(cmx + 8, iy, cmw - 16, 1, 0x001E293B);
