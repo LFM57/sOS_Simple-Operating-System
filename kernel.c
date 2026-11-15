@@ -1431,6 +1431,7 @@ int is_valid_user_ptr(uint32_t ptr) {
 
 int sys_fork(syscall_frame_t* frame) {
     if (current_task < 0 || current_task == IDLE_TASK_ID) return -1;
+    if (!frame || frame->cs != 0x1B) return -1;
 
     uint32_t eflags = irq_save_disable();
     int child_id = -1;
@@ -1528,50 +1529,26 @@ int sys_fork(syscall_frame_t* frame) {
 
     uint32_t* top = (uint32_t*)child->kernel_esp;
 
-    if (frame && frame->cs == 0x1B) {
-        *(--top) = frame->ss;
-        *(--top) = frame->esp;
-        *(--top) = frame->eflags | 0x200;
-        *(--top) = frame->cs;
-        *(--top) = frame->eip;
+    *(--top) = frame->ss;
+    *(--top) = frame->esp;
+    *(--top) = frame->eflags | 0x200;
+    *(--top) = frame->cs;
+    *(--top) = frame->eip;
 
-        /* pusha order (highest addr -> lowest addr): EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI */
-        *(--top) = 0; /* Child returns 0 in EAX */
-        *(--top) = frame->ecx;
-        *(--top) = frame->edx;
-        *(--top) = frame->ebx;
-        *(--top) = 0; /* Ignored ESP slot */
-        *(--top) = frame->ebp;
-        *(--top) = frame->esi;
-        *(--top) = frame->edi;
+    /* pusha order (highest addr -> lowest addr): EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI */
+    *(--top) = 0; /* Child returns 0 in EAX */
+    *(--top) = frame->ecx;
+    *(--top) = frame->edx;
+    *(--top) = frame->ebx;
+    *(--top) = 0; /* Ignored ESP slot */
+    *(--top) = frame->ebp;
+    *(--top) = frame->esi;
+    *(--top) = frame->edi;
 
-        *(--top) = frame->ds;
-        *(--top) = frame->es;
-        *(--top) = frame->fs;
-        *(--top) = frame->gs;
-    } else {
-        uint32_t caller_eip = frame ? frame->eip : (uint32_t)__builtin_return_address(0);
-        uint32_t caller_ebp = frame ? frame->ebp : (uint32_t)__builtin_frame_address(0);
-
-        *(--top) = 0x202;
-        *(--top) = 0x08;
-        *(--top) = caller_eip;
-
-        /* pusha order (highest addr -> lowest addr): EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI */
-        *(--top) = 0; /* Child returns 0 in EAX */
-        *(--top) = frame ? frame->ecx : 0;
-        *(--top) = frame ? frame->edx : 0;
-        *(--top) = frame ? frame->ebx : 0;
-        *(--top) = 0; /* Ignored ESP slot */
-        *(--top) = caller_ebp;
-        *(--top) = frame ? frame->esi : 0;
-        *(--top) = frame ? frame->edi : 0;
-
-        *(--top) = 0x10;
-        *(--top) = 0x10;
-        *(--top) = 0x10;
-        *(--top) = 0x10;
-    }
+    *(--top) = frame->ds;
+    *(--top) = frame->es;
+    *(--top) = frame->fs;
+    *(--top) = frame->gs;
 
     child->esp = (uint32_t)top;
     child->state = 2; /* READY */
@@ -2965,16 +2942,18 @@ static void launch_user_binary(const char* target_binary, int is_bg) {
     }
 }
 
-static void execute_single_command(int is_bg) {
-    /* Save of the parsed buffer */
+static void execute_single_command(const char* cmd_str, int is_bg) {
+    /* Save a local copy of the command string so concurrent pipeline stages don't race */
     char raw_buf[256];
-    custom_strcpy(raw_buf, cmd_buffer);
+    char parse_buf[256];
+    custom_strcpy(raw_buf, cmd_str);
+    custom_strcpy(parse_buf, cmd_str);
 
     char* cmd = NULL;
     char* arg1 = NULL;
     char* arg2 = NULL;
     char* arg_rest = NULL; 
-    char* p = cmd_buffer;
+    char* p = parse_buf;
 
     while(*p == ' ') p++;
     if(*p) cmd = p;
@@ -3607,9 +3586,8 @@ static void execute_single_command(int is_bg) {
                 int i = 0; 
                 while (raw_buf[i] && raw_buf[i] != ' ') i++; 
                 while (raw_buf[i] && raw_buf[i] == ' ') i++; 
-                custom_strcpy(cmd_buffer, &raw_buf[i]);
                 
-                execute_single_command(is_bg); 
+                execute_single_command(&raw_buf[i], is_bg); 
                     
                 /* [SECURITY FIX] Restore credentials only if the session has not been reset */
                 if (!session_reset) {
@@ -4541,8 +4519,7 @@ static void execute_command_with_redirection(char* stage_cmd, int is_bg) {
         syscall_handler(17, (uint32_t)out_fd, 0, 0, NULL);
     }
 
-    custom_strcpy(cmd_buffer, clean_cmd);
-    execute_single_command(is_bg);
+    execute_single_command(clean_cmd, is_bg);
 
     if (saved_out >= 0) {
         syscall_handler(21, (uint32_t)saved_out, 1, 0, NULL);
@@ -4554,59 +4531,123 @@ static void execute_command_with_redirection(char* stage_cmd, int is_bg) {
     }
 }
 
-static void execute_pipeline(char** stages, int num_stages, int is_bg) {
-    int pipes[7][2];
-    int num_pipes = num_stages - 1;
-    int pipe_ok = 1;
+typedef struct {
+    char cmd[256];
+} pipeline_stage_args_t;
 
-    for (int i = 0; i < num_pipes; i++) {
-        pipes[i][0] = -1;
-        pipes[i][1] = -1;
-        if ((int)syscall_handler(20, (uint32_t)pipes[i], 0, 0, NULL) < 0) {
-            kprintf("Error: Failed to create pipe.\n");
-            for (int j = 0; j < i; j++) {
-                syscall_handler(17, (uint32_t)pipes[j][0], 0, 0, NULL);
-                syscall_handler(17, (uint32_t)pipes[j][1], 0, 0, NULL);
-            }
-            pipe_ok = 0;
+static void pipeline_stage_entry(pipeline_stage_args_t* args) {
+    char cmd[256];
+    custom_strcpy(cmd, args->cmd);
+    kfree(args);
+
+    execute_command_with_redirection(cmd, 0);
+    kill_current_task();
+}
+
+static int create_pipeline_stage_task(const char* stage_cmd, vfs_node_t* in_node, vfs_node_t* out_node, int is_bg) {
+    pipeline_stage_args_t* args = (pipeline_stage_args_t*)kmalloc(sizeof(pipeline_stage_args_t));
+    if (!args) return -1;
+    custom_strcpy(args->cmd, stage_cmd);
+
+    uint32_t eflags = irq_save_disable();
+    int id = -1;
+    for (int i = 1; i < IDLE_TASK_ID; i++) {
+        if (tasks[i].state == 0) {
+            id = i;
+            tasks[i].state = 5; /* TASK_INITIALIZING */
             break;
         }
     }
+    irq_restore(eflags);
 
-    if (!pipe_ok) return;
+    if (id == -1) {
+        kfree(args);
+        return -1;
+    }
+
+    uint32_t* stack = (uint32_t*)pmm_alloc_page();
+    if (!stack) {
+        tasks[id].state = 0;
+        kfree(args);
+        return -1;
+    }
+
+    uint32_t* top = (uint32_t*)((uint32_t)stack + 4096);
+    *(--top) = (uint32_t)args;
+    *(--top) = 0;
+    *(--top) = 0x202;
+    *(--top) = 0x08;
+    *(--top) = (uint32_t)pipeline_stage_entry;
+
+    for (int i = 0; i < 8; i++) *(--top) = 0;
+    *(--top) = 0x10; *(--top) = 0x10; *(--top) = 0x10; *(--top) = 0x10;
+
+    tasks[id].esp = (uint32_t)top;
+    tasks[id].kernel_esp = (uint32_t)stack + 4096;
+    tasks[id].kernel_stack = (void*)stack;
+    tasks[id].user_stack = NULL;
+    tasks[id].code_page = NULL;
+    tasks[id].id = id;
+    tasks[id].uid = get_active_uid();
+    tasks[id].page_directory = kernel_page_directory;
+    tasks[id].prog_break = 0;
+    tasks[id].waiting_on = NULL;
+    tasks[id].wait_node.task = &tasks[id];
+    tasks[id].wait_node.next = NULL;
+    tasks[id].is_background = is_bg ? 1 : 0;
+
+    init_task_fds(&tasks[id]);
+    if (in_node) {
+        in_node->ref_count++;
+        tasks[id].open_files[0].is_used = 1;
+        tasks[id].open_files[0].type = TYPE_PIPE;
+        tasks[id].open_files[0].flags = O_RDONLY;
+        tasks[id].open_files[0].offset = 0;
+        tasks[id].open_files[0].node = in_node;
+    }
+    if (out_node) {
+        out_node->ref_count++;
+        tasks[id].open_files[1].is_used = 1;
+        tasks[id].open_files[1].type = TYPE_PIPE;
+        tasks[id].open_files[1].flags = O_WRONLY;
+        tasks[id].open_files[1].offset = 0;
+        tasks[id].open_files[1].node = out_node;
+    }
+
+    tasks[id].state = 2; /* READY */
+    return id;
+}
+
+static void execute_pipeline(char** stages, int num_stages, int is_bg) {
+    vfs_node_t* pipe_r[7] = {0};
+    vfs_node_t* pipe_w[7] = {0};
+    int num_pipes = num_stages - 1;
+
+    for (int i = 0; i < num_pipes; i++) {
+        if (vfs_create_pipe(&pipe_r[i], &pipe_w[i]) < 0) {
+            kprintf("Error: Failed to create pipe.\n");
+            for (int j = 0; j < i; j++) {
+                vfs_close(pipe_r[j]);
+                vfs_close(pipe_w[j]);
+            }
+            return;
+        }
+    }
 
     int pids[8];
     for (int s = 0; s < num_stages; s++) {
-        int pid = sys_fork(NULL);
-        if (pid < 0) {
-            kprintf("Error: Failed to fork pipeline stage %d.\n", s);
-            pids[s] = -1;
-            continue;
+        vfs_node_t* in_node = (s > 0) ? pipe_r[s - 1] : NULL;
+        vfs_node_t* out_node = (s < num_stages - 1) ? pipe_w[s] : NULL;
+        pids[s] = create_pipeline_stage_task(stages[s], in_node, out_node, is_bg);
+        if (pids[s] < 0) {
+            kprintf("Error: Failed to spawn pipeline stage %d.\n", s);
         }
-        if (pid == 0) {
-            /* Child process s */
-            if (s > 0) {
-                syscall_handler(21, (uint32_t)pipes[s - 1][0], 0, 0, NULL);
-            }
-            if (s < num_stages - 1) {
-                syscall_handler(21, (uint32_t)pipes[s][1], 1, 0, NULL);
-            }
-            for (int i = 0; i < num_pipes; i++) {
-                syscall_handler(17, (uint32_t)pipes[i][0], 0, 0, NULL);
-                syscall_handler(17, (uint32_t)pipes[i][1], 0, 0, NULL);
-            }
-
-            execute_command_with_redirection(stages[s], 0);
-
-            kill_current_task();
-        }
-        pids[s] = pid;
     }
 
-    /* Parent closes all pipe ends */
+    /* Parent drops its references to all pipe ends */
     for (int i = 0; i < num_pipes; i++) {
-        syscall_handler(17, (uint32_t)pipes[i][0], 0, 0, NULL);
-        syscall_handler(17, (uint32_t)pipes[i][1], 0, 0, NULL);
+        vfs_close(pipe_r[i]);
+        vfs_close(pipe_w[i]);
     }
 
     /* Parent waits for all children if foreground */
@@ -4616,6 +4657,8 @@ static void execute_pipeline(char** stages, int num_stages, int is_bg) {
                 sys_waitpid(pids[s], NULL, 0);
             }
         }
+    } else {
+        kprintf("[Pipeline launched in background]\n");
     }
 }
 
