@@ -56,7 +56,7 @@ qemu-system-i386 -m 64M -boot d -cdrom sos.iso \
                  -net nic,model=e1000 -net user
 ```
 
-> **Boot Modes (GRUB):** By default, `sos.iso` boots in VBE `1024x768x32` graphics mode into the **sOS Display Manager** (`sOS Login`). Choose **`sOS - Text Login Mode`** in GRUB (or pass `text`, `nogui`, or `textlogin` on the kernel command line) to boot directly to the text-mode login prompt.
+> **Boot Modes (GRUB):** By default, `sos.iso` boots in VBE `1024x768x32` graphics mode into the **sOS Display Manager** (`sOS Login`) after a brief 2-second hidden GRUB pause. Hold `Shift` or press `Esc` / `F4` during that pause to open the GRUB menu and choose **`sOS - Text Login Mode`** (or pass `text`, `nogui`, or `textlogin` on the kernel command line) to boot directly to the text-mode login prompt.
 
 ### Option B: Running in VirtualBox
 
