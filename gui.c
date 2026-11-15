@@ -209,6 +209,20 @@ static void get_window_frame_rect(const window_t* w, int* fx, int* fy, int* fw, 
     *fh = decorated ? (w->height + TITLEBAR_HEIGHT + 4) : w->height;
 }
 
+static void get_window_titlebar_buttons(const window_t* w, int* min_x, int* max_x, int* close_x, int* has_close) {
+    int show_close = (w != gui_terminal_window);
+    *has_close = show_close;
+    if (show_close) {
+        *close_x = w->x + w->width - 20;
+        *max_x = w->x + w->width - 40;
+        *min_x = w->x + w->width - 60;
+    } else {
+        *close_x = -1;
+        *max_x = w->x + w->width - 20;
+        *min_x = w->x + w->width - 40;
+    }
+}
+
 static void gui_dirty_screen_rect_locked(int x, int y, int w, int h) {
     add_rect_to_list(screen_dirty_rects, &screen_dirty_count, MAX_DIRTY_RECTS, x, y, w, h);
     gui_dirty = 1;
@@ -1887,20 +1901,15 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons, int dz) {
                     gui_focus_window(w);
 
                     if (decorated) {
-                        int close_x = w->x + w->width - 20;
-                        int max_x = w->x + w->width - 40;
-                        int min_x = w->x + w->width - 60;
+                        int min_x, max_x, close_x, has_close;
+                        get_window_titlebar_buttons(w, &min_x, &max_x, &close_x, &has_close);
                         int btn_y = w->y - TITLEBAR_HEIGHT + 4;
                         if (my >= btn_y && my < btn_y + 16) {
-                            if (mx >= close_x && mx < close_x + 16) {
-                                if (w == gui_terminal_window) {
-                                    gui_minimize_window(w);
-                                } else {
-                                    gui_event_t ev = {0};
-                                    ev.type = GUI_EVENT_WINDOW_CLOSE;
-                                    ev.button = 1;
-                                    gui_push_event(w, &ev);
-                                }
+                            if (has_close && mx >= close_x && mx < close_x + 16) {
+                                gui_event_t ev = {0};
+                                ev.type = GUI_EVENT_WINDOW_CLOSE;
+                                ev.button = 1;
+                                gui_push_event(w, &ev);
                                 break;
                             } else if (mx >= max_x && mx < max_x + 16) {
                                 gui_toggle_maximize_window(w);
@@ -2311,7 +2320,8 @@ static void draw_taskbar(window_t* focused) {
 }
 
 static void draw_window_title_clipped(window_t* w) {
-    int max_chars = (w->width - 74) / 8;
+    int reserve = (w == gui_terminal_window) ? 54 : 74;
+    int max_chars = (w->width - reserve) / 8;
     if (max_chars <= 0) return;
 
     int x = w->x + 8;
@@ -2520,10 +2530,9 @@ static void draw_window_complete(window_t* w, int is_focused) {
         bb_fill_rect(w->x, w->y - TITLEBAR_HEIGHT, w->width, TITLEBAR_HEIGHT, title_col);
         draw_window_title_clipped(w);
 
-        /* Minimize [_], Maximize [□], Close [X] buttons */
-        int close_x = w->x + w->width - 20;
-        int max_x = w->x + w->width - 40;
-        int min_x = w->x + w->width - 60;
+        /* Minimize [_], Maximize [□], and (for user apps) Close [X] buttons */
+        int min_x, max_x, close_x, has_close;
+        get_window_titlebar_buttons(w, &min_x, &max_x, &close_x, &has_close);
         int btn_y = w->y - TITLEBAR_HEIGHT + 4;
         uint32_t btn_bg = is_focused ? 0x001D4ED8 : 0x00334155;
         uint32_t btn_border = is_focused ? 0x0060A5FA : 0x0064748B;
@@ -2543,8 +2552,10 @@ static void draw_window_complete(window_t* w, int is_focused) {
             bb_fill_rect(max_x + 3, btn_y + 3, 10, 2, 0x00FFFFFF);
         }
 
-        bb_fill_rect(close_x, btn_y, 16, 16, 0x00EF4444);
-        bb_draw_char_transparent('X', close_x + 4, btn_y, 0x00FFFFFF);
+        if (has_close) {
+            bb_fill_rect(close_x, btn_y, 16, 16, 0x00EF4444);
+            bb_draw_char_transparent('X', close_x + 4, btn_y, 0x00FFFFFF);
+        }
 
         /* Subtle bottom-right corner resize indicator on the 2px frame */
         if (!(w->flags & WIN_MAXIMIZED)) {
