@@ -107,7 +107,11 @@ void e1000_transmit(uint8_t* payload, uint16_t length) {
 
 /* This function is called by the boot.s irq_nic assembly wrapper */
 void e1000_handler(void) {
-    if (!e1000_installed || !rx_descs) return;
+    if (!e1000_installed || !rx_descs) {
+        if (e1000_irq_line >= 8) outb(0xA0, 0x20);
+        outb(0x20, 0x20);
+        return;
+    }
 
     /* Read ICR to clear the interrupt on the card */
     e1000_read_reg(0x00C0);
@@ -214,15 +218,17 @@ void init_e1000(void) {
     e1000_irq_line = irq;
     idt_set_gate(32 + irq, (uint32_t)irq_nic, 0x08, 0x8E);
 
+    /* Mark installed and clear any pending interrupts before unmasking/enabling */
+    e1000_installed = 1;
+    e1000_read_reg(0x00C0);
+
+    /* Enable specific interrupts on the E1000 (IMS Register) */
+    e1000_write_reg(0x00D0, 0x1F6DC);
+
     /* Unmask the IRQ on the PIC */
     pic_enable_irq(irq);
     if (irq >= 8) {
         pic_enable_irq(2); /* Enable Slave cascade on Master PIC */
     }
-
-    /* Enable specific interrupts on the E1000 (IMS Register) */
-    e1000_write_reg(0x00D0, 0x1F6DC); 
-    e1000_read_reg(0x00C0); /* Clear any pending interrupts */
-    e1000_installed = 1;
     kprintf("\n[INFO] Intel E1000 Initialization complete!\n");
 }
