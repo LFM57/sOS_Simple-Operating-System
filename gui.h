@@ -13,6 +13,7 @@
 #define WIN_DECORATED 0x02
 #define WIN_BUILTIN   0x04
 #define WIN_MINIMIZED 0x08
+#define WIN_MAXIMIZED 0x10
 
 #define GUI_MOD_SHIFT 0x01
 #define GUI_MOD_CTRL  0x02
@@ -39,7 +40,8 @@ typedef enum {
     GUI_EVENT_MOUSE_MOVE,
     GUI_EVENT_KEY_PRESS,
     GUI_EVENT_WINDOW_CLOSE,
-    GUI_EVENT_MOUSE_SCROLL
+    GUI_EVENT_MOUSE_SCROLL,
+    GUI_EVENT_WINDOW_RESIZE
 } gui_event_type_t;
 
 typedef struct {
@@ -50,6 +52,7 @@ typedef struct {
     uint8_t modifiers; /* GUI_MOD_SHIFT | GUI_MOD_CTRL | GUI_MOD_ALT */
     uint8_t scancode;  /* Set-1 make scancode (0x80 bit set for E0-extended keys) */
     int dz;            /* Scroll wheel delta */
+    int width, height; /* New client dimensions for GUI_EVENT_WINDOW_RESIZE */
 } gui_event_t;
 
 typedef struct window {
@@ -57,6 +60,8 @@ typedef struct window {
     int is_used;
     int x, y;
     int width, height;     /* Client area dimensions */
+    int saved_x, saved_y;  /* Pre-maximize position */
+    int saved_width, saved_height; /* Pre-maximize dimensions */
     char title[64];
     uint32_t flags;        /* WIN_DECORATED, WIN_VISIBLE, WIN_BUILTIN */
     uint32_t owner_pid;

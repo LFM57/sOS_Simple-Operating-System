@@ -66,6 +66,8 @@ void bb_blit_surface(const uint32_t* src, int src_w, int src_h, int dst_x, int d
 void bb_set_clip(int x, int y, int w, int h);
 void bb_reset_clip(void);
 void surface_draw_char(uint32_t* surface, int surf_w, int surf_h, char c, int x, int y, uint32_t fg_color, uint32_t bg_color);
+void gui_terminal_before_resize(void);
+void gui_terminal_after_resize(void);
 extern int is_graphics_mode;
 extern int is_gui_mode;
 extern uint32_t term_fg_color;

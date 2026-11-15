@@ -431,6 +431,25 @@ static void gui_term_draw_cursor(void) {
     term_cursor_drawn = 1;
 }
 
+void gui_terminal_before_resize(void) {
+    if (!is_graphics_mode || !is_gui_mode) return;
+    gui_term_erase_cursor();
+}
+
+void gui_terminal_after_resize(void) {
+    if (!is_graphics_mode || !is_gui_mode || !gui_terminal_window || !gui_terminal_window->canvas) return;
+    int term_cols = gui_terminal_window->width / 8;
+    int term_rows = gui_terminal_window->height / 16;
+    if (term_cols < 1) term_cols = 1;
+    if (term_rows < 1) term_rows = 1;
+    if (cursor_x >= term_cols) cursor_x = term_cols - 1;
+    if (cursor_x < 0) cursor_x = 0;
+    if (cursor_y < 0) cursor_y = 0;
+    scroll();
+    if (cursor_y >= term_rows) cursor_y = term_rows - 1;
+    gui_term_draw_cursor();
+}
+
 void write_vga(char c) {
     if (ansi_state == 0) {
         if (c == '\033') {
