@@ -440,12 +440,71 @@ void gui_mark_window_dirty(window_t* w, int x, int y, int width, int height) {
     wake_up(&gui_wait_queue);
 }
 
-int gui_create_window(const char* title, int x, int y, int w, int h, uint32_t flags, uint32_t owner_pid) {
+static int alloc_window_canvas(int w, int h, void** out_alloc, uint32_t** out_canvas) {
     if (w <= 0 || h <= 0 || w > 2048 || h > 2048) return -1;
-
     uint32_t buf_bytes = (uint32_t)w * (uint32_t)h * 4U;
-    uint32_t* canvas = (uint32_t*)kmalloc(buf_bytes);
-    if (!canvas) return -1;
+    uint32_t num_pages = (buf_bytes + 4095U) / 4096U;
+    if (num_pages == 0 || num_pages * 4096U > USER_WIN_MAP_STRIDE) return -1;
+
+    void* raw = kmalloc(num_pages * 4096U + 4096U);
+    if (!raw) return -1;
+    uint32_t aligned = ((uint32_t)raw + 4095U) & ~4095U;
+    *out_alloc = raw;
+    *out_canvas = (uint32_t*)aligned;
+    return 0;
+}
+
+static int gui_map_canvas_into_task(window_t* win, uint32_t task_id) {
+    if (!win || !win->canvas || task_id == 0 || task_id >= (MAX_TASKS - 1)) return -1;
+    if (tasks[task_id].state == 0 || !tasks[task_id].page_directory ||
+        tasks[task_id].page_directory == kernel_page_directory) {
+        return -1;
+    }
+
+    uint32_t buf_bytes = (uint32_t)win->width * (uint32_t)win->height * 4U;
+    uint32_t num_pages = (buf_bytes + 4095U) / 4096U;
+    if (num_pages == 0 || num_pages * 4096U > USER_WIN_MAP_STRIDE) return -1;
+
+    uint32_t base = USER_WIN_MAP_BASE + (uint32_t)win->id * USER_WIN_MAP_STRIDE;
+    uint32_t* pd = tasks[task_id].page_directory;
+    uint32_t old_pages = win->mapped_pages;
+
+    for (uint32_t p = 0; p < num_pages; p++) {
+        uint32_t phys = virt_to_phys_pd(kernel_page_directory, (uint32_t)win->canvas + p * 4096U);
+        if (!phys || map_page_pd(pd, base + p * 4096U, phys, 0x07) < 0) {
+            for (uint32_t q = 0; q < p; q++) {
+                unmap_page_pd(pd, base + q * 4096U);
+            }
+            return -1;
+        }
+    }
+
+    for (uint32_t p = num_pages; p < old_pages; p++) {
+        unmap_page_pd(pd, base + p * 4096U);
+    }
+
+    win->mapped_addr = base;
+    win->mapped_pages = num_pages;
+    return 0;
+}
+
+static void gui_unmap_window_from_task(window_t* win) {
+    if (!win || win->mapped_addr == 0 || win->mapped_pages == 0) return;
+    uint32_t pid = win->owner_pid;
+    if (pid > 0 && pid < (MAX_TASKS - 1) && tasks[pid].state != 0 &&
+        tasks[pid].page_directory && tasks[pid].page_directory != kernel_page_directory) {
+        for (uint32_t p = 0; p < win->mapped_pages; p++) {
+            unmap_page_pd(tasks[pid].page_directory, win->mapped_addr + p * 4096U);
+        }
+    }
+    win->mapped_addr = 0;
+    win->mapped_pages = 0;
+}
+
+int gui_create_window(const char* title, int x, int y, int w, int h, uint32_t flags, uint32_t owner_pid) {
+    void* canvas_alloc = NULL;
+    uint32_t* canvas = NULL;
+    if (alloc_window_canvas(w, h, &canvas_alloc, &canvas) < 0) return -1;
 
     for (uint32_t i = 0; i < (uint32_t)w * (uint32_t)h; i++) {
         canvas[i] = 0x00F8FAFC; /* Clean light default surface */
@@ -462,7 +521,7 @@ int gui_create_window(const char* title, int x, int y, int w, int h, uint32_t fl
 
     if (slot == -1 || window_count >= MAX_WINDOWS) {
         irq_restore(eflags);
-        kfree(canvas);
+        kfree(canvas_alloc);
         return -1;
     }
 
@@ -488,6 +547,9 @@ int gui_create_window(const char* title, int x, int y, int w, int h, uint32_t fl
         win->owner_uid = current_uid;
     }
     win->canvas = canvas;
+    win->canvas_alloc = canvas_alloc;
+    win->mapped_addr = 0;
+    win->mapped_pages = 0;
     win->dirty = 0;
     win->dirty_x = 0;
     win->dirty_y = 0;
@@ -536,23 +598,34 @@ int gui_create_user_window(const char* title, int w, int h, uint32_t owner_pid) 
     return win_id;
 }
 
-int gui_present_window(int win_id, const uint32_t* buf, uint32_t owner_pid) {
+int gui_present_window_rect(int win_id, const uint32_t* buf, int rx, int ry, int rw, int rh, uint32_t owner_pid) {
     if (!is_gui_mode || !buf) return -1;
     window_t* win = gui_get_window(win_id);
     if (!win || win->owner_pid != owner_pid || (win->flags & WIN_BUILTIN) || !win->canvas) {
         return -1;
     }
 
-    int w = win->width;
-    int h = win->height;
-    int min_x = w, min_y = h;
+    int win_w = win->width;
+    int win_h = win->height;
+    if (rx < 0) { rw += rx; rx = 0; }
+    if (ry < 0) { rh += ry; ry = 0; }
+    if (rx + rw > win_w) rw = win_w - rx;
+    if (ry + rh > win_h) rh = win_h - ry;
+    if (rw <= 0 || rh <= 0) return 0;
+
+    if ((uint32_t)buf == win->mapped_addr && win->mapped_addr != 0) {
+        gui_mark_window_dirty(win, rx, ry, rw, rh);
+        return 0;
+    }
+
+    int min_x = win_w, min_y = win_h;
     int max_x = -1, max_y = -1;
 
     uint32_t eflags = irq_save_disable();
-    for (int y = 0; y < h; y++) {
-        uint32_t* dst_row = win->canvas + (y * w);
-        const uint32_t* src_row = buf + (y * w);
-        for (int x = 0; x < w; x++) {
+    for (int y = ry; y < ry + rh; y++) {
+        uint32_t* dst_row = win->canvas + (y * win_w);
+        const uint32_t* src_row = buf + (y * win_w);
+        for (int x = rx; x < rx + rw; x++) {
             uint32_t px = src_row[x];
             if (dst_row[x] != px) {
                 dst_row[x] = px;
@@ -567,6 +640,56 @@ int gui_present_window(int win_id, const uint32_t* buf, uint32_t owner_pid) {
 
     if (max_x >= min_x && max_y >= min_y) {
         gui_mark_window_dirty(win, min_x, min_y, max_x - min_x + 1, max_y - min_y + 1);
+    }
+    return 0;
+}
+
+int gui_present_window(int win_id, const uint32_t* buf, uint32_t owner_pid) {
+    window_t* win = gui_get_window(win_id);
+    if (!win) return -1;
+    return gui_present_window_rect(win_id, buf, 0, 0, win->width, win->height, owner_pid);
+}
+
+void* gui_map_window(int win_id, uint32_t owner_pid) {
+    if (!is_gui_mode) return NULL;
+    window_t* win = gui_get_window(win_id);
+    if (!win || win->owner_pid != owner_pid || (win->flags & WIN_BUILTIN) || !win->canvas) {
+        return NULL;
+    }
+    if (gui_map_canvas_into_task(win, owner_pid) < 0) {
+        return NULL;
+    }
+    return (void*)win->mapped_addr;
+}
+
+int gui_invalidate_window(int win_id, int x, int y, int w, int h, uint32_t owner_pid) {
+    if (!is_gui_mode) return -1;
+    window_t* win = gui_get_window(win_id);
+    if (!win || win->owner_pid != owner_pid || (win->flags & WIN_BUILTIN) || !win->canvas) {
+        return -1;
+    }
+    if (w <= 0 || h <= 0) {
+        x = 0;
+        y = 0;
+        w = win->width;
+        h = win->height;
+    }
+    gui_mark_window_dirty(win, x, y, w, h);
+    return 0;
+}
+
+int gui_is_mapped_user_range(int task_id, uint32_t ptr, uint32_t size) {
+    if (task_id <= 0 || task_id >= (MAX_TASKS - 1)) return 0;
+    if (ptr + size < ptr) return 0;
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        window_t* win = &windows[i];
+        if (win->is_used && win->owner_pid == (uint32_t)task_id &&
+            win->mapped_addr != 0 && win->mapped_pages > 0) {
+            uint32_t end = win->mapped_addr + win->mapped_pages * 4096U;
+            if (ptr >= win->mapped_addr && (ptr + size) <= end) {
+                return 1;
+            }
+        }
     }
     return 0;
 }
@@ -681,8 +804,11 @@ void gui_destroy_window(int win_id) {
         }
     }
 
-    uint32_t* old_canvas = win->canvas;
+    gui_unmap_window_from_task(win);
+
+    void* old_canvas_alloc = win->canvas_alloc;
     win->canvas = NULL;
+    win->canvas_alloc = NULL;
     win->is_used = 0;
     win->dirty = 0;
     win->dirty_x = 0;
@@ -712,8 +838,8 @@ void gui_destroy_window(int win_id) {
     gui_dirty = 1;
     irq_restore(eflags);
 
-    if (old_canvas) {
-        kfree(old_canvas);
+    if (old_canvas_alloc) {
+        kfree(old_canvas_alloc);
     }
     wake_up(&gui_wait_queue);
 }
@@ -1502,12 +1628,11 @@ static void gui_resize_window(window_t* w, int new_x, int new_y, int new_w, int 
 
     int size_changed = (new_w != w->width || new_h != w->height);
     uint32_t* new_canvas = NULL;
-    uint32_t* old_canvas = NULL;
+    void* new_canvas_alloc = NULL;
+    void* old_canvas_alloc = NULL;
 
     if (size_changed) {
-        uint32_t buf_bytes = (uint32_t)new_w * (uint32_t)new_h * 4U;
-        new_canvas = (uint32_t*)kmalloc(buf_bytes);
-        if (!new_canvas) return;
+        if (alloc_window_canvas(new_w, new_h, &new_canvas_alloc, &new_canvas) < 0) return;
 
         uint32_t bg_fill = (w == gui_terminal_window) ? term_bg_color : 0x00F8FAFC;
         uint32_t total_px = (uint32_t)new_w * (uint32_t)new_h;
@@ -1539,11 +1664,15 @@ static void gui_resize_window(window_t* w, int new_x, int new_y, int new_w, int 
     w->x = new_x;
     w->y = new_y;
     if (size_changed) {
-        old_canvas = w->canvas;
+        old_canvas_alloc = w->canvas_alloc;
         w->canvas = new_canvas;
+        w->canvas_alloc = new_canvas_alloc;
         w->width = new_w;
         w->height = new_h;
         w->dirty = 0;
+        if (w->mapped_addr != 0) {
+            gui_map_canvas_into_task(w, w->owner_pid);
+        }
         if (w == gui_terminal_window) {
             gui_terminal_after_resize();
         }
@@ -1561,8 +1690,8 @@ static void gui_resize_window(window_t* w, int new_x, int new_y, int new_w, int 
     gui_dirty = 1;
     irq_restore(eflags);
 
-    if (old_canvas) {
-        kfree(old_canvas);
+    if (old_canvas_alloc) {
+        kfree(old_canvas_alloc);
     }
 
     if (size_changed && !(w->flags & WIN_BUILTIN)) {

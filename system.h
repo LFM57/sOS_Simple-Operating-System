@@ -95,6 +95,9 @@ void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags);
 void set_kernel_stack(uint32_t stack);
 
 /* --- Memory --- */
+#define USER_WIN_MAP_BASE   0x0C000000U
+#define USER_WIN_MAP_STRIDE 0x00400000U
+
 extern uint32_t _kernel_end;
 extern uint32_t total_ram_kb;
 extern uint32_t kernel_page_directory[1024];
@@ -106,6 +109,8 @@ void init_heap();
 void* kmalloc(size_t size);
 void kfree(void* ptr);
 int map_page_pd(uint32_t* pd, uint32_t virt, uint32_t phys, uint32_t flags);
+void unmap_page_pd(uint32_t* pd, uint32_t virt);
+uint32_t virt_to_phys_pd(uint32_t* pd, uint32_t virt);
 int map_page(uint32_t virt, uint32_t phys);
 int is_valid_user_ptr(uint32_t ptr);
 int is_valid_user_range(uint32_t ptr, uint32_t size);

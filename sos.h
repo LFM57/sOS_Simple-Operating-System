@@ -108,6 +108,9 @@ typedef struct {
 
 int win_create(const char* title, int w, int h);
 int win_present(int win_id, const unsigned int* buf);
+int win_present_rect(int win_id, const unsigned int* buf, int x, int y, int w, int h);
+unsigned int* win_map(int win_id);
+int win_invalidate(int win_id, int x, int y, int w, int h);
 int win_get_event(int win_id, gui_event_t* out_ev);
 int win_poll_event(int win_id, gui_event_t* out_ev);
 int win_destroy(int win_id);

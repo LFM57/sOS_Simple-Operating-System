@@ -409,6 +409,24 @@ uint32_t schedule(uint32_t current_esp) {
     return tasks[current_task].esp;
 }
 
+static void free_user_page_tables(uint32_t* pd, int clear_entries) {
+    uint32_t win_pdi_start = USER_WIN_MAP_BASE >> 22;
+    for (int i = 31; i < 64; i++) {
+        if (pd[i] & 0x01) {
+            uint32_t* pt = (uint32_t*)(pd[i] & 0xFFFFF000);
+            if (i < (int)win_pdi_start) {
+                for (int j = 0; j < 1024; j++) {
+                    if (pt[j] & 0x01) pmm_free_page((void*)(pt[j] & 0xFFFFF000));
+                }
+            }
+            pmm_free_page((void*)pt);
+            if (clear_entries) {
+                pd[i] = 0x02;
+            }
+        }
+    }
+}
+
 void cleanup_task_memory(int id) {
     if (id == IDLE_TASK_ID) return;
 
@@ -443,20 +461,8 @@ void cleanup_task_memory(int id) {
     }
 
     if (tasks[id].page_directory != kernel_page_directory && tasks[id].page_directory != NULL) {
-        uint32_t* pd = tasks[id].page_directory;
-        
-        /* [FIX MODIFICATION] Change upper limit from 1024 to 64. 
-           Indices 31 to 63 are User Space. Index 64+ is Kernel Space */
-        for (int i = 31; i < 64; i++) {
-            if (pd[i] & 0x01) {
-                uint32_t* pt = (uint32_t*)(pd[i] & 0xFFFFF000);
-                for (int j = 0; j < 1024; j++) {
-                    if (pt[j] & 0x01) pmm_free_page((void*)(pt[j] & 0xFFFFF000));
-                }
-                pmm_free_page((void*)pt);
-            }
-        }
-        pmm_free_page(pd);
+        free_user_page_tables(tasks[id].page_directory, 0);
+        pmm_free_page(tasks[id].page_directory);
     } else {
         if (tasks[id].code_page) pmm_free_page(tasks[id].code_page);
         if (tasks[id].user_stack) pmm_free_page(tasks[id].user_stack);
@@ -1386,8 +1392,8 @@ uint32_t sys_sbrk(int increment) {
 
     uint32_t new_break = old_break + increment;
 
-    /* [FIX ADDITION] Prevent user heap from growing into kernel space */
-    if (new_break >= 0x10000000 || new_break < old_break) {
+    /* [FIX ADDITION] Prevent user heap from growing into mapped windows or kernel space */
+    if (new_break >= USER_WIN_MAP_BASE || new_break < old_break) {
         return (uint32_t)-1;
     }
 
@@ -1426,6 +1432,11 @@ int is_valid_user_range(uint32_t ptr, uint32_t size) {
     
     // Case 2: The range lies entirely within the user code/heap space
     if (ptr >= app_start && (ptr + size) <= app_end) {
+        return 1;
+    }
+
+    // Case 3: The range lies within a win_map()-ed window canvas owned by current_task
+    if (gui_is_mapped_user_range(current_task, ptr, size)) {
         return 1;
     }
     
@@ -1515,10 +1526,11 @@ int sys_fork(syscall_frame_t* frame) {
     for (int i = 0; i < 1024; i++) child_pd[i] = kernel_page_directory[i];
     child->page_directory = child_pd;
 
-    /* Deep copy parent user-space pages */
+    /* Deep copy parent user-space pages (excluding shared win_map aperture) */
     if (parent->page_directory != kernel_page_directory && parent->page_directory != NULL) {
         uint32_t* parent_pd = parent->page_directory;
-        for (int pdi = 31; pdi < 64; pdi++) {
+        int win_pdi_start = (int)(USER_WIN_MAP_BASE >> 22);
+        for (int pdi = 31; pdi < win_pdi_start; pdi++) {
             if (parent_pd[pdi] & 0x01) {
                 uint32_t* parent_pt = (uint32_t*)(parent_pd[pdi] & 0xFFFFF000);
                 for (int pti = 0; pti < 1024; pti++) {
@@ -1744,22 +1756,13 @@ int sys_execve(const char* path, char* const argv[], char* const envp[]) {
         }
     }
 
+    gui_destroy_windows_by_pid((uint32_t)current_task);
+
     task_t* cur = &tasks[current_task];
     uint32_t* pd = cur->page_directory;
 
     if (pd != kernel_page_directory && pd != NULL) {
-        for (int pdi = 31; pdi < 64; pdi++) {
-            if (pd[pdi] & 0x01) {
-                uint32_t* pt = (uint32_t*)(pd[pdi] & 0xFFFFF000);
-                for (int pti = 0; pti < 1024; pti++) {
-                    if (pt[pti] & 0x01) {
-                        pmm_free_page((void*)(pt[pti] & 0xFFFFF000));
-                    }
-                }
-                pmm_free_page((void*)pt);
-                pd[pdi] = 0x02;
-            }
-        }
+        free_user_page_tables(pd, 1);
     } else {
         pd = (uint32_t*)pmm_alloc_page();
         if (!pd) {

@@ -714,6 +714,58 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         int win_id = (int)arg1;
         return (uint32_t)gui_destroy_user_window(win_id, (uint32_t)current_task);
     }
+    else if (syscall_num == 29) {
+        /* Syscall 29: int win_present_rect(int win_id, const win_rect_args_t* args) */
+        typedef struct {
+            const uint32_t* buf;
+            int x, y, w, h;
+        } win_rect_args_t;
+
+        int win_id = (int)arg1;
+        const win_rect_args_t* args = (const win_rect_args_t*)arg2;
+        if (!is_valid_user_range((uint32_t)args, sizeof(win_rect_args_t))) return (uint32_t)-1;
+        if (!args->buf) return (uint32_t)-1;
+
+        window_t* win = gui_get_window(win_id);
+        if (!win || win->width <= 0 || win->height <= 0) return (uint32_t)-1;
+
+        int rx = args->x;
+        int ry = args->y;
+        int rw = args->w;
+        int rh = args->h;
+        if (rx < 0) { rw += rx; rx = 0; }
+        if (ry < 0) { rh += ry; ry = 0; }
+        if (rx + rw > win->width) rw = win->width - rx;
+        if (ry + rh > win->height) rh = win->height - ry;
+        if (rw <= 0 || rh <= 0) return 0;
+
+        uint32_t base = (uint32_t)args->buf;
+        uint32_t row_bytes = (uint32_t)rw * 4U;
+        for (int row = ry; row < ry + rh; row++) {
+            uint32_t px_off = (uint32_t)row * (uint32_t)win->width + (uint32_t)rx;
+            if (px_off > 0xFFFFFFFFU / 4U) return (uint32_t)-1;
+            uint32_t byte_off = px_off * 4U;
+            if (base + byte_off < base) return (uint32_t)-1;
+            if (!is_valid_user_range(base + byte_off, row_bytes)) return (uint32_t)-1;
+        }
+        return (uint32_t)gui_present_window_rect(win_id, args->buf, rx, ry, rw, rh, (uint32_t)current_task);
+    }
+    else if (syscall_num == 30) {
+        /* Syscall 30: void* win_map(int win_id) */
+        int win_id = (int)arg1;
+        return (uint32_t)gui_map_window(win_id, (uint32_t)current_task);
+    }
+    else if (syscall_num == 31) {
+        /* Syscall 31: int win_invalidate(int win_id, const gui_rect_t* rect) */
+        typedef struct {
+            int x, y, w, h;
+        } win_inv_rect_t;
+
+        int win_id = (int)arg1;
+        const win_inv_rect_t* rect = (const win_inv_rect_t*)arg2;
+        if (!is_valid_user_range((uint32_t)rect, sizeof(win_inv_rect_t))) return (uint32_t)-1;
+        return (uint32_t)gui_invalidate_window(win_id, rect->x, rect->y, rect->w, rect->h, (uint32_t)current_task);
+    }
     
     return (uint32_t)-1;
 }

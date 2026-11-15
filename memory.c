@@ -97,6 +97,26 @@ int map_page_pd(uint32_t* pd, uint32_t virt, uint32_t phys, uint32_t flags) {
     return 0;
 }
 
+void unmap_page_pd(uint32_t* pd, uint32_t virt) {
+    if (!pd) return;
+    uint32_t pdi = virt >> 22;
+    uint32_t pti = (virt >> 12) & 0x03FF;
+    if (!(pd[pdi] & 0x01)) return;
+    uint32_t* table = (uint32_t*)(pd[pdi] & 0xFFFFF000);
+    table[pti] = 0;
+    __asm__ volatile("invlpg (%0)" ::"r" (virt) : "memory");
+}
+
+uint32_t virt_to_phys_pd(uint32_t* pd, uint32_t virt) {
+    if (!pd) return 0;
+    uint32_t pdi = virt >> 22;
+    uint32_t pti = (virt >> 12) & 0x03FF;
+    if (!(pd[pdi] & 0x01)) return 0;
+    uint32_t* table = (uint32_t*)(pd[pdi] & 0xFFFFF000);
+    if (!(table[pti] & 0x01)) return 0;
+    return (table[pti] & 0xFFFFF000) | (virt & 0x0FFF);
+}
+
 int map_page(uint32_t virt, uint32_t phys) {
     return map_page_pd(kernel_page_directory, virt, phys, 0x03);
 }

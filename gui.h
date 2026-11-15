@@ -66,7 +66,10 @@ typedef struct window {
     uint32_t flags;        /* WIN_DECORATED, WIN_VISIBLE, WIN_BUILTIN */
     uint32_t owner_pid;
     uint8_t owner_uid;
-    uint32_t* canvas;      /* Pixel buffer: width * height * 4 bytes (kmalloc) */
+    uint32_t* canvas;      /* Pixel buffer: width * height * 4 bytes (page-aligned) */
+    void* canvas_alloc;    /* Raw kmalloc pointer for canvas */
+    uint32_t mapped_addr;  /* User-space virtual address if win_map()-ed */
+    uint32_t mapped_pages; /* Number of 4KB pages mapped in user PD */
 
     /* Per-window dirty bounding box (client-relative) */
     int dirty;
@@ -100,6 +103,10 @@ void gui_login_on_key_press(char ascii);
 int gui_create_window(const char* title, int x, int y, int w, int h, uint32_t flags, uint32_t owner_pid);
 int gui_create_user_window(const char* title, int w, int h, uint32_t owner_pid);
 int gui_present_window(int win_id, const uint32_t* buf, uint32_t owner_pid);
+int gui_present_window_rect(int win_id, const uint32_t* buf, int x, int y, int w, int h, uint32_t owner_pid);
+void* gui_map_window(int win_id, uint32_t owner_pid);
+int gui_invalidate_window(int win_id, int x, int y, int w, int h, uint32_t owner_pid);
+int gui_is_mapped_user_range(int task_id, uint32_t ptr, uint32_t size);
 int gui_get_window_event(int win_id, gui_event_t* out_ev, uint32_t owner_pid, int blocking);
 int gui_destroy_user_window(int win_id, uint32_t owner_pid);
 void gui_destroy_window(int win_id);

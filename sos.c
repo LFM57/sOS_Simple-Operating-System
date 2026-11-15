@@ -589,9 +589,47 @@ int win_create(const char* title, int w, int h) {
     return ret;
 }
 
+typedef struct {
+    const unsigned int* buf;
+    int x, y, w, h;
+} win_rect_args_t;
+
+typedef struct {
+    int x, y, w, h;
+} gui_rect_args_t;
+
 int win_present(int win_id, const unsigned int* buf) {
     int ret;
     __asm__ volatile("int $0x80" : "=a"(ret) : "a"(26), "b"(win_id), "c"(buf) : "memory");
+    return ret;
+}
+
+int win_present_rect(int win_id, const unsigned int* buf, int x, int y, int w, int h) {
+    win_rect_args_t args;
+    args.buf = buf;
+    args.x = x;
+    args.y = y;
+    args.w = w;
+    args.h = h;
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(29), "b"(win_id), "c"(&args) : "memory");
+    return ret;
+}
+
+unsigned int* win_map(int win_id) {
+    unsigned int* ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(30), "b"(win_id) : "memory");
+    return ret;
+}
+
+int win_invalidate(int win_id, int x, int y, int w, int h) {
+    gui_rect_args_t rect;
+    rect.x = x;
+    rect.y = y;
+    rect.w = w;
+    rect.h = h;
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(31), "b"(win_id), "c"(&rect) : "memory");
     return ret;
 }
 
