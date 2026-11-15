@@ -117,9 +117,9 @@ static unsigned int* resize_fallback_buf(unsigned int* buf, int old_w, int old_h
 }
 
 void _start() {
-    int win = win_create("sOS Paint (Ring 3)", INIT_WIN_W, INIT_WIN_H);
+    int win = win_create("sOS Paint", INIT_WIN_W, INIT_WIN_H);
     if (win < 0) {
-        print("guidemo: Failed to create GUI window (is GUI running?).\n");
+        print("paint: Failed to create GUI window (is GUI running?).\n");
         exit(1);
     }
 

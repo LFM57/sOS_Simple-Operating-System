@@ -3,6 +3,9 @@
 # [ip] or [server] is automatically replaced with the update server's host:port
 
 mkdir /bin/
+chmod 70 /bin
 wget [ip]/app.sos /bin/app.sos
-wget [ip]/guidemo.sos /bin/guidemo.sos
+chmod 70 /bin/app.sos
+wget [ip]/paint.sos /bin/paint.sos
+chmod 70 /bin/paint.sos
 wget [ip]/kernel.bin /kernel.bin

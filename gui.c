@@ -750,7 +750,7 @@ static void gui_launch_bin_app(const char* filename) {
 }
 
 static void gui_launch_demo_app(void) {
-    gui_launch_bin_app("guidemo.sos");
+    gui_launch_bin_app("paint.sos");
 }
 
 void gui_destroy_window(int win_id) {

@@ -39,7 +39,7 @@ void _start() {
 
     print("[5] Waiting for server response...\n\n");
     
-    /* FIX: Allocate the large buffer on the heap instead of the stack! */
+    /* Allocate the large buffer on the heap instead of the stack */
     char* rx_buf = (char*)malloc(8192);
     if (!rx_buf) {
         print("[ERROR] Out of memory!\n");
@@ -49,7 +49,6 @@ void _start() {
     
     int attempts = 0;
     while (attempts < 100) { /* 100 * 50ms = 5 sec timeout */
-        /* Note: we pass 8191 manually since sizeof(rx_buf) is now just the size of a pointer */
         int len = read(sock, rx_buf, 8191); 
         if (len > 0) {
             rx_buf[len] = '\0'; /* Null-terminate for safe printing */
@@ -66,6 +65,7 @@ void _start() {
         print("[ERROR] Timeout waiting for HTTP response.\n");
     }
 
+    free(rx_buf);
     close(sock);
     print("\nDownload Complete.\n");
     exit(0);

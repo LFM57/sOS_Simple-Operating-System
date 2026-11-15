@@ -9,6 +9,10 @@ LDFLAGS = -T linker.ld
 # Cross-compiler for the user application (Ring 3)
 USER_CC = i686-linux-gnu-gcc
 USER_LD = i686-linux-gnu-ld
+USER_CFLAGS = -ffreestanding -nostdlib -fno-pie -Wall -Wextra -I.
+
+GUI_APPS = paint.sos
+USER_APPS = app.sos $(GUI_APPS)
 
 OBJS = boot.o print.o memory.o gdt_idt.o disk.o fs.o vfs.o kernel.o pci.o e1000.o net.o crypto.o mouse.o gui.o
 
@@ -25,32 +29,32 @@ kernel.bin: $(OBJS)
 %.o: %.s
 	$(AS) $(ASFLAGS) $< -o $@
 
-# User-space app.sos target
-app.sos: app.c sos.c
+# User-space app.sos target (console app)
+app.sos: userland/app.c sos.c sos.h app_linker.ld
 	@echo "Compiling user application (app.sos)..."
-	$(USER_CC) -ffreestanding -nostdlib -fno-pie -c sos.c -o sos.o
-	$(USER_CC) -ffreestanding -nostdlib -fno-pie -c app.c -o app.o
-	$(USER_LD) -T app_linker.ld app.o sos.o -o app.sos
+	$(USER_CC) $(USER_CFLAGS) -c sos.c -o sos.o
+	$(USER_CC) $(USER_CFLAGS) -c $< -o app.o
+	$(USER_LD) -T app_linker.ld app.o sos.o -o $@
 	rm -f app.o sos.o
 
-# User-space guidemo.sos target
-guidemo.sos: guidemo.c libgui.c libgui.h sos.c sos.h font8x16.h
-	@echo "Compiling GUI demo application (guidemo.sos)..."
-	$(USER_CC) -ffreestanding -nostdlib -fno-pie -c sos.c -o sos.o
-	$(USER_CC) -ffreestanding -nostdlib -fno-pie -c libgui.c -o libgui.o
-	$(USER_CC) -ffreestanding -nostdlib -fno-pie -c guidemo.c -o guidemo.o
-	$(USER_LD) -T app_linker.ld guidemo.o libgui.o sos.o -o guidemo.sos
-	rm -f guidemo.o libgui.o sos.o
+# User-space GUI apps
+$(GUI_APPS): %.sos: userland/%.c libgui.c libgui.h sos.c sos.h font8x16.h app_linker.ld
+	@echo "Compiling GUI application ($@)..."
+	$(USER_CC) $(USER_CFLAGS) -c sos.c -o sos.o
+	$(USER_CC) $(USER_CFLAGS) -c libgui.c -o libgui.o
+	$(USER_CC) $(USER_CFLAGS) -c $< -o $*.o
+	$(USER_LD) -T app_linker.ld $*.o libgui.o sos.o -o $@
+	rm -f $*.o libgui.o sos.o
 
 # Automatic OTA signing: signs uinstruct, kernel.bin, and all files ordered by instructions
-sign: kernel.bin app.sos guidemo.sos
+sign: kernel.bin $(USER_APPS)
 	@if [ -f sign_update.py ]; then \
 		echo "Generating automatic OTA signatures..."; \
 		python3 sign_update.py; \
 	fi
 
 # Creation of the 64 MB raw FAT32 disk
-drive.img: app.sos guidemo.sos kernel.bin
+drive.img: $(USER_APPS) kernel.bin
 	@echo "Creation of the 64 MB disk..."
 	dd if=/dev/zero of=drive.img bs=1M count=64 status=none
 	@echo "Formatting in FAT32..."
@@ -73,8 +77,7 @@ drive.img: app.sos guidemo.sos kernel.bin
 	mmd -i drive.img ::/dev
 	
 	@echo "Populating /bin with binaries..."
-	mcopy -i drive.img app.sos ::/bin/
-	mcopy -i drive.img guidemo.sos ::/bin/
+	for app in $(USER_APPS); do mcopy -i drive.img $$app ::/bin/; done
 	
 	@echo "Setting /bin permissions (0x70, owner UID 0)..."
 	@python3 -c '\
@@ -120,5 +123,5 @@ drive.vdi: drive.img
 	qemu-img convert -f raw -O vdi drive.img drive.vdi
 
 clean:
-	rm -f *.o kernel.bin drive.img test.txt app.sos guidemo.sos app.bin sos.iso drive.vdi *.sig
+	rm -f *.o kernel.bin drive.img test.txt $(USER_APPS) guidemo.sos app.bin sos.iso drive.vdi *.sig
 	rm -rf isodir
