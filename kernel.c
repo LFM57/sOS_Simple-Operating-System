@@ -946,6 +946,40 @@ void handle_input_char(char c) {
 volatile int shift_active = 0; /* Follows Shift state in RAM */
 volatile int alt_active = 0;   /* Follows Alt state in RAM */
 
+#define CLIPBOARD_MAX_BYTES 4096
+static char kernel_clipboard[CLIPBOARD_MAX_BYTES];
+static int kernel_clipboard_len = 0;
+
+int clipboard_set(const char* text, int len) {
+    if (!text) return -1;
+    if (len < 0) {
+        len = 0;
+        while (text[len] && len < CLIPBOARD_MAX_BYTES - 1) len++;
+    }
+    if (len > CLIPBOARD_MAX_BYTES - 1) len = CLIPBOARD_MAX_BYTES - 1;
+    uint32_t eflags = irq_save_disable();
+    for (int i = 0; i < len; i++) {
+        kernel_clipboard[i] = text[i];
+    }
+    kernel_clipboard[len] = '\0';
+    kernel_clipboard_len = len;
+    irq_restore(eflags);
+    return len;
+}
+
+int clipboard_get(char* buf, int max_len) {
+    if (!buf || max_len <= 0) return -1;
+    uint32_t eflags = irq_save_disable();
+    int copy_len = kernel_clipboard_len;
+    if (copy_len > max_len - 1) copy_len = max_len - 1;
+    for (int i = 0; i < copy_len; i++) {
+        buf[i] = kernel_clipboard[i];
+    }
+    buf[copy_len] = '\0';
+    irq_restore(eflags);
+    return copy_len;
+}
+
 void keyboard_handler() {
     static int kbd_e0_prefix = 0;
     uint8_t scancode = inb(0x60);
@@ -1086,6 +1120,22 @@ void keyboard_handler() {
             }
             uint8_t encoded_scancode = (uint8_t)(scancode | (is_e0 ? 0x80 : 0));
             gui_on_key_press(gui_key, modifiers, encoded_scancode);
+        } else if (ctrl_active && !alt_active && shift_active && scancode == 0x2E &&
+                   (!is_gui_mode || (gui_terminal_window && (gui_terminal_window->flags & WIN_VISIBLE) &&
+                    gui_get_focused_window() == gui_terminal_window))) {
+            clipboard_set(cmd_buffer, cmd_idx);
+        } else if (ctrl_active && !alt_active && scancode == 0x2F &&
+                   (!is_gui_mode || (gui_terminal_window && (gui_terminal_window->flags & WIN_VISIBLE) &&
+                    gui_get_focused_window() == gui_terminal_window))) {
+            for (int ci = 0; ci < kernel_clipboard_len; ci++) {
+                char pc = kernel_clipboard[ci];
+                if (!shell_input_enabled || is_kernel_gets_active) {
+                    kbd_buf_put(pc);
+                } else if (pc >= 32 && pc <= 126) {
+                    handle_input_char(pc);
+                }
+            }
+            wake_up(&console_queue);
         } else if (ascii != 0) {
             /* Scenario 1: A foreground task is running */
             if (ascii == 3 && fg_task != -1 && tasks[fg_task].state != 0) {
@@ -1193,7 +1243,78 @@ void background_loop() {
     }
 }
 
-int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
+#define MAX_EXEC_ARGS    16
+#define MAX_EXEC_ARG_LEN 128
+
+static int copy_user_argv(const char* fallback_arg0, char* const argv[], char out_args[][MAX_EXEC_ARG_LEN]) {
+    int argc = 0;
+    if (argv) {
+        for (int i = 0; i < MAX_EXEC_ARGS; i++) {
+            if (!is_valid_user_range((uint32_t)(argv + i), sizeof(char*))) return -1;
+            const char* arg = argv[i];
+            if (!arg) break;
+            if (!is_valid_user_string(arg)) return -1;
+            int j = 0;
+            while (arg[j] && j < MAX_EXEC_ARG_LEN - 1) {
+                out_args[argc][j] = arg[j];
+                j++;
+            }
+            out_args[argc][j] = '\0';
+            argc++;
+        }
+    } else if (fallback_arg0) {
+        int j = 0;
+        while (fallback_arg0[j] && j < MAX_EXEC_ARG_LEN - 1) {
+            out_args[0][j] = fallback_arg0[j];
+            j++;
+        }
+        out_args[0][j] = '\0';
+        argc = 1;
+    }
+    return argc;
+}
+
+static uint32_t build_user_stack_args(uint32_t* ustack_phys, uint32_t ustack_virt,
+                                      int argc, char args[][MAX_EXEC_ARG_LEN]) {
+    uint8_t* stack_bytes = (uint8_t*)ustack_phys;
+    uint32_t sp = 4096;
+    uint32_t arg_vaddrs[MAX_EXEC_ARGS];
+
+    if (argc < 0) argc = 0;
+    if (argc > MAX_EXEC_ARGS) argc = MAX_EXEC_ARGS;
+
+    for (int i = argc - 1; i >= 0; i--) {
+        uint32_t len = 0;
+        while (args[i][len]) len++;
+        len++;
+        if (sp < len + 128) {
+            argc = i;
+            break;
+        }
+        sp -= len;
+        for (uint32_t k = 0; k < len; k++) {
+            stack_bytes[sp + k] = (uint8_t)args[i][k];
+        }
+        arg_vaddrs[i] = ustack_virt + sp;
+    }
+
+    sp &= ~3U;
+    uint32_t* top = (uint32_t*)(stack_bytes + sp);
+    *(--top) = 0; /* argv[argc] = NULL */
+    for (int i = argc - 1; i >= 0; i--) {
+        *(--top) = arg_vaddrs[i];
+    }
+    uint32_t argv_ptr = ustack_virt + (uint32_t)((uint8_t*)top - stack_bytes);
+
+    *(--top) = argv_ptr;
+    *(--top) = (uint32_t)argc;
+    *(--top) = 0; /* Dummy return address for _start(int argc, char** argv) */
+
+    return ustack_virt + (uint32_t)((uint8_t*)top - stack_bytes);
+}
+
+static int create_user_task_with_args(uint8_t* elf_buffer, uint32_t elf_size,
+                                      int argc, char args[][MAX_EXEC_ARG_LEN]) {
     /* 1. ELF Header Validation */
     if (!elf_buffer || elf_size < sizeof(Elf32_Ehdr)) {
         kprintf("Error: Invalid ELF size!\n");
@@ -1225,7 +1346,7 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
                 kprintf("Error: ELF segment exceeds file bounds or memsz!\n");
                 return -1;
             }
-            if (vaddr < 0x08000000 || vaddr >= 0x10000000 || memsz > 0x10000000 - vaddr) {
+            if (vaddr < 0x08000000 || vaddr >= USER_WIN_MAP_BASE || memsz > USER_WIN_MAP_BASE - vaddr) {
                 kprintf("Error: ELF segment out of bounds or overlaps kernel space.\n");
                 return -1;
             }
@@ -1341,10 +1462,11 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
     }
 
     /* 7. Prepare the kernel stack (starting context for IRET) */
+    uint32_t user_esp = build_user_stack_args(ustack, ustack_virt, argc, args);
     uint32_t* top = (uint32_t*)((uint32_t)kstack + 4096);
 
     *(--top) = 0x23;                     
-    *(--top) = ustack_virt + 4096;  
+    *(--top) = user_esp;  
     *(--top) = 0x202;                    
     *(--top) = 0x1B;                     
     *(--top) = header->e_entry;  /* The starting address is the actual ELF entry point */
@@ -1383,6 +1505,10 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
     }
 
     return id; 
+}
+
+int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
+    return create_user_task_with_args(elf_buffer, elf_size, 0, NULL);
 }
 
 uint32_t sys_sbrk(int increment) {
@@ -1703,7 +1829,6 @@ int resolve_binary_path(const char* input, char* out_path, uint32_t max_len) {
 }
 
 int sys_execve(const char* path, char* const argv[], char* const envp[]) {
-    (void)argv;
     (void)envp;
     if (!path) return -1;
     if (current_task < 0 || current_task == IDLE_TASK_ID) return -1;
@@ -1716,24 +1841,36 @@ int sys_execve(const char* path, char* const argv[], char* const envp[]) {
         return -1;
     }
 
+    char (*kargs)[MAX_EXEC_ARG_LEN] = (char (*)[MAX_EXEC_ARG_LEN])kmalloc(MAX_EXEC_ARGS * MAX_EXEC_ARG_LEN);
+    if (!kargs) return -1;
+    int argc = copy_user_argv(resolved_path, argv, kargs);
+    if (argc < 0) {
+        kfree(kargs);
+        return -1;
+    }
+
     if (!fs_load_file(resolved_path, &elf_buf, &elf_size)) {
+        kfree(kargs);
         return -1;
     }
 
     if (elf_size < sizeof(Elf32_Ehdr)) {
         kfree(elf_buf);
+        kfree(kargs);
         return -1;
     }
     Elf32_Ehdr* header = (Elf32_Ehdr*)elf_buf;
     if (header->e_ident[0] != 0x7F || header->e_ident[1] != 'E' ||
         header->e_ident[2] != 'L' || header->e_ident[3] != 'F') {
         kfree(elf_buf);
+        kfree(kargs);
         return -1;
     }
 
     uint32_t ph_table_size = (uint32_t)header->e_phnum * sizeof(Elf32_Phdr);
     if (header->e_phoff > elf_size || ph_table_size > elf_size - header->e_phoff) {
         kfree(elf_buf);
+        kfree(kargs);
         return -1;
     }
 
@@ -1747,10 +1884,12 @@ int sys_execve(const char* path, char* const argv[], char* const envp[]) {
 
             if (filesz > memsz || offset > elf_size || filesz > elf_size - offset) {
                 kfree(elf_buf);
+                kfree(kargs);
                 return -1;
             }
-            if (vaddr < 0x08000000 || vaddr >= 0x10000000 || memsz > 0x10000000 - vaddr) {
+            if (vaddr < 0x08000000 || vaddr >= USER_WIN_MAP_BASE || memsz > USER_WIN_MAP_BASE - vaddr) {
                 kfree(elf_buf);
+                kfree(kargs);
                 return -1;
             }
         }
@@ -1767,6 +1906,7 @@ int sys_execve(const char* path, char* const argv[], char* const envp[]) {
         pd = (uint32_t*)pmm_alloc_page();
         if (!pd) {
             kfree(elf_buf);
+            kfree(kargs);
             return -1;
         }
         for (int i = 0; i < 1024; i++) pd[i] = kernel_page_directory[i];
@@ -1788,12 +1928,14 @@ int sys_execve(const char* path, char* const argv[], char* const envp[]) {
                 void* phys = pmm_alloc_page();
                 if (!phys) {
                     kfree(elf_buf);
+                    kfree(kargs);
                     return -1;
                 }
                 for (int k = 0; k < 1024; k++) ((uint32_t*)phys)[k] = 0;
                 if (map_page_pd(pd, page, (uint32_t)phys, 0x07) < 0) {
                     pmm_free_page(phys);
                     kfree(elf_buf);
+                    kfree(kargs);
                     return -1;
                 }
             }
@@ -1819,16 +1961,21 @@ int sys_execve(const char* path, char* const argv[], char* const envp[]) {
     uint32_t* ustack = (uint32_t*)pmm_alloc_page();
     if (!ustack) {
         kfree(elf_buf);
+        kfree(kargs);
         return -1;
     }
     for (int k = 0; k < 1024; k++) ustack[k] = 0;
     if (map_page_pd(pd, ustack_virt, (uint32_t)ustack, 0x07) < 0) {
         pmm_free_page(ustack);
         kfree(elf_buf);
+        kfree(kargs);
         return -1;
     }
     cur->user_stack = (void*)ustack;
     cur->prog_break = (max_vaddr + 4095) & 0xFFFFF000;
+
+    uint32_t user_esp = build_user_stack_args(ustack, ustack_virt, argc, kargs);
+    kfree(kargs);
 
     __asm__ volatile("mov %0, %%cr3" :: "r"(pd));
 
@@ -1838,9 +1985,41 @@ int sys_execve(const char* path, char* const argv[], char* const envp[]) {
     set_kernel_stack(cur->kernel_esp);
 
     extern void switch_to_user_mode(uint32_t entry_point, uint32_t stack_top);
-    switch_to_user_mode(entry, ustack_virt + 4096);
+    switch_to_user_mode(entry, user_esp);
 
     return 0;
+}
+
+int sys_spawn(const char* path, char* const argv[]) {
+    if (!path) return -1;
+
+    char resolved_path[128];
+    if (!resolve_binary_path(path, resolved_path, sizeof(resolved_path))) {
+        return -1;
+    }
+
+    char (*kargs)[MAX_EXEC_ARG_LEN] = (char (*)[MAX_EXEC_ARG_LEN])kmalloc(MAX_EXEC_ARGS * MAX_EXEC_ARG_LEN);
+    if (!kargs) return -1;
+    int argc = copy_user_argv(resolved_path, argv, kargs);
+    if (argc < 0) {
+        kfree(kargs);
+        return -1;
+    }
+
+    uint8_t* elf_buf = NULL;
+    uint32_t elf_size = 0;
+    if (!fs_load_file(resolved_path, &elf_buf, &elf_size)) {
+        kfree(kargs);
+        return -1;
+    }
+
+    int task_id = create_user_task_with_args(elf_buf, elf_size, argc, kargs);
+    kfree(elf_buf);
+    kfree(kargs);
+    if (task_id != -1) {
+        tasks[task_id].is_background = 1;
+    }
+    return task_id;
 }
 
 int edit_distance_is_one(const char* s1, const char* s2) {

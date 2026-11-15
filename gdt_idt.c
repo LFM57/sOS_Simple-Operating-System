@@ -1,6 +1,7 @@
 #include "system.h"
 #include "net.h"
 #include "gui.h"
+#include "e1000.h"
 
 extern void gdt_flush(uint32_t);
 extern void idt_flush(uint32_t);
@@ -765,6 +766,136 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         const win_inv_rect_t* rect = (const win_inv_rect_t*)arg2;
         if (!is_valid_user_range((uint32_t)rect, sizeof(win_inv_rect_t))) return (uint32_t)-1;
         return (uint32_t)gui_invalidate_window(win_id, rect->x, rect->y, rect->w, rect->h, (uint32_t)current_task);
+    }
+    else if (syscall_num == 32) {
+        /* Syscall 32: int opendir(const char* path) */
+        const char* path = (const char*)arg1;
+        if (!is_valid_user_string(path)) return (uint32_t)-1;
+
+        int fd = -1;
+        for (int i = 3; i < MAX_OPEN_FILES; i++) {
+            if (!tasks[current_task].open_files[i].is_used) {
+                fd = i;
+                break;
+            }
+        }
+        if (fd == -1) return (uint32_t)-1;
+
+        vfs_node_t* node = vfs_open(path, O_RDONLY);
+        if (!node) return (uint32_t)-1;
+        if (node->type != VFS_DIRECTORY) {
+            vfs_close(node);
+            return (uint32_t)-1;
+        }
+
+        tasks[current_task].open_files[fd].is_used = 1;
+        tasks[current_task].open_files[fd].type = TYPE_DIR;
+        tasks[current_task].open_files[fd].flags = O_RDONLY;
+        tasks[current_task].open_files[fd].offset = 0;
+        tasks[current_task].open_files[fd].node = node;
+        return (uint32_t)fd;
+    }
+    else if (syscall_num == 33) {
+        /* Syscall 33: int readdir(int dir_fd, vfs_dirent_t* out_dirent) */
+        int dir_fd = (int)arg1;
+        vfs_dirent_t* out_dirent = (vfs_dirent_t*)arg2;
+        if (!is_valid_user_range((uint32_t)out_dirent, sizeof(vfs_dirent_t))) return (uint32_t)-1;
+        if (dir_fd < 0 || dir_fd >= MAX_OPEN_FILES || !tasks[current_task].open_files[dir_fd].is_used) {
+            return (uint32_t)-1;
+        }
+        file_descriptor_t* fd_entry = &tasks[current_task].open_files[dir_fd];
+        if (fd_entry->type != TYPE_DIR || !fd_entry->node) {
+            return (uint32_t)-1;
+        }
+
+        vfs_dirent_t entry;
+        if (!vfs_readdir(fd_entry->node, fd_entry->offset, &entry)) {
+            return 0;
+        }
+        fd_entry->offset++;
+        *out_dirent = entry;
+        return 1;
+    }
+    else if (syscall_num == 34) {
+        /* Syscall 34: int stat(const char* path, sos_stat_t* out_stat) */
+        const char* path = (const char*)arg1;
+        sos_stat_t* out_stat = (sos_stat_t*)arg2;
+        if (!is_valid_user_string(path)) return (uint32_t)-1;
+        if (!is_valid_user_range((uint32_t)out_stat, sizeof(sos_stat_t))) return (uint32_t)-1;
+
+        vfs_node_t* node = vfs_open(path, O_RDONLY);
+        if (!node) return (uint32_t)-1;
+
+        out_stat->size = node->size;
+        out_stat->type = node->type;
+        out_stat->sec_byte = node->sec_byte;
+        out_stat->_pad = 0;
+        out_stat->inode = node->inode;
+        vfs_close(node);
+        return 0;
+    }
+    else if (syscall_num == 35) {
+        /* Syscall 35: int spawn(const char* path, char* const argv[]) */
+        const char* path = (const char*)arg1;
+        char* const* argv = (char* const*)arg2;
+        if (!is_valid_user_string(path)) return (uint32_t)-1;
+        return (uint32_t)sys_spawn(path, argv);
+    }
+    else if (syscall_num == 36) {
+        /* Syscall 36: int sysinfo(sos_sysinfo_t* info) */
+        sos_sysinfo_t* info = (sos_sysinfo_t*)arg1;
+        if (!is_valid_user_range((uint32_t)info, sizeof(sos_sysinfo_t))) return (uint32_t)-1;
+
+        uint8_t* raw = (uint8_t*)info;
+        for (uint32_t i = 0; i < sizeof(sos_sysinfo_t); i++) raw[i] = 0;
+
+        get_pmm_stats(&info->total_ram_kb, &info->used_ram_kb, &info->free_ram_kb);
+        get_heap_stats(&info->heap_total_bytes, &info->heap_used_bytes, &info->heap_free_bytes);
+        extern volatile uint32_t timer_ticks;
+        info->uptime_ticks = timer_ticks;
+
+        for (int i = 0; i < 4; i++) {
+            info->ip[i] = sOS_ip[i];
+            info->subnet[i] = sOS_subnet[i];
+            info->gateway[i] = sOS_router[i];
+            info->dns[i] = sOS_dns[i];
+        }
+        info->net_installed = (uint8_t)(e1000_installed ? 1 : 0);
+        info->net_link_up = (uint8_t)((e1000_installed && (e1000_read_reg(0x0008) & 0x02)) ? 1 : 0);
+
+        uint32_t count = 0;
+        for (int i = 0; i < MAX_TASKS; i++) {
+            if (tasks[i].state != 0) {
+                info->tasks[count].id = tasks[i].id;
+                info->tasks[count].state = tasks[i].state;
+                info->tasks[count].uid = tasks[i].uid;
+                info->tasks[count].is_background = tasks[i].is_background;
+                info->tasks[count].is_user = (uint8_t)(
+                    (tasks[i].page_directory != NULL && tasks[i].page_directory != kernel_page_directory) ? 1 : 0);
+                count++;
+            }
+        }
+        info->task_count = count;
+        return 0;
+    }
+    else if (syscall_num == 37) {
+        /* Syscall 37: int clip_set(const char* text, int len) */
+        const char* text = (const char*)arg1;
+        int len = (int)arg2;
+        if (len < 0) {
+            if (!is_valid_user_string(text)) return (uint32_t)-1;
+        } else {
+            if (!is_valid_user_range((uint32_t)text, (uint32_t)len)) return (uint32_t)-1;
+        }
+        return (uint32_t)clipboard_set(text, len);
+    }
+    else if (syscall_num == 38) {
+        /* Syscall 38: int clip_get(char* buf, int max_len) */
+        char* buf = (char*)arg1;
+        int max_len = (int)arg2;
+        if (max_len <= 0) return (uint32_t)-1;
+        if (!is_valid_user_range((uint32_t)buf, (uint32_t)max_len)) return (uint32_t)-1;
+        return (uint32_t)clipboard_get(buf, max_len);
     }
     
     return (uint32_t)-1;

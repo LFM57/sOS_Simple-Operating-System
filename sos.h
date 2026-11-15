@@ -50,8 +50,62 @@ void* memset(void* s, int c, unsigned int n);
 void* memcpy(void* dest, const void* src, unsigned int n);
 
 /* File System functions (Ring 3) */
+#define SOS_TYPE_FILE      0x01
+#define SOS_TYPE_DIRECTORY 0x02
+#define SOS_TYPE_CHARDEV   0x03
+
+typedef struct {
+    char name[64];
+    unsigned int size;
+    unsigned char type;
+    unsigned char sec_byte;
+} sos_dirent_t;
+
+typedef struct {
+    unsigned int size;
+    unsigned char type;
+    unsigned char sec_byte;
+    unsigned short _pad;
+    unsigned int inode;
+} sos_stat_t;
+
+typedef struct {
+    unsigned int id;
+    unsigned char state;
+    unsigned char uid;
+    unsigned char is_background;
+    unsigned char is_user;
+} sos_task_info_t;
+
+typedef struct {
+    unsigned int total_ram_kb;
+    unsigned int used_ram_kb;
+    unsigned int free_ram_kb;
+    unsigned int heap_total_bytes;
+    unsigned int heap_used_bytes;
+    unsigned int heap_free_bytes;
+    unsigned int uptime_ticks;
+    unsigned char ip[4];
+    unsigned char subnet[4];
+    unsigned char gateway[4];
+    unsigned char dns[4];
+    unsigned char net_installed;
+    unsigned char net_link_up;
+    unsigned short _pad;
+    unsigned int task_count;
+    sos_task_info_t tasks[16];
+} sos_sysinfo_t;
+
 int read_file(const char* filename, unsigned char* buffer, unsigned int* size_out);
 int write_file(const char* filename, const char* text);
+int opendir(const char* path);
+int readdir(int dir_fd, sos_dirent_t* out_dirent);
+int closedir(int dir_fd);
+int stat(const char* path, sos_stat_t* out_stat);
+int spawn(const char* path, char* const argv[]);
+int sysinfo(sos_sysinfo_t* info);
+int clip_set(const char* text, int len);
+int clip_get(char* buf, int max_len);
 
 /* Networking */
 int socket();

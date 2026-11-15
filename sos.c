@@ -650,3 +650,49 @@ int win_destroy(int win_id) {
     __asm__ volatile("int $0x80" : "=a"(ret) : "a"(28), "b"(win_id));
     return ret;
 }
+
+int opendir(const char* path) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(32), "b"(path) : "memory");
+    return ret;
+}
+
+int readdir(int dir_fd, sos_dirent_t* out_dirent) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(33), "b"(dir_fd), "c"(out_dirent) : "memory");
+    return ret;
+}
+
+int closedir(int dir_fd) {
+    return close(dir_fd);
+}
+
+int stat(const char* path, sos_stat_t* out_stat) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(34), "b"(path), "c"(out_stat) : "memory");
+    return ret;
+}
+
+int spawn(const char* path, char* const argv[]) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(35), "b"(path), "c"(argv) : "memory");
+    return ret;
+}
+
+int sysinfo(sos_sysinfo_t* info) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(36), "b"(info) : "memory");
+    return ret;
+}
+
+int clip_set(const char* text, int len) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(37), "b"(text), "c"(len) : "memory");
+    return ret;
+}
+
+int clip_get(char* buf, int max_len) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(38), "b"(buf), "c"(max_len) : "memory");
+    return ret;
+}

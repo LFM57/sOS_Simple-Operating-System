@@ -144,7 +144,10 @@ typedef struct {
 uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uint32_t arg3, syscall_frame_t* frame);
 int sys_fork(syscall_frame_t* frame);
 int sys_execve(const char* path, char* const argv[], char* const envp[]);
+int sys_spawn(const char* path, char* const argv[]);
 int sys_waitpid(int pid, int* status, int options);
+int clipboard_set(const char* text, int len);
+int clipboard_get(char* buf, int max_len);
 
 /* --- Disk & File System (disk.c / fs.c) --- */
 void ata_read_sector(uint32_t lba, uint8_t *buffer);
@@ -222,6 +225,42 @@ void print_shell_prompt(void);
 #define TYPE_FILE   2
 #define TYPE_SOCKET 3
 #define TYPE_PIPE   4
+#define TYPE_DIR    5
+
+typedef struct {
+    uint32_t size;
+    uint8_t type;
+    uint8_t sec_byte;
+    uint16_t _pad;
+    uint32_t inode;
+} sos_stat_t;
+
+typedef struct {
+    uint32_t id;
+    uint8_t state;
+    uint8_t uid;
+    uint8_t is_background;
+    uint8_t is_user;
+} sos_task_info_t;
+
+typedef struct {
+    uint32_t total_ram_kb;
+    uint32_t used_ram_kb;
+    uint32_t free_ram_kb;
+    uint32_t heap_total_bytes;
+    uint32_t heap_used_bytes;
+    uint32_t heap_free_bytes;
+    uint32_t uptime_ticks;
+    uint8_t ip[4];
+    uint8_t subnet[4];
+    uint8_t gateway[4];
+    uint8_t dns[4];
+    uint8_t net_installed;
+    uint8_t net_link_up;
+    uint16_t _pad;
+    uint32_t task_count;
+    sos_task_info_t tasks[MAX_TASKS];
+} sos_sysinfo_t;
 
 typedef struct task task_t;
 

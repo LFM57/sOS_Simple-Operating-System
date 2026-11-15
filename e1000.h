@@ -30,5 +30,6 @@ struct e1000_tx_desc {
 extern int e1000_installed;
 void init_e1000(void);
 void e1000_transmit(uint8_t* payload, uint16_t length);
+uint32_t e1000_read_reg(uint16_t offset);
 
 #endif
