@@ -112,6 +112,7 @@ int gui_destroy_user_window(int win_id, uint32_t owner_pid);
 void gui_destroy_window(int win_id);
 void gui_destroy_windows_by_pid(uint32_t pid);
 void gui_destroy_windows_by_uid(uint8_t uid);
+int gui_is_compositor_task(int pid);
 window_t* gui_get_window(int win_id);
 window_t* gui_get_focused_window(void);
 void gui_focus_window(window_t* w);

@@ -679,6 +679,12 @@ int spawn(const char* path, char* const argv[]) {
     return ret;
 }
 
+int kill(int pid) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(39), "b"(pid));
+    return ret;
+}
+
 int sysinfo(sos_sysinfo_t* info) {
     int ret;
     __asm__ volatile("int $0x80" : "=a"(ret) : "a"(36), "b"(info) : "memory");

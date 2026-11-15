@@ -2022,6 +2022,28 @@ int sys_spawn(const char* path, char* const argv[]) {
     return task_id;
 }
 
+int sys_kill(int pid) {
+    if (pid <= 0 || pid >= IDLE_TASK_ID) return -1;
+    if (gui_is_compositor_task(pid)) return -1;
+    if (tasks[pid].state == 0 || tasks[pid].state == 3) return -1;
+
+    uint8_t caller_uid = get_active_uid();
+    if (caller_uid != 0 && tasks[pid].uid != caller_uid) {
+        return -1;
+    }
+
+    if (pid == current_task) {
+        gui_destroy_windows_by_pid((uint32_t)pid);
+        kill_current_task();
+        return 0;
+    }
+
+    terminate_task(pid);
+    gui_destroy_windows_by_pid((uint32_t)pid);
+    wake_up(&exit_queue);
+    return 0;
+}
+
 int edit_distance_is_one(const char* s1, const char* s2) {
     int len1 = 0; while (s1[len1]) len1++;
     int len2 = 0; while (s2[len2]) len2++;

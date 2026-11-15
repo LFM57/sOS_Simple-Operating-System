@@ -1028,6 +1028,10 @@ void gui_on_mouse_packet(int x, int y, uint8_t buttons, int dz) {
 
 static int gui_compositor_tid = -1;
 
+int gui_is_compositor_task(int pid) {
+    return gui_compositor_tid != -1 && pid == gui_compositor_tid;
+}
+
 /* Called from IRQ1 keyboard_handler() when GUI mode is active */
 void gui_on_key_press(char ascii, uint8_t modifiers, uint8_t scancode) {
     if (ascii == 0 && scancode == 0) return;

@@ -103,6 +103,7 @@ int readdir(int dir_fd, sos_dirent_t* out_dirent);
 int closedir(int dir_fd);
 int stat(const char* path, sos_stat_t* out_stat);
 int spawn(const char* path, char* const argv[]);
+int kill(int pid);
 int sysinfo(sos_sysinfo_t* info);
 int clip_set(const char* text, int len);
 int clip_get(char* buf, int max_len);

@@ -897,6 +897,11 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
         if (!is_valid_user_range((uint32_t)buf, (uint32_t)max_len)) return (uint32_t)-1;
         return (uint32_t)clipboard_get(buf, max_len);
     }
+    else if (syscall_num == 39) {
+        /* Syscall 39: int kill(int pid) */
+        int pid = (int)arg1;
+        return (uint32_t)sys_kill(pid);
+    }
     
     return (uint32_t)-1;
 }

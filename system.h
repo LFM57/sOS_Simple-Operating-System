@@ -145,6 +145,7 @@ uint32_t syscall_handler(uint32_t syscall_num, uint32_t arg1, uint32_t arg2, uin
 int sys_fork(syscall_frame_t* frame);
 int sys_execve(const char* path, char* const argv[], char* const envp[]);
 int sys_spawn(const char* path, char* const argv[]);
+int sys_kill(int pid);
 int sys_waitpid(int pid, int* status, int options);
 int clipboard_set(const char* text, int len);
 int clipboard_get(char* buf, int max_len);
