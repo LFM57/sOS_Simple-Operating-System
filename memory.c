@@ -134,7 +134,7 @@ void init_heap() {
 }
 
 void* kmalloc(size_t size) {
-    __asm__ volatile("cli"); /* Disable interrupts for safety */
+    uint32_t eflags = irq_save_disable(); /* Disable interrupts safely */
     heap_block_t *curr = heap_head;
     while (curr != NULL) {
         if (curr->magic != HEAP_MAGIC) {
@@ -153,18 +153,18 @@ void* kmalloc(size_t size) {
                 curr->size = size;
             }
             curr->is_free = 0; 
-            __asm__ volatile("sti"); /* Re-enable interrupts before returning */
+            irq_restore(eflags);
             return (void*)((uint8_t*)curr + sizeof(heap_block_t));
         }
         curr = curr->next;
     }
-    __asm__ volatile("sti"); /* Re-enable interrupts if allocation fails */
+    irq_restore(eflags);
     return NULL; 
 }
 
 void kfree(void* ptr) {
     if (!ptr) return;
-    __asm__ volatile("cli"); /* Disable interrupts for safety */
+    uint32_t eflags = irq_save_disable(); /* Disable interrupts safely */
     heap_block_t *block = (heap_block_t*)((uint8_t*)ptr - sizeof(heap_block_t));
     
     if (block->magic != HEAP_MAGIC) {
@@ -174,7 +174,7 @@ void kfree(void* ptr) {
 
     if (block->is_free) {
         kprintf("\n[WARNING] Double free detected at %x! Ignoring operation.\n", ptr);
-        __asm__ volatile("sti");
+        irq_restore(eflags);
         return;
     }
 
@@ -198,7 +198,7 @@ void kfree(void* ptr) {
         }
         curr = curr->next;
     }
-    __asm__ volatile("sti"); /* Re-enable interrupts when done */
+    irq_restore(eflags);
 }
 
 void get_pmm_stats(uint32_t* out_total_kb, uint32_t* out_used_kb, uint32_t* out_free_kb) {

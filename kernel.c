@@ -1252,6 +1252,7 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
              * kernel is cloned into this directory, the operation is safe and there
              * is no risk of a crash.
             */
+            uint32_t eflags = irq_save_disable();
             uint32_t old_cr3;
             __asm__ volatile("mov %%cr3, %0" : "=r"(old_cr3));
             __asm__ volatile("mov %0, %%cr3" :: "r"(pd));
@@ -1270,6 +1271,7 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
 
             /* Restore original memory space */
             __asm__ volatile("mov %0, %%cr3" :: "r"(old_cr3));
+            irq_restore(eflags);
 
             if (vaddr + memsz > max_vaddr) {
                 max_vaddr = vaddr + memsz;
@@ -1741,6 +1743,7 @@ int sys_execve(const char* path, char* const argv[], char* const envp[]) {
                 map_page_pd(pd, page, (uint32_t)phys, 0x07);
             }
 
+            uint32_t eflags = irq_save_disable();
             uint32_t old_cr3;
             __asm__ volatile("mov %%cr3, %0" : "=r"(old_cr3));
             __asm__ volatile("mov %0, %%cr3" :: "r"(pd));
@@ -1751,6 +1754,7 @@ int sys_execve(const char* path, char* const argv[], char* const envp[]) {
             for (uint32_t j = filesz; j < memsz; j++) dest[j] = 0;
 
             __asm__ volatile("mov %0, %%cr3" :: "r"(old_cr3));
+            irq_restore(eflags);
 
             if (vaddr + memsz > max_vaddr) max_vaddr = vaddr + memsz;
         }
@@ -4832,6 +4836,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info_addr) {
     init_e1000();
     
     init_multitasking(); kprintf("[INFO] Multitasking OK\n");
+    __asm__ volatile("sti");
 
     /* Request IP from VirtualBox/QEMU DHCP Server only if NIC is present */
     if (e1000_installed) {
