@@ -1,5 +1,7 @@
 #include "gui.h"
 #include "mouse.h"
+#include "net.h"
+#include "e1000.h"
 
 extern task_t tasks[MAX_TASKS];
 extern int current_task;
@@ -40,6 +42,17 @@ static char login_error_msg[64];
 static volatile int boot_login_done = 0;
 static volatile int login_to_text_shell = 0;
 static int power_menu_open = 0;
+
+#define START_MENU_W        204
+#define START_ITEM_H        24
+#define START_HEADER_H      26
+#define START_DIVIDER_H     18
+#define START_BUILTIN_COUNT 4
+#define MAX_START_APPS      8
+static int start_menu_open = 0;
+static char start_menu_apps[MAX_START_APPS][32];
+static int start_menu_app_count = 0;
+static volatile int gui_taskbar_dirty = 0;
 
 #define CTX_MENU_NONE    0
 #define CTX_MENU_DESKTOP 1
@@ -290,6 +303,9 @@ void gui_init(void) {
     gui_logout_requested = 0;
     login_to_text_shell = 0;
     power_menu_open = 0;
+    start_menu_open = 0;
+    start_menu_app_count = 0;
+    gui_taskbar_dirty = 0;
     ctx_menu_type = CTX_MENU_NONE;
     ctx_menu_win_id = -1;
     lkq_head = 0;
@@ -313,6 +329,9 @@ void gui_request_exit(void) {
     if (is_gui_locked && !gui_logout_requested) return;
     if (is_gui_login && !login_to_text_shell) return;
     power_menu_open = 0;
+    start_menu_open = 0;
+    start_menu_app_count = 0;
+    gui_taskbar_dirty = 0;
     ctx_menu_type = CTX_MENU_NONE;
     ctx_menu_win_id = -1;
     gui_exit_requested = 1;
@@ -325,6 +344,9 @@ void gui_lock_screen(void) {
     uint32_t eflags = irq_save_disable();
     is_gui_locked = 1;
     power_menu_open = 0;
+    start_menu_open = 0;
+    start_menu_app_count = 0;
+    gui_taskbar_dirty = 0;
     ctx_menu_type = CTX_MENU_NONE;
     ctx_menu_win_id = -1;
     dragging_window = NULL;
@@ -573,10 +595,18 @@ int gui_destroy_user_window(int win_id, uint32_t owner_pid) {
     return 0;
 }
 
-static void gui_launch_demo_app(void) {
+static void gui_launch_bin_app(const char* filename) {
+    if (!filename || filename[0] == '\0') return;
+    char full_path[64] = "/bin/";
+    int i = 5;
+    for (int j = 0; filename[j] && i < (int)sizeof(full_path) - 1; j++) {
+        full_path[i++] = filename[j];
+    }
+    full_path[i] = '\0';
+
     uint8_t* file_buf = NULL;
     uint32_t file_size = 0;
-    if (!fs_load_file("/bin/guidemo.sos", &file_buf, &file_size)) {
+    if (!fs_load_file(full_path, &file_buf, &file_size)) {
         return;
     }
     int task_id = create_user_task(file_buf, file_size);
@@ -584,6 +614,10 @@ static void gui_launch_demo_app(void) {
     if (task_id != -1) {
         tasks[task_id].is_background = 1;
     }
+}
+
+static void gui_launch_demo_app(void) {
+    gui_launch_bin_app("guidemo.sos");
 }
 
 void gui_destroy_window(int win_id) {
@@ -830,6 +864,184 @@ void gui_on_key_press(char ascii, uint8_t modifiers, uint8_t scancode) {
     gui_push_event(top, &ev);
 }
 
+void gui_on_timer_tick(void) {
+    if (!is_graphics_mode || !is_gui_mode || is_gui_login || is_gui_locked) return;
+    gui_taskbar_dirty = 1;
+    gui_dirty = 1;
+    wake_up(&gui_wait_queue);
+}
+
+static void get_start_menu_rect(int* mx, int* my, int* mw, int* mh) {
+    int apps_section = (start_menu_app_count > 0)
+        ? (START_DIVIDER_H + start_menu_app_count * START_ITEM_H)
+        : 0;
+    int h = START_HEADER_H + START_BUILTIN_COUNT * START_ITEM_H + apps_section + 6;
+    *mw = START_MENU_W;
+    *mh = h;
+    *mx = 8;
+    *my = (int)g_height - TASKBAR_HEIGHT - h - 4;
+}
+
+static void close_start_menu(void) {
+    if (!start_menu_open) return;
+    int smx, smy, smw, smh;
+    get_start_menu_rect(&smx, &smy, &smw, &smh);
+    start_menu_open = 0;
+    gui_dirty_screen_rect(smx, smy, smw, smh);
+    gui_dirty_screen_rect(0, (int)g_height - TASKBAR_HEIGHT, (int)g_width, TASKBAR_HEIGHT);
+}
+
+static void toggle_start_menu(void) {
+    if (start_menu_open) {
+        close_start_menu();
+        return;
+    }
+    start_menu_app_count = fs_list_bin_executables(start_menu_apps, MAX_START_APPS);
+    start_menu_open = 1;
+    int smx, smy, smw, smh;
+    get_start_menu_rect(&smx, &smy, &smw, &smh);
+    gui_dirty_screen_rect(smx, smy, smw, smh);
+    gui_dirty_screen_rect(0, (int)g_height - TASKBAR_HEIGHT, (int)g_width, TASKBAR_HEIGHT);
+}
+
+static uint8_t read_cmos_reg(uint8_t reg) {
+    outb(0x70, reg);
+    return inb(0x71);
+}
+
+static void read_rtc_hms(int* out_h, int* out_m, int* out_s) {
+    for (int i = 0; i < 1000; i++) {
+        if (!(read_cmos_reg(0x0A) & 0x80)) break;
+    }
+    uint8_t sec = read_cmos_reg(0x00);
+    uint8_t min = read_cmos_reg(0x02);
+    uint8_t hour = read_cmos_reg(0x04);
+    uint8_t reg_b = read_cmos_reg(0x0B);
+
+    if (!(reg_b & 0x04)) {
+        sec = (uint8_t)((sec & 0x0F) + ((sec >> 4) * 10));
+        min = (uint8_t)((min & 0x0F) + ((min >> 4) * 10));
+        hour = (uint8_t)(((hour & 0x0F) + (((hour & 0x70) >> 4) * 10)) | (hour & 0x80));
+    }
+    if (!(reg_b & 0x02) && (hour & 0x80)) {
+        hour = (uint8_t)(((hour & 0x7F) + 12) % 24);
+    } else {
+        hour &= 0x7F;
+    }
+
+    *out_h = (int)(hour % 24);
+    *out_m = (int)(min % 60);
+    *out_s = (int)(sec % 60);
+}
+
+static void fmt_2digits(char* dst, int val) {
+    if (val < 0) val = 0;
+    val %= 100;
+    dst[0] = (char)('0' + (val / 10));
+    dst[1] = (char)('0' + (val % 10));
+    dst[2] = '\0';
+}
+
+static int fmt_uint_str(char* dst, uint32_t val) {
+    char tmp[12];
+    int n = 0;
+    if (val == 0) {
+        dst[0] = '0';
+        dst[1] = '\0';
+        return 1;
+    }
+    while (val > 0 && n < 11) {
+        tmp[n++] = (char)('0' + (val % 10));
+        val /= 10;
+    }
+    for (int i = 0; i < n; i++) {
+        dst[i] = tmp[n - 1 - i];
+    }
+    dst[n] = '\0';
+    return n;
+}
+
+static int str_len_local(const char* s) {
+    int n = 0;
+    if (!s) return 0;
+    while (s[n]) n++;
+    return n;
+}
+
+typedef struct {
+    char net_str[20];
+    uint32_t net_col;
+    char user_str[20];
+    uint32_t user_col;
+    char up_str[20];
+    char clk_str[12];
+    int total_chars;
+} taskbar_tray_info_t;
+
+static void build_taskbar_tray_info(taskbar_tray_info_t* info) {
+    if (!e1000_installed) {
+        copy_title(info->net_str, "Net:Off", sizeof(info->net_str));
+        info->net_col = 0x0094A3B8;
+    } else if (sOS_ip[0] == 0 && sOS_ip[1] == 0 && sOS_ip[2] == 0 && sOS_ip[3] == 0) {
+        copy_title(info->net_str, "Net:NoIP", sizeof(info->net_str));
+        info->net_col = 0x00FBBF24;
+    } else {
+        int pos = 0;
+        for (int i = 0; i < 4; i++) {
+            pos += fmt_uint_str(info->net_str + pos, sOS_ip[i]);
+            if (i < 3) info->net_str[pos++] = '.';
+        }
+        info->net_str[pos] = '\0';
+        info->net_col = 0x004ADE80;
+    }
+
+    copy_title(info->user_str, current_user[0] ? current_user : "user", sizeof(info->user_str));
+    info->user_col = (current_uid == 0) ? 0x00FBBF24 : 0x0038BDF8;
+
+    uint32_t total_sec = timer_ticks / 100;
+    uint32_t hours = total_sec / 3600;
+    uint32_t mins = (total_sec % 3600) / 60;
+    uint32_t secs = total_sec % 60;
+    int up = 0;
+    info->up_str[up++] = 'u';
+    info->up_str[up++] = 'p';
+    info->up_str[up++] = ' ';
+    if (hours > 0) {
+        up += fmt_uint_str(info->up_str + up, hours);
+        info->up_str[up++] = ':';
+    }
+    fmt_2digits(info->up_str + up, (int)mins);
+    up += 2;
+    info->up_str[up++] = ':';
+    fmt_2digits(info->up_str + up, (int)secs);
+
+    int h = 0, m = 0, s = 0;
+    read_rtc_hms(&h, &m, &s);
+    fmt_2digits(info->clk_str, h);
+    info->clk_str[2] = ':';
+    fmt_2digits(info->clk_str + 3, m);
+    info->clk_str[5] = ':';
+    fmt_2digits(info->clk_str + 6, s);
+    info->clk_str[8] = '\0';
+
+    info->total_chars = str_len_local(info->net_str) + 3 +
+                        str_len_local(info->user_str) + 3 +
+                        str_len_local(info->up_str) + 3 +
+                        str_len_local(info->clk_str);
+}
+
+static void get_taskbar_right_layout(const taskbar_tray_info_t* info,
+                                     int* power_x, int* power_w,
+                                     int* lock_x, int* lock_w,
+                                     int* tray_x, int* tray_w) {
+    *power_w = 58;
+    *power_x = (int)g_width - *power_w - 8;
+    *lock_w = 50;
+    *lock_x = *power_x - *lock_w - 6;
+    *tray_w = info->total_chars * 8 + 14;
+    *tray_x = *lock_x - *tray_w - 8;
+}
+
 static void get_lock_dialog_rect(int* dx, int* dy, int* dw, int* dh) {
     int w = 420;
     int h = 230;
@@ -896,6 +1108,9 @@ void gui_show_login_screen(void) {
     is_gui_locked = 0;
     is_gui_login = 1;
     power_menu_open = 0;
+    start_menu_open = 0;
+    start_menu_app_count = 0;
+    gui_taskbar_dirty = 0;
     ctx_menu_type = CTX_MENU_NONE;
     ctx_menu_win_id = -1;
     dragging_window = NULL;
@@ -1540,7 +1755,10 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons, int dz) {
         if (power_menu_open) {
             int pmx, pmy, pmw, pmh;
             get_power_menu_rect(&pmx, &pmy, &pmw, &pmh);
-            int power_x = (int)g_width - 74;
+            taskbar_tray_info_t tray;
+            build_taskbar_tray_info(&tray);
+            int power_x, power_w, lock_x, lock_w, tray_x, tray_w;
+            get_taskbar_right_layout(&tray, &power_x, &power_w, &lock_x, &lock_w, &tray_x, &tray_w);
 
             if (mx >= pmx && mx < pmx + pmw && my >= pmy + 4 && my < pmy + pmh - 4) {
                 int item = (my - (pmy + 4)) / 28;
@@ -1569,7 +1787,54 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons, int dz) {
             power_menu_open = 0;
             gui_dirty_screen_rect(pmx, pmy, pmw, pmh);
             gui_dirty_screen_rect(0, (int)g_height - TASKBAR_HEIGHT, (int)g_width, TASKBAR_HEIGHT);
-            if (my >= (int)g_height - TASKBAR_HEIGHT && mx >= power_x && mx < power_x + 66) {
+            if (my >= (int)g_height - TASKBAR_HEIGHT && mx >= power_x && mx < power_x + power_w) {
+                prev_mouse_x = mx;
+                prev_mouse_y = my;
+                prev_buttons = buttons;
+                return;
+            }
+        }
+
+        /* Handle open Start popup menu */
+        if (start_menu_open) {
+            int smx, smy, smw, smh;
+            get_start_menu_rect(&smx, &smy, &smw, &smh);
+            int builtins_y = smy + START_HEADER_H;
+            int builtins_end_y = builtins_y + START_BUILTIN_COUNT * START_ITEM_H;
+            int apps_y = builtins_end_y + START_DIVIDER_H;
+            int apps_end_y = apps_y + start_menu_app_count * START_ITEM_H;
+
+            close_start_menu();
+
+            if (mx >= smx && mx < smx + smw) {
+                if (my >= builtins_y && my < builtins_end_y) {
+                    int item = (my - builtins_y) / START_ITEM_H;
+                    if (item == 0) {
+                        gui_show_or_create_terminal();
+                    } else if (item == 1) {
+                        gui_lock_screen();
+                    } else if (item == 2) {
+                        gui_request_exit();
+                    } else if (item == 3) {
+                        gui_perform_power_action(1);
+                    }
+                    prev_mouse_x = mx;
+                    prev_mouse_y = my;
+                    prev_buttons = buttons;
+                    return;
+                } else if (start_menu_app_count > 0 && my >= apps_y && my < apps_end_y) {
+                    int idx = (my - apps_y) / START_ITEM_H;
+                    if (idx >= 0 && idx < start_menu_app_count) {
+                        gui_launch_bin_app(start_menu_apps[idx]);
+                    }
+                    prev_mouse_x = mx;
+                    prev_mouse_y = my;
+                    prev_buttons = buttons;
+                    return;
+                }
+            }
+
+            if (my >= (int)g_height - TASKBAR_HEIGHT && mx >= 8 && mx < 72) {
                 prev_mouse_x = mx;
                 prev_mouse_y = my;
                 prev_buttons = buttons;
@@ -1579,38 +1844,34 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons, int dz) {
 
         /* Left click: check taskbar buttons and window chips first */
         if (my >= (int)g_height - TASKBAR_HEIGHT) {
-            int power_x = (int)g_width - 74;
-            int lock_x = power_x - 66;
-            if (mx >= power_x && mx < power_x + 66) {
+            taskbar_tray_info_t tray;
+            build_taskbar_tray_info(&tray);
+            int power_x, power_w, lock_x, lock_w, tray_x, tray_w;
+            get_taskbar_right_layout(&tray, &power_x, &power_w, &lock_x, &lock_w, &tray_x, &tray_w);
+
+            if (mx >= power_x && mx < power_x + power_w) {
+                close_start_menu();
                 int pmx, pmy, pmw, pmh;
                 get_power_menu_rect(&pmx, &pmy, &pmw, &pmh);
                 power_menu_open = !power_menu_open;
                 gui_dirty_screen_rect(pmx, pmy, pmw, pmh);
                 gui_dirty_screen_rect(0, (int)g_height - TASKBAR_HEIGHT, (int)g_width, TASKBAR_HEIGHT);
-            } else if (mx >= lock_x && mx < lock_x + 60) {
+            } else if (mx >= lock_x && mx < lock_x + lock_w) {
                 gui_lock_screen();
+            } else if (mx >= 8 && mx < 72) {
+                toggle_start_menu();
             } else {
-                int chip_x = 8;
-                int term_btn_w = 88;
-                int demo_btn_w = 88;
-                if (gui_terminal_window && mx >= chip_x && mx < chip_x + term_btn_w) {
-                    gui_toggle_taskbar_window(gui_terminal_window);
-                } else if (mx >= chip_x + term_btn_w + 6 && mx < chip_x + term_btn_w + 6 + demo_btn_w) {
-                    gui_launch_demo_app();
-                } else {
-                    chip_x += term_btn_w + 6 + demo_btn_w + 10;
-                    for (int i = 0; i < MAX_WINDOWS; i++) {
-                        if (!windows[i].is_used) continue;
-                        if (!(windows[i].flags & (WIN_VISIBLE | WIN_MINIMIZED))) continue;
-                        if (&windows[i] == gui_terminal_window) continue;
-                        int chip_w = 120;
-                        if (chip_x + chip_w > lock_x - 10) break;
-                        if (mx >= chip_x && mx < chip_x + chip_w) {
-                            gui_toggle_taskbar_window(&windows[i]);
-                            break;
-                        }
-                        chip_x += chip_w + 6;
+                int chip_x = 80;
+                for (int i = 0; i < MAX_WINDOWS; i++) {
+                    if (!windows[i].is_used) continue;
+                    if (!(windows[i].flags & (WIN_VISIBLE | WIN_MINIMIZED))) continue;
+                    int chip_w = 116;
+                    if (chip_x + chip_w > tray_x - 8) break;
+                    if (mx >= chip_x && mx < chip_x + chip_w) {
+                        gui_toggle_taskbar_window(&windows[i]);
+                        break;
                     }
+                    chip_x += chip_w + 6;
                 }
             }
         } else {
@@ -1723,6 +1984,7 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons, int dz) {
             gui_dirty_screen_rect(pmx, pmy, pmw, pmh);
             gui_dirty_screen_rect(0, (int)g_height - TASKBAR_HEIGHT, (int)g_width, TASKBAR_HEIGHT);
         }
+        close_start_menu();
         close_context_menu();
 
         if (my < (int)g_height - TASKBAR_HEIGHT) {
@@ -1930,39 +2192,82 @@ static void draw_context_menu(void) {
     }
 }
 
+static void draw_start_menu(void) {
+    if (!start_menu_open) return;
+    int smx, smy, smw, smh;
+    get_start_menu_rect(&smx, &smy, &smw, &smh);
+
+    bb_fill_rect(smx, smy, smw, smh, 0x000F172A);
+    bb_draw_rect_outline(smx, smy, smw, smh, 0x00475569);
+
+    /* Header */
+    bb_fill_rect(smx + 1, smy + 1, smw - 2, START_HEADER_H - 2, 0x001E293B);
+    bb_draw_string_transparent("sOS Menu", smx + 12, smy + 5, 0x0038BDF8);
+
+    const char* builtins[START_BUILTIN_COUNT] = {
+        "Terminal",
+        "Lock Screen",
+        "Text Shell",
+        "Reboot"
+    };
+    uint32_t builtin_colors[START_BUILTIN_COUNT] = {
+        0x00F8FAFC,
+        0x00FBBF24,
+        0x00CBD5E1,
+        0x0060A5FA
+    };
+
+    int y = smy + START_HEADER_H;
+    for (int i = 0; i < START_BUILTIN_COUNT; i++) {
+        if (i > 0) {
+            bb_fill_rect(smx + 8, y, smw - 16, 1, 0x001E293B);
+        }
+        bb_draw_string_transparent(builtins[i], smx + 12, y + 4, builtin_colors[i]);
+        y += START_ITEM_H;
+    }
+
+    if (start_menu_app_count > 0) {
+        bb_fill_rect(smx + 8, y + 1, smw - 16, 1, 0x00334155);
+        bb_draw_string_transparent("Apps (/bin)", smx + 12, y + 2, 0x0094A3B8);
+        y += START_DIVIDER_H;
+
+        for (int i = 0; i < start_menu_app_count; i++) {
+            if (i > 0) {
+                bb_fill_rect(smx + 8, y, smw - 16, 1, 0x001E293B);
+            }
+            char label[22];
+            copy_title(label, start_menu_apps[i], sizeof(label));
+            bb_draw_string_transparent(label, smx + 14, y + 4, 0x005EEAD4);
+            y += START_ITEM_H;
+        }
+    }
+}
+
 static void draw_taskbar(window_t* focused) {
     int bar_y = (int)g_height - TASKBAR_HEIGHT;
     bb_fill_rect(0, bar_y, (int)g_width, TASKBAR_HEIGHT, 0x000F172A);
     bb_fill_rect(0, bar_y, (int)g_width, 1, 0x00334155);
 
-    int chip_x = 8;
-    if (gui_terminal_window) {
-        int term_btn_w = 88;
-        int is_term_act = (gui_terminal_window == focused && is_window_shown(gui_terminal_window));
-        uint32_t bg = is_term_act ? 0x002563EB : 0x001E293B;
-        bb_fill_rect(chip_x, bar_y + 4, term_btn_w, TASKBAR_HEIGHT - 8, bg);
-        bb_draw_rect_outline(chip_x, bar_y + 4, term_btn_w, TASKBAR_HEIGHT - 8,
-                             is_term_act ? 0x0060A5FA : 0x00334155);
-        bb_draw_string_transparent("Terminal", chip_x + 12, bar_y + 6,
-                                   is_window_shown(gui_terminal_window) ? 0x00F8FAFC : 0x0094A3B8);
-        chip_x += term_btn_w + 6;
-    }
+    /* [ sOS ] Start Menu button */
+    int start_w = 64;
+    bb_fill_rect(8, bar_y + 4, start_w, TASKBAR_HEIGHT - 8,
+                 start_menu_open ? 0x001D4ED8 : 0x000F766E);
+    bb_draw_rect_outline(8, bar_y + 4, start_w, TASKBAR_HEIGHT - 8,
+                         start_menu_open ? 0x0060A5FA : 0x0014B8A6);
+    bb_draw_string_transparent("sOS", 28, bar_y + 6, 0x00FFFFFF);
 
-    int demo_btn_w = 88;
-    bb_fill_rect(chip_x, bar_y + 4, demo_btn_w, TASKBAR_HEIGHT - 8, 0x000F766E);
-    bb_draw_rect_outline(chip_x, bar_y + 4, demo_btn_w, TASKBAR_HEIGHT - 8, 0x0014B8A6);
-    bb_draw_string_transparent("Paint", chip_x + 24, bar_y + 6, 0x00F8FAFC);
-    chip_x += demo_btn_w + 10;
+    taskbar_tray_info_t tray;
+    build_taskbar_tray_info(&tray);
+    int power_x, power_w, lock_x, lock_w, tray_x, tray_w;
+    get_taskbar_right_layout(&tray, &power_x, &power_w, &lock_x, &lock_w, &tray_x, &tray_w);
 
-    int power_x = (int)g_width - 74;
-    int lock_x = power_x - 66;
-
+    /* Window chips (including Terminal) */
+    int chip_x = 80;
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (!windows[i].is_used) continue;
         if (!(windows[i].flags & (WIN_VISIBLE | WIN_MINIMIZED))) continue;
-        if (&windows[i] == gui_terminal_window) continue;
-        int chip_w = 120;
-        if (chip_x + chip_w > lock_x - 10) break;
+        int chip_w = 116;
+        if (chip_x + chip_w > tray_x - 8) break;
 
         int is_min = (windows[i].flags & WIN_MINIMIZED) != 0;
         int is_act = (!is_min && &windows[i] == focused);
@@ -1972,19 +2277,39 @@ static void draw_taskbar(window_t* focused) {
         bb_fill_rect(chip_x, bar_y + 4, chip_w, TASKBAR_HEIGHT - 8, bg);
         bb_draw_rect_outline(chip_x, bar_y + 4, chip_w, TASKBAR_HEIGHT - 8, border);
 
-        char label[14];
+        char label[13];
         copy_title(label, windows[i].title, sizeof(label));
         bb_draw_string_transparent(label, chip_x + 6, bar_y + 6, fg);
         chip_x += chip_w + 6;
     }
 
-    bb_fill_rect(lock_x, bar_y + 4, 60, TASKBAR_HEIGHT - 8, 0x00B45309);
-    bb_draw_rect_outline(lock_x, bar_y + 4, 60, TASKBAR_HEIGHT - 8, 0x00F59E0B);
-    bb_draw_string_transparent("Lock", lock_x + 14, bar_y + 6, 0x00FFFFFF);
+    /* Right-aligned status tray: Network | User | Uptime | RTC Clock */
+    bb_fill_rect(tray_x, bar_y + 4, tray_w, TASKBAR_HEIGHT - 8, 0x001E293B);
+    bb_draw_rect_outline(tray_x, bar_y + 4, tray_w, TASKBAR_HEIGHT - 8, 0x00334155);
 
-    bb_fill_rect(power_x, bar_y + 4, 66, TASKBAR_HEIGHT - 8, power_menu_open ? 0x00B91C1C : 0x00991B1B);
-    bb_draw_rect_outline(power_x, bar_y + 4, 66, TASKBAR_HEIGHT - 8, 0x00EF4444);
-    bb_draw_string_transparent("Power", power_x + 13, bar_y + 6, 0x00FFFFFF);
+    int tx = tray_x + 7;
+    int ty = bar_y + 6;
+    bb_draw_string_transparent(tray.net_str, tx, ty, tray.net_col);
+    tx += str_len_local(tray.net_str) * 8;
+    bb_draw_string_transparent(" | ", tx, ty, 0x00475569);
+    tx += 24;
+    bb_draw_string_transparent(tray.user_str, tx, ty, tray.user_col);
+    tx += str_len_local(tray.user_str) * 8;
+    bb_draw_string_transparent(" | ", tx, ty, 0x00475569);
+    tx += 24;
+    bb_draw_string_transparent(tray.up_str, tx, ty, 0x00CBD5E1);
+    tx += str_len_local(tray.up_str) * 8;
+    bb_draw_string_transparent(" | ", tx, ty, 0x00475569);
+    tx += 24;
+    bb_draw_string_transparent(tray.clk_str, tx, ty, 0x00F8FAFC);
+
+    bb_fill_rect(lock_x, bar_y + 4, lock_w, TASKBAR_HEIGHT - 8, 0x00B45309);
+    bb_draw_rect_outline(lock_x, bar_y + 4, lock_w, TASKBAR_HEIGHT - 8, 0x00F59E0B);
+    bb_draw_string_transparent("Lock", lock_x + 9, bar_y + 6, 0x00FFFFFF);
+
+    bb_fill_rect(power_x, bar_y + 4, power_w, TASKBAR_HEIGHT - 8, power_menu_open ? 0x00B91C1C : 0x00991B1B);
+    bb_draw_rect_outline(power_x, bar_y + 4, power_w, TASKBAR_HEIGHT - 8, 0x00EF4444);
+    bb_draw_string_transparent("Power", power_x + 9, bar_y + 6, 0x00FFFFFF);
 }
 
 static void draw_window_title_clipped(window_t* w) {
@@ -2299,6 +2624,15 @@ static void render_desktop_region(int rx, int ry, int rw, int rh, window_t* focu
         draw_taskbar(focused);
     }
 
+    if (start_menu_open) {
+        int smx, smy, smw, smh;
+        get_start_menu_rect(&smx, &smy, &smw, &smh);
+        gui_rect_t smr = { smx, smy, smw, smh };
+        if (rects_overlap_or_touch(&region, &smr)) {
+            draw_start_menu();
+        }
+    }
+
     if (power_menu_open) {
         int pmx, pmy, pmw, pmh;
         get_power_menu_rect(&pmx, &pmy, &pmw, &pmh);
@@ -2335,8 +2669,13 @@ void gui_render(void) {
 
     gui_dirty = 0;
     gui_full_dirty = 0;
+    int tb_dirty = gui_taskbar_dirty;
+    gui_taskbar_dirty = 0;
 
     if (!full && !is_gui_login && !is_gui_locked) {
+        if (tb_dirty) {
+            gui_dirty_taskbar_locked();
+        }
         for (int i = 0; i < screen_dirty_count; i++) {
             add_rect_to_list(rects, &rects_count, MAX_DIRTY_RECTS,
                              screen_dirty_rects[i].x, screen_dirty_rects[i].y,
@@ -2411,6 +2750,9 @@ static void gui_teardown(void) {
     is_gui_locked = 0;
     is_gui_login = 0;
     power_menu_open = 0;
+    start_menu_open = 0;
+    start_menu_app_count = 0;
+    gui_taskbar_dirty = 0;
     ctx_menu_type = CTX_MENU_NONE;
     ctx_menu_win_id = -1;
     screen_dirty_count = 0;

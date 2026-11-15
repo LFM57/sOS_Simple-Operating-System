@@ -1841,6 +1841,27 @@ done_scan:
     return count;
 }
 
+static uint32_t get_readable_bin_cluster(void) {
+    uint32_t bin_parent_cluster, bin_parent_sector;
+    char bin_fat[11];
+    if (!resolve_path("/bin", &bin_parent_cluster, &bin_parent_sector, bin_fat)) {
+        return 0;
+    }
+    if (bin_fat[0] == '\0') return 0;
+
+    fat_dir_entry_t bin_entry;
+    if (!find_entry_in(bin_parent_cluster, bin_fat, &bin_entry, NULL, NULL) ||
+        !(bin_entry.attributes & 0x10)) {
+        return 0;
+    }
+    if (!check_permission_byte(bin_entry.sec_byte, 0)) {
+        return 0;
+    }
+
+    uint32_t bin_cluster = get_cluster(bin_entry);
+    return (bin_cluster == 0) ? root_cluster : bin_cluster;
+}
+
 /* Scans current directory and /bin for executable files (.sos) matching prefix */
 int fs_get_matching_executables(const char* prefix, char matches[][32], int max_matches) {
     int prefix_len = 0;
@@ -1854,24 +1875,20 @@ int fs_get_matching_executables(const char* prefix, char matches[][32], int max_
     }
 
     /* 2. Scan /bin directory (if it exists and is not the current directory) */
-    uint32_t bin_parent_cluster, bin_parent_sector;
-    char bin_fat[11];
-    if (resolve_path("/bin", &bin_parent_cluster, &bin_parent_sector, bin_fat)) {
-        if (bin_fat[0] != '\0') {
-            fat_dir_entry_t bin_entry;
-            if (find_entry_in(bin_parent_cluster, bin_fat, &bin_entry, NULL, NULL) && (bin_entry.attributes & 0x10)) {
-                if (check_permission_byte(bin_entry.sec_byte, 0)) {
-                    uint32_t bin_cluster = get_cluster(bin_entry);
-                    if (bin_cluster == 0) bin_cluster = root_cluster;
-                    if (bin_cluster != current_dir_cluster) {
-                        count = scan_dir_for_executables(bin_cluster, prefix, prefix_len, matches, count, max_matches);
-                    }
-                }
-            }
-        }
+    uint32_t bin_cluster = get_readable_bin_cluster();
+    if (bin_cluster != 0 && bin_cluster != current_dir_cluster) {
+        count = scan_dir_for_executables(bin_cluster, prefix, prefix_len, matches, count, max_matches);
     }
 
     return count;
+}
+
+/* Scans /bin for executable .sos files */
+int fs_list_bin_executables(char matches[][32], int max_matches) {
+    if (!matches || max_matches <= 0) return 0;
+    uint32_t bin_cluster = get_readable_bin_cluster();
+    if (bin_cluster == 0) return 0;
+    return scan_dir_for_executables(bin_cluster, "", 0, matches, 0, max_matches);
 }
 
 /* Allocate a free cluster and zero its sectors on disk */

@@ -562,6 +562,9 @@ uint32_t timer_handler(uint32_t esp) {
             }
         }
     }
+    if (timer_ticks % 100 == 0) {
+        gui_on_timer_tick();
+    }
     return schedule(esp);
 }
 

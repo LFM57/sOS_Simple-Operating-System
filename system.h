@@ -158,6 +158,7 @@ void get_heap_stats(uint32_t* out_total_bytes, uint32_t* out_used_bytes, uint32_
 void run_nano(const char* filename);
 int fs_complete(const char* prefix, char* out_match, int* out_match_count, int print_matches);
 int fs_get_matching_executables(const char* prefix, char matches[][32], int max_matches);
+int fs_list_bin_executables(char matches[][32], int max_matches);
 int fs_cp(const char* src_name, const char* dest_name);
 void fs_mv(const char* src_name, const char* dest_name);
 void fs_append(const char* filename, const char* text);

@@ -114,6 +114,7 @@ int gui_pop_event(window_t* w, gui_event_t* out_ev);
 
 void gui_on_mouse_packet(int x, int y, uint8_t buttons, int dz);
 void gui_on_key_press(char ascii, uint8_t modifiers, uint8_t scancode);
+void gui_on_timer_tick(void);
 void gui_mark_dirty(int full_redraw);
 void gui_mark_window_dirty(window_t* w, int x, int y, int width, int height);
 void gui_process_input(void);
