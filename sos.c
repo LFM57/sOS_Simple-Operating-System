@@ -81,17 +81,183 @@ void exit(int code) {
     __asm__ volatile("int $0x80" : : "a"(2), "b"(code));
 }
 
+#define MALLOC_MAGIC 0x534F534DU
+
+typedef struct alloc_block {
+    unsigned int magic;
+    unsigned int size;
+    unsigned int is_free;
+    struct alloc_block* prev;
+    struct alloc_block* next;
+    unsigned int _pad;
+} alloc_block_t;
+
+static alloc_block_t* user_heap_head = (void*)0;
+static alloc_block_t* user_heap_tail = (void*)0;
+
 void* sbrk(int increment) {
     void* ret;
     __asm__ volatile("int $0x80" : "=a"(ret) : "a"(3), "b"(increment));
     return ret;
 }
 
+static void split_alloc_block(alloc_block_t* blk, unsigned int aligned_size) {
+    if (blk->size < aligned_size + sizeof(alloc_block_t) + 8U) {
+        return;
+    }
+    alloc_block_t* rem = (alloc_block_t*)((unsigned char*)(blk + 1) + aligned_size);
+    rem->magic = MALLOC_MAGIC;
+    rem->size = blk->size - aligned_size - sizeof(alloc_block_t);
+    rem->is_free = 1;
+    rem->prev = blk;
+    rem->next = blk->next;
+    rem->_pad = 0;
+
+    if (blk->next) {
+        blk->next->prev = rem;
+    } else {
+        user_heap_tail = rem;
+    }
+    blk->next = rem;
+    blk->size = aligned_size;
+}
+
+static alloc_block_t* coalesce_with_next(alloc_block_t* blk) {
+    if (!blk || !blk->next) return blk;
+    alloc_block_t* nxt = blk->next;
+    if (nxt->magic != MALLOC_MAGIC || !nxt->is_free) return blk;
+    if ((unsigned char*)(blk + 1) + blk->size != (unsigned char*)nxt) return blk;
+
+    blk->size += sizeof(alloc_block_t) + nxt->size;
+    blk->next = nxt->next;
+    if (nxt->next) {
+        nxt->next->prev = blk;
+    } else {
+        user_heap_tail = blk;
+    }
+    nxt->magic = 0;
+    return blk;
+}
+
 void* malloc(unsigned int size) {
-    if (size == 0) return (void*)0;
-    void* addr = sbrk(size);
+    if (size == 0 || size > 0x7FFFFFF0U) return (void*)0;
+    unsigned int aligned = (size + 7U) & ~7U;
+
+    alloc_block_t* curr = user_heap_head;
+    while (curr) {
+        if (curr->magic != MALLOC_MAGIC) return (void*)0;
+        if (curr->is_free && curr->size >= aligned) {
+            split_alloc_block(curr, aligned);
+            curr->is_free = 0;
+            return (void*)(curr + 1);
+        }
+        curr = curr->next;
+    }
+
+    if (user_heap_tail && user_heap_tail->magic == MALLOC_MAGIC && user_heap_tail->is_free) {
+        void* cur_brk = sbrk(0);
+        if ((int)cur_brk != -1 &&
+            (unsigned char*)(user_heap_tail + 1) + user_heap_tail->size == (unsigned char*)cur_brk) {
+            unsigned int extra = aligned - user_heap_tail->size;
+            void* ext = sbrk((int)extra);
+            if ((int)ext == -1) return (void*)0;
+            user_heap_tail->size += extra;
+            user_heap_tail->is_free = 0;
+            return (void*)(user_heap_tail + 1);
+        }
+    }
+
+    unsigned int total = sizeof(alloc_block_t) + aligned;
+    void* addr = sbrk((int)total);
     if ((int)addr == -1) return (void*)0;
-    return addr;
+
+    alloc_block_t* blk = (alloc_block_t*)addr;
+    blk->magic = MALLOC_MAGIC;
+    blk->size = aligned;
+    blk->is_free = 0;
+    blk->prev = user_heap_tail;
+    blk->next = (void*)0;
+    blk->_pad = 0;
+
+    if (user_heap_tail) {
+        user_heap_tail->next = blk;
+    } else {
+        user_heap_head = blk;
+    }
+    user_heap_tail = blk;
+    return (void*)(blk + 1);
+}
+
+void free(void* ptr) {
+    if (!ptr) return;
+    alloc_block_t* blk = ((alloc_block_t*)ptr) - 1;
+    if (blk->magic != MALLOC_MAGIC || blk->is_free) return;
+
+    blk->is_free = 1;
+    coalesce_with_next(blk);
+    if (blk->prev && blk->prev->magic == MALLOC_MAGIC && blk->prev->is_free) {
+        coalesce_with_next(blk->prev);
+    }
+}
+
+void* realloc(void* ptr, unsigned int size) {
+    if (!ptr) return malloc(size);
+    if (size == 0) {
+        free(ptr);
+        return (void*)0;
+    }
+    if (size > 0x7FFFFFF0U) return (void*)0;
+
+    alloc_block_t* blk = ((alloc_block_t*)ptr) - 1;
+    if (blk->magic != MALLOC_MAGIC) return (void*)0;
+
+    unsigned int aligned = (size + 7U) & ~7U;
+    if (blk->size >= aligned) {
+        split_alloc_block(blk, aligned);
+        if (blk->next && blk->next->is_free) {
+            coalesce_with_next(blk->next);
+        }
+        return ptr;
+    }
+
+    if (blk->next && blk->next->magic == MALLOC_MAGIC && blk->next->is_free &&
+        (unsigned char*)(blk + 1) + blk->size == (unsigned char*)blk->next &&
+        blk->size + sizeof(alloc_block_t) + blk->next->size >= aligned) {
+        coalesce_with_next(blk);
+        split_alloc_block(blk, aligned);
+        return ptr;
+    }
+
+    if (blk == user_heap_tail) {
+        void* cur_brk = sbrk(0);
+        if ((int)cur_brk != -1 &&
+            (unsigned char*)(blk + 1) + blk->size == (unsigned char*)cur_brk) {
+            unsigned int extra = aligned - blk->size;
+            void* ext = sbrk((int)extra);
+            if ((int)ext != -1) {
+                blk->size += extra;
+                return ptr;
+            }
+        }
+    }
+
+    void* new_ptr = malloc(size);
+    if (!new_ptr) return (void*)0;
+    unsigned int copy_len = (blk->size < size) ? blk->size : size;
+    memcpy(new_ptr, ptr, copy_len);
+    free(ptr);
+    return new_ptr;
+}
+
+void* calloc(unsigned int nmemb, unsigned int size) {
+    if (nmemb == 0 || size == 0) return (void*)0;
+    if (size > 0x7FFFFFF0U / nmemb) return (void*)0;
+    unsigned int total = nmemb * size;
+    void* ptr = malloc(total);
+    if (ptr) {
+        memset(ptr, 0, total);
+    }
+    return ptr;
 }
 
 /* --- Implementations of standard functions --- */

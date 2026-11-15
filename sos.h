@@ -29,6 +29,9 @@ int waitpid(int pid, int* status, int options);
 void print(const char* str);
 void exit(int code);
 void* malloc(unsigned int size);
+void free(void* ptr);
+void* realloc(void* ptr, unsigned int size);
+void* calloc(unsigned int nmemb, unsigned int size);
 
 /* User input */
 char getchar();
