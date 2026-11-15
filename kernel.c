@@ -1432,17 +1432,39 @@ int is_valid_user_ptr(uint32_t ptr) {
 int sys_fork(syscall_frame_t* frame) {
     if (current_task < 0 || current_task == IDLE_TASK_ID) return -1;
 
+    uint32_t eflags = irq_save_disable();
     int child_id = -1;
     for (int i = 1; i < IDLE_TASK_ID; i++) {
-        if (tasks[i].state == 0) { child_id = i; break; }
+        if (tasks[i].state == 0) {
+            child_id = i;
+            tasks[i].state = 5; /* TASK_INITIALIZING */
+            break;
+        }
     }
+    irq_restore(eflags);
     if (child_id == -1) return -1;
 
     task_t* parent = &tasks[current_task];
     task_t* child = &tasks[child_id];
+    child->is_background = 0;
+    child->user_stack = NULL;
+    child->code_page = NULL;
+    child->kernel_stack = NULL;
+    child->page_directory = NULL;
+    child->waiting_on = NULL;
+    for (int f = 0; f < MAX_OPEN_FILES; f++) {
+        child->open_files[f].is_used = 0;
+        child->open_files[f].type = TYPE_NONE;
+        child->open_files[f].flags = 0;
+        child->open_files[f].offset = 0;
+        child->open_files[f].node = NULL;
+    }
 
     uint32_t* kstack = (uint32_t*)pmm_alloc_page();
-    if (!kstack) return -1;
+    if (!kstack) {
+        child->state = 0;
+        return -1;
+    }
     child->kernel_stack = (void*)kstack;
     child->kernel_esp = (uint32_t)kstack + 4096;
 
@@ -1450,6 +1472,7 @@ int sys_fork(syscall_frame_t* frame) {
     if (!child_pd) {
         pmm_free_page(kstack);
         child->kernel_stack = NULL;
+        child->state = 0;
         return -1;
     }
     for (int i = 0; i < 1024; i++) child_pd[i] = kernel_page_directory[i];
