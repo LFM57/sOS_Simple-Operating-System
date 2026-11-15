@@ -34,12 +34,13 @@ app.sos: app.c sos.c
 	rm -f app.o sos.o
 
 # User-space guidemo.sos target
-guidemo.sos: guidemo.c sos.c sos.h
+guidemo.sos: guidemo.c libgui.c libgui.h sos.c sos.h font8x16.h
 	@echo "Compiling GUI demo application (guidemo.sos)..."
 	$(USER_CC) -ffreestanding -nostdlib -fno-pie -c sos.c -o sos.o
+	$(USER_CC) -ffreestanding -nostdlib -fno-pie -c libgui.c -o libgui.o
 	$(USER_CC) -ffreestanding -nostdlib -fno-pie -c guidemo.c -o guidemo.o
-	$(USER_LD) -T app_linker.ld guidemo.o sos.o -o guidemo.sos
-	rm -f guidemo.o sos.o
+	$(USER_LD) -T app_linker.ld guidemo.o libgui.o sos.o -o guidemo.sos
+	rm -f guidemo.o libgui.o sos.o
 
 # Automatic OTA signing: signs uinstruct, kernel.bin, and all files ordered by instructions
 sign: kernel.bin app.sos guidemo.sos
