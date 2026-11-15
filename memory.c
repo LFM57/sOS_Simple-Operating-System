@@ -73,13 +73,16 @@ void init_paging() {
     __asm__ volatile("mov %0, %%cr0":: "r"(cr0));
 }
 
-void map_page_pd(uint32_t* pd, uint32_t virt, uint32_t phys, uint32_t flags) {
+int map_page_pd(uint32_t* pd, uint32_t virt, uint32_t phys, uint32_t flags) {
     uint32_t pdi = virt >> 22;               
     uint32_t pti = (virt >> 12) & 0x03FF;    
     uint32_t pt_flags = (flags & 0xFFF) | 0x01;
 
     if (!(pd[pdi] & 0x01)) { 
         uint32_t* new_table = (uint32_t*)pmm_alloc_page();
+        if (!new_table) {
+            return -1;
+        }
         for (int i = 0; i < 1024; i++) new_table[i] = 0;
         /* Intermediate user tables must carry the 0x07 flag */
         pd[pdi] = ((uint32_t)new_table) | pt_flags;
@@ -91,10 +94,11 @@ void map_page_pd(uint32_t* pd, uint32_t virt, uint32_t phys, uint32_t flags) {
     table[pti] = (phys & 0xFFFFF000) | pt_flags;
 
     __asm__ volatile("invlpg (%0)" ::"r" (virt) : "memory");
+    return 0;
 }
 
-void map_page(uint32_t virt, uint32_t phys) {
-    map_page_pd(kernel_page_directory, virt, phys, 0x03);
+int map_page(uint32_t virt, uint32_t phys) {
+    return map_page_pd(kernel_page_directory, virt, phys, 0x03);
 }
 
 /* --- HEAP --- */
@@ -119,11 +123,11 @@ void init_heap() {
     /* Dynamically allocate and map the physical pages to our virtual heap */
     for (uint32_t i = 0; i < heap_size; i += 4096) {
         void* phys = pmm_alloc_page();
-        if (!phys) {
+        if (!phys || map_page(heap_start + i, (uint32_t)phys) < 0) {
+            if (phys) pmm_free_page(phys);
             heap_size = i;
             break;
         }
-        map_page(heap_start + i, (uint32_t)phys);
     }
     
     heap_head = (heap_block_t*)heap_start;

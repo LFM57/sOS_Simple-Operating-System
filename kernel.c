@@ -1243,7 +1243,15 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
                 }
                 /* Initialize the new page to zero */
                 for (int k = 0; k < 1024; k++) ((uint32_t*)phys)[k] = 0;
-                map_page_pd(pd, page, (uint32_t)phys, 0x07);
+                if (map_page_pd(pd, page, (uint32_t)phys, 0x07) < 0) {
+                    pmm_free_page(phys);
+                    kprintf("Error: Out of physical memory while mapping ELF segment.\n");
+                    pmm_free_page(ustack);
+                    tasks[id].user_stack = NULL;
+                    tasks[id].state = 3;
+                    cleanup_task_memory(id);
+                    return -1;
+                }
             }
 
             /*
@@ -1281,7 +1289,14 @@ int create_user_task(uint8_t* elf_buffer, uint32_t elf_size) {
 
     /* 6. Map the user stack */
     uint32_t ustack_virt = 0x7FF0000;
-    map_page_pd(pd, ustack_virt, (uint32_t)ustack, 0x07);
+    if (map_page_pd(pd, ustack_virt, (uint32_t)ustack, 0x07) < 0) {
+        kprintf("Error: Out of physical memory while mapping user stack.\n");
+        pmm_free_page(ustack);
+        tasks[id].user_stack = NULL;
+        tasks[id].state = 3;
+        cleanup_task_memory(id);
+        return -1;
+    }
 
     /* 7. Prepare the kernel stack (starting context for IRET) */
     uint32_t* top = (uint32_t*)((uint32_t)kstack + 4096);
@@ -1346,7 +1361,10 @@ uint32_t sys_sbrk(int increment) {
     for (uint32_t i = start_page; i <= end_page; i++) {
         void* phys = pmm_alloc_page();
         if (!phys) return (uint32_t)-1;
-        map_page_pd(tasks[current_task].page_directory, i * 4096, (uint32_t)phys, 0x07);
+        if (map_page_pd(tasks[current_task].page_directory, i * 4096, (uint32_t)phys, 0x07) < 0) {
+            pmm_free_page(phys);
+            return (uint32_t)-1;
+        }
     }
     
     tasks[current_task].prog_break = new_break;
@@ -1454,7 +1472,11 @@ int sys_fork(syscall_frame_t* frame) {
                         uint32_t* src = (uint32_t*)virt;
                         uint32_t* dst = (uint32_t*)child_phys;
                         for (int k = 0; k < 1024; k++) dst[k] = src[k];
-                        map_page_pd(child_pd, virt, (uint32_t)child_phys, parent_pt[pti] & 0xFFF);
+                        if (map_page_pd(child_pd, virt, (uint32_t)child_phys, parent_pt[pti] & 0xFFF) < 0) {
+                            pmm_free_page(child_phys);
+                            cleanup_task_memory(child_id);
+                            return -1;
+                        }
                     }
                 }
             }
@@ -1740,7 +1762,11 @@ int sys_execve(const char* path, char* const argv[], char* const envp[]) {
                     return -1;
                 }
                 for (int k = 0; k < 1024; k++) ((uint32_t*)phys)[k] = 0;
-                map_page_pd(pd, page, (uint32_t)phys, 0x07);
+                if (map_page_pd(pd, page, (uint32_t)phys, 0x07) < 0) {
+                    pmm_free_page(phys);
+                    kfree(elf_buf);
+                    return -1;
+                }
             }
 
             uint32_t eflags = irq_save_disable();
@@ -1767,7 +1793,11 @@ int sys_execve(const char* path, char* const argv[], char* const envp[]) {
         return -1;
     }
     for (int k = 0; k < 1024; k++) ustack[k] = 0;
-    map_page_pd(pd, ustack_virt, (uint32_t)ustack, 0x07);
+    if (map_page_pd(pd, ustack_virt, (uint32_t)ustack, 0x07) < 0) {
+        pmm_free_page(ustack);
+        kfree(elf_buf);
+        return -1;
+    }
     cur->user_stack = (void*)ustack;
     cur->prog_break = (max_vaddr + 4095) & 0xFFFFF000;
 
