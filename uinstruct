@@ -8,4 +8,6 @@ wget [ip]/app.sos /bin/app.sos
 chmod 70 /bin/app.sos
 wget [ip]/paint.sos /bin/paint.sos
 chmod 70 /bin/paint.sos
+wget [ip]/files.sos /bin/files.sos
+chmod 70 /bin/files.sos
 wget [ip]/kernel.bin /kernel.bin
