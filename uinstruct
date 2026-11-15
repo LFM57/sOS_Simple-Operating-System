@@ -12,4 +12,6 @@ wget [ip]/files.sos /bin/files.sos
 chmod 70 /bin/files.sos
 wget [ip]/sysmon.sos /bin/sysmon.sos
 chmod 70 /bin/sysmon.sos
+wget [ip]/edit.sos /bin/edit.sos
+chmod 70 /bin/edit.sos
 wget [ip]/kernel.bin /kernel.bin
