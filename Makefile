@@ -75,6 +75,22 @@ drive.img: app.sos guidemo.sos kernel.bin
 	mcopy -i drive.img app.sos ::/bin/
 	mcopy -i drive.img guidemo.sos ::/bin/
 	
+	@echo "Setting /bin permissions (0x70, owner UID 0)..."
+	@python3 -c '\
+import struct;\
+f = open("drive.img", "r+b");\
+bpb = f.read(512);\
+bps, spc, res, fats = struct.unpack_from("<HBHB", bpb, 11);\
+spf, root = struct.unpack_from("<I4xI", bpb, 36);\
+fat0, data, csz = res * bps, (res + fats * spf) * bps, spc * bps;\
+walk = lambda c: [] if c < 2 or c >= 0x0FFFFFF8 else [c] + walk((f.seek(fat0 + c * 4), struct.unpack("<I", f.read(4))[0] & 0x0FFFFFFF)[1]);\
+rd = lambda c: [(data + (cl - 2) * csz, (f.seek(data + (cl - 2) * csz), f.read(csz))[1]) for cl in walk(c)];\
+wr = lambda p, v: (f.seek(p + 12), f.write(bytes([v])));\
+bin_c = [];\
+[(wr(base + o, 0x70), bin_c.append((struct.unpack_from("<H", buf, o + 20)[0] << 16) | struct.unpack_from("<H", buf, o + 26)[0])) for base, buf in rd(root) for o in range(0, csz, 32) if buf[o] not in (0, 0xE5) and buf[o + 11] != 0x0F and buf[o:o + 11] == b"BIN        "];\
+[wr(base + o, 0x70) for c in bin_c for base, buf in rd(c) for o in range(0, csz, 32) if buf[o] not in (0, 0xE5) and buf[o + 11] != 0x0F and (buf[o + 11] & 0x08) == 0 and buf[o:o + 11] != b"..         "];\
+f.close()'
+	
 	rm -f passwd
 
 # The ISO now acts ONLY as a GRUB bootloader. It searches the HDD for kernel.bin.
