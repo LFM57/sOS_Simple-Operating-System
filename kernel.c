@@ -3384,7 +3384,10 @@ static void execute_single_command(const char* cmd_str, int is_bg) {
 
         for (int i = 0; i < MAX_TASKS; i++) {
             if (tasks[i].state != 0) {
-                const char* type = (i == 0) ? "Shell" : ((i == IDLE_TASK_ID) ? "Idle" : (tasks[i].code_page == NULL ? "SysTask" : "UserApp"));
+                int is_user_app = (tasks[i].page_directory != NULL &&
+                                   tasks[i].page_directory != kernel_page_directory) ||
+                                  tasks[i].code_page != NULL;
+                const char* type = (i == 0) ? "Shell" : ((i == IDLE_TASK_ID) ? "Idle" : (is_user_app ? "UserApp" : "SysTask"));
                 const char* state = (tasks[i].state == 1) ? "RUNNING" : ((tasks[i].state == 3) ? "ZOMBIE" : ((tasks[i].state == 4) ? "BLOCKED" : "READY"));
                 const char* mode = tasks[i].is_background ? "bg" : "fg";
 
