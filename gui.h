@@ -108,6 +108,8 @@ void gui_destroy_windows_by_uid(uint8_t uid);
 window_t* gui_get_window(int win_id);
 window_t* gui_get_focused_window(void);
 void gui_focus_window(window_t* w);
+void gui_cycle_focus(void);
+void gui_close_focused_window(void);
 
 int gui_push_event(window_t* w, const gui_event_t* ev);
 int gui_pop_event(window_t* w, gui_event_t* out_ev);

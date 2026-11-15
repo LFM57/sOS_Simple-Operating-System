@@ -1036,6 +1036,29 @@ void keyboard_handler() {
             return;
         }
 
+        if (is_gui_mode && alt_active && scancode == 0x0F) {
+            /* Alt+Tab cycles focus across open windows */
+            gui_cycle_focus();
+            outb(0x20, 0x20);
+            return;
+        }
+
+        if (is_gui_mode && alt_active && scancode == 0x3E) {
+            /* Alt+F4 closes the focused window (minimizes built-in Terminal) */
+            gui_close_focused_window();
+            outb(0x20, 0x20);
+            return;
+        }
+
+        if (is_gui_mode && shift_active && (scancode == 0x49 || scancode == 0x51) &&
+            gui_terminal_window && (gui_terminal_window->flags & WIN_VISIBLE) &&
+            gui_get_focused_window() == gui_terminal_window) {
+            /* Shift+PageUp / Shift+PageDown scrolls Terminal history */
+            gui_terminal_scroll_page(scancode == 0x49 ? 1 : -1);
+            outb(0x20, 0x20);
+            return;
+        }
+
         if (is_gui_mode &&
             !(gui_terminal_window && (gui_terminal_window->flags & WIN_VISIBLE) &&
               gui_get_focused_window() == gui_terminal_window)) {

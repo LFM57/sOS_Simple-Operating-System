@@ -431,6 +431,202 @@ static void gui_term_draw_cursor(void) {
     term_cursor_drawn = 1;
 }
 
+/* --- GUI TERMINAL SCROLLBACK BUFFER (Phase 3.3) --- */
+#define TERM_SCROLLBACK_LINES 200
+#define TERM_MAX_COLS         160
+#define TERM_MAX_ROWS         80
+
+typedef struct {
+    char ch;
+    uint8_t attr;
+} term_sb_cell_t;
+
+static const uint32_t term_palette[10] = {
+    0x00000000, /* 0: Black */
+    0x00FF5555, /* 1: Red */
+    0x0055FF55, /* 2: Green */
+    0x00FFFF55, /* 3: Yellow */
+    0x005555FF, /* 4: Blue */
+    0x00FF55FF, /* 5: Magenta */
+    0x0055FFFF, /* 6: Cyan */
+    0x00AAAAAA, /* 7: Light Gray */
+    0x00FFFFFF, /* 8: White */
+    0x000000AA  /* 9: BSOD Blue */
+};
+
+static term_sb_cell_t term_sb[TERM_SCROLLBACK_LINES][TERM_MAX_COLS];
+static term_sb_cell_t term_render_view[TERM_MAX_ROWS][TERM_MAX_COLS];
+static int term_sb_head = 0;
+static int term_sb_count = 1;
+static int term_scroll_offset = 0;
+static volatile int term_scroll_pending_lines = 0;
+static volatile int term_scroll_pending_pages = 0;
+
+static uint8_t term_color_to_idx(uint32_t col, uint8_t fallback) {
+    for (uint8_t i = 0; i < 10; i++) {
+        if (term_palette[i] == col) return i;
+    }
+    return fallback;
+}
+
+static uint8_t term_current_attr(void) {
+    uint8_t fg = term_color_to_idx(term_fg_color, 8);
+    uint8_t bg = term_color_to_idx(term_bg_color, 0);
+    return (uint8_t)(((bg & 0x0F) << 4) | (fg & 0x0F));
+}
+
+static void term_sb_fill_row(int slot, uint8_t attr) {
+    for (int col = 0; col < TERM_MAX_COLS; col++) {
+        term_sb[slot][col].ch = ' ';
+        term_sb[slot][col].attr = attr;
+    }
+}
+
+static void term_sb_clear(void) {
+    uint32_t eflags = irq_save_disable();
+    term_sb_head = 0;
+    term_sb_count = 1;
+    term_scroll_offset = 0;
+    term_scroll_pending_lines = 0;
+    term_scroll_pending_pages = 0;
+    term_sb_fill_row(0, term_current_attr());
+    irq_restore(eflags);
+}
+
+static void term_sb_newline(void) {
+    uint32_t eflags = irq_save_disable();
+    if (term_sb_count < TERM_SCROLLBACK_LINES) {
+        term_sb_count++;
+    } else {
+        term_sb_head = (term_sb_head + 1) % TERM_SCROLLBACK_LINES;
+    }
+    int bottom_slot = (term_sb_head + term_sb_count - 1) % TERM_SCROLLBACK_LINES;
+    term_sb_fill_row(bottom_slot, term_current_attr());
+    irq_restore(eflags);
+}
+
+static void term_sb_put_cell(int logical_row, int col, char c) {
+    if (col < 0 || col >= TERM_MAX_COLS) return;
+    uint32_t eflags = irq_save_disable();
+    if (logical_row >= 0 && logical_row < term_sb_count) {
+        int slot = (term_sb_head + logical_row) % TERM_SCROLLBACK_LINES;
+        term_sb[slot][col].ch = c;
+        term_sb[slot][col].attr = term_current_attr();
+    }
+    irq_restore(eflags);
+}
+
+static void gui_term_redraw_from_scrollback(void) {
+    if (!gui_terminal_window || !gui_terminal_window->canvas) return;
+    int w = gui_terminal_window->width;
+    int h = gui_terminal_window->height;
+    uint32_t* canvas = gui_terminal_window->canvas;
+    int term_cols = w / 8;
+    int term_rows = h / 16;
+    if (term_cols < 1) term_cols = 1;
+    if (term_rows < 1) term_rows = 1;
+    int draw_cols = (term_cols < TERM_MAX_COLS) ? term_cols : TERM_MAX_COLS;
+    int max_vis_rows = (term_rows < TERM_MAX_ROWS) ? term_rows : TERM_MAX_ROWS;
+
+    uint32_t eflags = irq_save_disable();
+    int max_offset = (term_sb_count > term_rows) ? (term_sb_count - term_rows) : 0;
+    if (term_scroll_offset < 0) term_scroll_offset = 0;
+    if (term_scroll_offset > max_offset) term_scroll_offset = max_offset;
+    int offset_snap = term_scroll_offset;
+    int sb_count_snap = term_sb_count;
+    int view_start = (term_sb_count > term_rows) ? (term_sb_count - term_rows - term_scroll_offset) : 0;
+    int copy_rows = term_sb_count - view_start;
+    if (copy_rows > max_vis_rows) copy_rows = max_vis_rows;
+    for (int r = 0; r < copy_rows; r++) {
+        int slot = (term_sb_head + view_start + r) % TERM_SCROLLBACK_LINES;
+        for (int c = 0; c < draw_cols; c++) {
+            term_render_view[r][c] = term_sb[slot][c];
+        }
+    }
+    irq_restore(eflags);
+
+    term_cursor_drawn = 0;
+    fast_memset(canvas, term_bg_color, (uint32_t)w * (uint32_t)h);
+
+    for (int r = 0; r < copy_rows; r++) {
+        int py = r * 16;
+        for (int c = 0; c < draw_cols; c++) {
+            term_sb_cell_t cell = term_render_view[r][c];
+            uint32_t fg = term_palette[cell.attr & 0x0F];
+            uint32_t bg = term_palette[(cell.attr >> 4) & 0x0F];
+            if (cell.ch != ' ' || bg != term_bg_color) {
+                surface_draw_char(canvas, w, h, cell.ch, c * 8, py, fg, bg);
+            }
+        }
+    }
+
+    if (offset_snap > 0 && sb_count_snap > term_rows && w >= 6 && h >= 20) {
+        int sb_x = w - 4;
+        int track_h = h - 4;
+        int thumb_h = (term_rows * track_h) / sb_count_snap;
+        if (thumb_h < 16) thumb_h = 16;
+        if (thumb_h > track_h) thumb_h = track_h;
+        int max_off = sb_count_snap - term_rows;
+        int top_line = max_off - offset_snap;
+        int thumb_y = 2 + ((max_off > 0) ? ((track_h - thumb_h) * top_line) / max_off : 0);
+
+        for (int y = 2; y < 2 + track_h; y++) {
+            uint32_t col = (y >= thumb_y && y < thumb_y + thumb_h) ? 0x0064748B : 0x001E293B;
+            for (int dx = 0; dx < 3; dx++) {
+                canvas[y * w + sb_x + dx] = col;
+            }
+        }
+    }
+
+    if (offset_snap == 0) {
+        gui_term_draw_cursor();
+    }
+    gui_mark_window_dirty(gui_terminal_window, 0, 0, w, h);
+}
+
+void gui_terminal_scroll_lines(int delta_lines) {
+    if (!is_graphics_mode || !is_gui_mode || delta_lines == 0) return;
+    uint32_t eflags = irq_save_disable();
+    term_scroll_pending_lines += delta_lines;
+    irq_restore(eflags);
+    gui_mark_dirty(0);
+}
+
+void gui_terminal_scroll_page(int delta_pages) {
+    if (!is_graphics_mode || !is_gui_mode || delta_pages == 0) return;
+    uint32_t eflags = irq_save_disable();
+    term_scroll_pending_pages += delta_pages;
+    irq_restore(eflags);
+    gui_mark_dirty(0);
+}
+
+void gui_terminal_process_scroll(void) {
+    if (!is_graphics_mode || !is_gui_mode || !gui_terminal_window || !gui_terminal_window->canvas) return;
+    uint32_t eflags = irq_save_disable();
+    int d_lines = term_scroll_pending_lines;
+    int d_pages = term_scroll_pending_pages;
+    term_scroll_pending_lines = 0;
+    term_scroll_pending_pages = 0;
+    irq_restore(eflags);
+
+    if (d_lines == 0 && d_pages == 0) return;
+
+    int term_rows = gui_terminal_window->height / 16;
+    if (term_rows < 1) term_rows = 1;
+    int page_step = (term_rows > 2) ? (term_rows - 2) : 1;
+    int total_delta = d_lines + d_pages * page_step;
+
+    int max_offset = (term_sb_count > term_rows) ? (term_sb_count - term_rows) : 0;
+    int new_offset = term_scroll_offset + total_delta;
+    if (new_offset < 0) new_offset = 0;
+    if (new_offset > max_offset) new_offset = max_offset;
+
+    if (new_offset != term_scroll_offset) {
+        term_scroll_offset = new_offset;
+        gui_term_redraw_from_scrollback();
+    }
+}
+
 void gui_terminal_before_resize(void) {
     if (!is_graphics_mode || !is_gui_mode) return;
     gui_term_erase_cursor();
@@ -444,10 +640,10 @@ void gui_terminal_after_resize(void) {
     if (term_rows < 1) term_rows = 1;
     if (cursor_x >= term_cols) cursor_x = term_cols - 1;
     if (cursor_x < 0) cursor_x = 0;
+    term_scroll_offset = 0;
+    cursor_y = (term_sb_count <= term_rows) ? (term_sb_count - 1) : (term_rows - 1);
     if (cursor_y < 0) cursor_y = 0;
-    scroll();
-    if (cursor_y >= term_rows) cursor_y = term_rows - 1;
-    gui_term_draw_cursor();
+    gui_term_redraw_from_scrollback();
 }
 
 void write_vga(char c) {
@@ -460,6 +656,10 @@ void write_vga(char c) {
         if (is_graphics_mode) {
             if (is_gui_mode) {
                 if (!gui_terminal_window || !gui_terminal_window->canvas) return;
+                if (term_scroll_offset != 0) {
+                    term_scroll_offset = 0;
+                    gui_term_redraw_from_scrollback();
+                }
                 int had_cursor = term_cursor_drawn;
                 int prev_cx = last_term_cx;
                 int prev_cy = last_term_cy;
@@ -468,9 +668,17 @@ void write_vga(char c) {
                     gui_mark_window_dirty(gui_terminal_window, prev_cx * 8, prev_cy * 16 + 13, 8, 2);
                 }
                 int term_cols = gui_terminal_window->width / 8;
+                int term_rows = gui_terminal_window->height / 16;
+                if (term_cols < 1) term_cols = 1;
+                if (term_rows < 1) term_rows = 1;
+                int bottom_start = (term_sb_count > term_rows) ? (term_sb_count - term_rows) : 0;
+
                 if (c == '\n') {
                     cursor_x = 0;
                     cursor_y++;
+                    if (bottom_start + cursor_y >= term_sb_count) {
+                        term_sb_newline();
+                    }
                 } else if (c == '\b') {
                     if (cursor_x > 0) {
                         cursor_x--;
@@ -481,6 +689,7 @@ void write_vga(char c) {
                 } else if (c == '\r') {
                     cursor_x = 0;
                 } else {
+                    term_sb_put_cell(bottom_start + cursor_y, cursor_x, c);
                     surface_draw_char(gui_terminal_window->canvas,
                                       gui_terminal_window->width,
                                       gui_terminal_window->height,
@@ -488,7 +697,13 @@ void write_vga(char c) {
                                       term_fg_color, term_bg_color);
                     gui_mark_window_dirty(gui_terminal_window, cursor_x * 8, cursor_y * 16, 8, 16);
                     cursor_x++;
-                    if (cursor_x >= term_cols) { cursor_x = 0; cursor_y++; }
+                    if (cursor_x >= term_cols) {
+                        cursor_x = 0;
+                        cursor_y++;
+                        if (bottom_start + cursor_y >= term_sb_count) {
+                            term_sb_newline();
+                        }
+                    }
                 }
                 scroll();
                 gui_term_draw_cursor();
@@ -656,6 +871,7 @@ void clear_terminal(void) {
     if (is_graphics_mode) {
         if (is_gui_mode) {
             term_cursor_drawn = 0;
+            term_sb_clear();
             if (gui_terminal_window && gui_terminal_window->canvas) {
                 fast_memset(gui_terminal_window->canvas, term_bg_color,
                             (uint32_t)gui_terminal_window->width * (uint32_t)gui_terminal_window->height);

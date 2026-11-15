@@ -792,6 +792,60 @@ void gui_focus_window(window_t* w) {
     wake_up(&gui_wait_queue);
 }
 
+void gui_cycle_focus(void) {
+    if (!is_graphics_mode || !is_gui_mode || is_gui_login || is_gui_locked) return;
+    uint32_t eflags = irq_save_disable();
+    int shown_count = 0;
+    int top_idx = -1;
+    for (int i = 0; i < window_count; i++) {
+        if (is_window_shown(z_order[i])) {
+            shown_count++;
+            top_idx = i;
+        }
+    }
+
+    if (shown_count >= 2 && top_idx > 0) {
+        window_t* old_top = z_order[top_idx];
+        for (int i = top_idx; i > 0; i--) {
+            z_order[i] = z_order[i - 1];
+        }
+        z_order[0] = old_top;
+        window_t* new_top = gui_get_focused_window();
+        if (old_top) gui_dirty_window_frame_locked(old_top);
+        if (new_top) gui_dirty_window_frame_locked(new_top);
+        gui_dirty_taskbar_locked();
+        gui_dirty = 1;
+    } else {
+        int min_idx = -1;
+        for (int i = 0; i < window_count; i++) {
+            window_t* w = z_order[i];
+            if (w && w->is_used && !is_window_shown(w) && (w->flags & WIN_MINIMIZED)) {
+                min_idx = i;
+                break;
+            }
+        }
+        if (min_idx != -1) {
+            window_t* prev_top = gui_get_focused_window();
+            window_t* target = z_order[min_idx];
+            target->flags |= WIN_VISIBLE;
+            target->flags &= ~WIN_MINIMIZED;
+            for (int i = min_idx; i < window_count - 1; i++) {
+                z_order[i] = z_order[i + 1];
+            }
+            z_order[window_count - 1] = target;
+            if (prev_top && prev_top != target) {
+                gui_dirty_window_frame_locked(prev_top);
+            }
+            gui_dirty_window_frame_locked(target);
+            gui_dirty_taskbar_locked();
+            gui_dirty = 1;
+        }
+    }
+
+    irq_restore(eflags);
+    wake_up(&gui_wait_queue);
+}
+
 int gui_push_event(window_t* w, const gui_event_t* ev) {
     if (!w || !w->is_used || !ev) return 0;
     uint32_t eflags = irq_save_disable();
@@ -1429,6 +1483,20 @@ static void gui_toggle_taskbar_window(window_t* w) {
     }
 }
 
+void gui_close_focused_window(void) {
+    if (!is_graphics_mode || !is_gui_mode || is_gui_login || is_gui_locked) return;
+    window_t* top = gui_get_focused_window();
+    if (!top) return;
+    if (top == gui_terminal_window) {
+        gui_minimize_window(top);
+    } else {
+        gui_event_t ev = {0};
+        ev.type = GUI_EVENT_WINDOW_CLOSE;
+        ev.button = 1;
+        gui_push_event(top, &ev);
+    }
+}
+
 static void dirty_resize_preview_outline(int cx, int cy, int cw, int ch) {
     int fx = cx - 2;
     int fy = cy - TITLEBAR_HEIGHT - 2;
@@ -1683,7 +1751,7 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons, int dz) {
     }
 
     if (dz != 0 && !resizing_window && !dragging_window &&
-        !power_menu_open && ctx_menu_type == CTX_MENU_NONE &&
+        !start_menu_open && !power_menu_open && ctx_menu_type == CTX_MENU_NONE &&
         my < (int)g_height - TASKBAR_HEIGHT) {
         for (int i = window_count - 1; i >= 0; i--) {
             window_t* w = z_order[i];
@@ -1693,13 +1761,17 @@ static void handle_mouse_step(int mx, int my, uint8_t buttons, int dz) {
             if (mx >= fx && mx < fx + fw && my >= fy && my < fy + fh) {
                 if (mx >= w->x && mx < w->x + w->width &&
                     my >= w->y && my < w->y + w->height) {
-                    gui_event_t ev = {0};
-                    ev.type = GUI_EVENT_MOUSE_SCROLL;
-                    ev.x = mx - w->x;
-                    ev.y = my - w->y;
-                    ev.button = buttons;
-                    ev.dz = dz;
-                    gui_push_event(w, &ev);
+                    if (w == gui_terminal_window) {
+                        gui_terminal_scroll_lines(-dz * 3);
+                    } else {
+                        gui_event_t ev = {0};
+                        ev.type = GUI_EVENT_MOUSE_SCROLL;
+                        ev.x = mx - w->x;
+                        ev.y = my - w->y;
+                        ev.button = buttons;
+                        ev.dz = dz;
+                        gui_push_event(w, &ev);
+                    }
                 }
                 break;
             }
@@ -2656,6 +2728,8 @@ static void render_desktop_region(int rx, int ry, int rw, int rh, window_t* focu
 
 void gui_render(void) {
     if (!is_graphics_mode || !is_gui_mode) return;
+
+    gui_terminal_process_scroll();
 
     gui_rect_t rects[MAX_DIRTY_RECTS];
     int rects_count = 0;
